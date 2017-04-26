@@ -270,7 +270,7 @@ target_link_libraries(torrent-rasterbar ${Boost_LIBRARIES} ${CMAKE_THREAD_LIBS_I
 
 if (WIN32)
 	target_link_libraries(torrent-rasterbar wsock32 ws2_32 Iphlpapi)
-	add_definitions(-D_WIN32_WINNT=0x0600)
+	#add_definitions(-D_WIN32_WINNT=0x0600)
 	# prevent winsock1 to be included
 	add_definitions(-DWIN32_LEAN_AND_MEAN)
 	if (MSVC)
