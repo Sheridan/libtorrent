@@ -606,10 +606,14 @@ include_directories(${Boost_INCLUDE_DIRS})
 target_link_libraries(torrent-rasterbar ${Boost_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT})
 
 if (WIN32)
+	message( ${CMAKE_SYSTEM_VERSION} )
 	target_link_libraries(torrent-rasterbar wsock32 ws2_32 Iphlpapi)
-	# target Windows Vista or later
-	target_compile_definitions(torrent-rasterbar PUBLIC _WIN32_WINNT=0x0600)
-	target_link_libraries(torrent-rasterbar debug dbghelp)
+	if( ${CMAKE_SYSTEM_VERSION} GREATER 5.9 )
+		add_definitions(-D_WIN32_WINNT=0x0600)
+	else()
+		message("Windows XP")
+		add_definitions(-D_WIN32_WINNT=0x0501)
+	endif()
 	# prevent winsock1 to be included
 	target_compile_definitions(torrent-rasterbar PUBLIC WIN32_LEAN_AND_MEAN)
 	if (MSVC)
