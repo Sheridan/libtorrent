@@ -299,7 +299,7 @@ if (WIN32)
 		add_definitions(-D_WIN32_WINNT=0x0600)
 	else()
 		message("Windows XP")
-		add_definitions(-D_WIN32_WINNT=0x0501)	
+		add_definitions(-D_WIN32_WINNT=0x0501)
 	endif()
 	# prevent winsock1 to be included
 	add_definitions(-DWIN32_LEAN_AND_MEAN)
