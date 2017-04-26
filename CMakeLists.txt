@@ -293,8 +293,14 @@ target_link_libraries(torrent-rasterbar ${Boost_LIBRARIES} ${CMAKE_THREAD_LIBS_I
 add_definitions(-DBOOST_ASIO_HAS_STD_CHRONO=1 )
 
 if (WIN32)
+	message( ${CMAKE_SYSTEM_VERSION} )
 	target_link_libraries(torrent-rasterbar wsock32 ws2_32 Iphlpapi)
-	#add_definitions(-D_WIN32_WINNT=0x0600)
+	if( ${CMAKE_SYSTEM_VERSION} GREATER 5.9 )
+		add_definitions(-D_WIN32_WINNT=0x0600)
+	else()
+		message("Windows XP")
+		add_definitions(-D_WIN32_WINNT=0x0501)	
+	endif()
 	# prevent winsock1 to be included
 	add_definitions(-DWIN32_LEAN_AND_MEAN)
 	if (MSVC)
