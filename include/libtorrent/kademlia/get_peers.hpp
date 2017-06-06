@@ -35,16 +35,15 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #include <libtorrent/kademlia/find_data.hpp>
 
-namespace libtorrent { namespace dht
-{
+namespace libtorrent { namespace dht {
 
 struct get_peers : find_data
 {
-	typedef boost::function<void(std::vector<tcp::endpoint> const&)> data_callback;
+	typedef std::function<void(std::vector<tcp::endpoint> const&)> data_callback;
 
 	void got_peers(std::vector<tcp::endpoint> const& peers);
 
-	get_peers(node& dht_node, node_id target
+	get_peers(node& dht_node, node_id const& target
 		, data_callback const& dcallback
 		, nodes_callback const& ncallback
 		, bool noseeds);
@@ -53,7 +52,8 @@ struct get_peers : find_data
 
 protected:
 	virtual bool invoke(observer_ptr o);
-	virtual observer_ptr new_observer(void* ptr, udp::endpoint const& ep, node_id const& id);
+	virtual observer_ptr new_observer(udp::endpoint const& ep
+		, node_id const& id);
 
 	data_callback m_data_callback;
 	bool m_noseeds;
@@ -63,7 +63,7 @@ struct obfuscated_get_peers : get_peers
 {
 	typedef get_peers::nodes_callback done_callback;
 
-	obfuscated_get_peers(node& dht_node, node_id target
+	obfuscated_get_peers(node& dht_node, node_id const& target
 		, data_callback const& dcallback
 		, nodes_callback const& ncallback
 		, bool noseeds);
@@ -72,7 +72,7 @@ struct obfuscated_get_peers : get_peers
 
 protected:
 
-	virtual observer_ptr new_observer(void* ptr, udp::endpoint const& ep,
+	virtual observer_ptr new_observer(udp::endpoint const& ep,
 		node_id const& id);
 	virtual bool invoke(observer_ptr o);
 	virtual void done();
@@ -85,18 +85,22 @@ private:
 struct get_peers_observer : find_data_observer
 {
 	get_peers_observer(
-		boost::intrusive_ptr<traversal_algorithm> const& algorithm
+		std::shared_ptr<traversal_algorithm> const& algorithm
 		, udp::endpoint const& ep, node_id const& id)
 		: find_data_observer(algorithm, ep, id)
 	{}
 
 	virtual void reply(msg const&);
+#ifndef TORRENT_DISABLE_LOGGING
+private:
+	void log_peers(msg const& m, bdecode_node const& r, int const size) const;
+#endif
 };
 
 struct obfuscated_get_peers_observer : traversal_observer
 {
 	obfuscated_get_peers_observer(
-		boost::intrusive_ptr<traversal_algorithm> const& algorithm
+		std::shared_ptr<traversal_algorithm> const& algorithm
 		, udp::endpoint const& ep, node_id const& id)
 		: traversal_observer(algorithm, ep, id)
 	{}

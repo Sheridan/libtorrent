@@ -37,8 +37,8 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <vector>
 #include <string>
 
-namespace
-{
+namespace {
+
 	enum
 	{
 		FTEXT = 0x01,
@@ -54,13 +54,13 @@ namespace
 
 }
 
-namespace libtorrent
-{
+namespace libtorrent {
+
 	struct gzip_error_category : boost::system::error_category
 	{
-		virtual const char* name() const BOOST_SYSTEM_NOEXCEPT;
-		virtual std::string message(int ev) const BOOST_SYSTEM_NOEXCEPT;
-		virtual boost::system::error_condition default_error_condition(int ev) const BOOST_SYSTEM_NOEXCEPT
+		const char* name() const BOOST_SYSTEM_NOEXCEPT override;
+		std::string message(int ev) const BOOST_SYSTEM_NOEXCEPT override;
+		boost::system::error_condition default_error_condition(int ev) const BOOST_SYSTEM_NOEXCEPT override
 		{ return boost::system::error_condition(ev, *this); }
 	};
 
@@ -101,11 +101,6 @@ namespace libtorrent
 		return category;
 	}
 
-#ifndef TORRENT_NO_DEPRECATE
-	boost::system::error_category& get_gzip_category()
-	{ return gzip_category(); }
-#endif
-
 	namespace gzip_errors
 	{
 		boost::system::error_code make_error_code(error_code_enum e)
@@ -114,12 +109,12 @@ namespace libtorrent
 		}
 	}
 
-	namespace
-	{
+namespace {
+
 	// returns -1 if gzip header is invalid or the header size in bytes
 	int gzip_header(const char* buf, int size)
 	{
-		TORRENT_ASSERT(buf != 0);
+		TORRENT_ASSERT(buf != nullptr);
 
 		const unsigned char* buffer = reinterpret_cast<const unsigned char*>(buf);
 		const int total_size = size;
@@ -127,7 +122,7 @@ namespace libtorrent
 		// gzip is defined in https://tools.ietf.org/html/rfc1952
 
 		// The zip header cannot be shorter than 10 bytes
-		if (size < 10 || buf == 0) return -1;
+		if (size < 10 || buf == nullptr) return -1;
 
 		// check the magic header of gzip
 		if ((buffer[0] != GZIP_MAGIC0) || (buffer[1] != GZIP_MAGIC1)) return -1;
@@ -219,14 +214,14 @@ namespace libtorrent
 		// if needed
 		unsigned long destlen = 4096;
 		int ret = 0;
-		unsigned long srclen = size - header_len;
+		unsigned long srclen = std::uint32_t(size - header_len);
 		in += header_len;
 
 		do
 		{
 			TORRENT_TRY {
 				buffer.resize(destlen);
-			} TORRENT_CATCH(std::exception&) {
+			} TORRENT_CATCH (std::exception const&) {
 				ec = errors::no_memory;
 				return;
 			}
@@ -239,15 +234,15 @@ namespace libtorrent
 			// case we fail
 			if (ret == 1) // 1:  output space exhausted before completing inflate
 			{
-				if (destlen == boost::uint32_t(maximum_size))
+				if (destlen == std::uint32_t(maximum_size))
 				{
 					ec = gzip_errors::inflated_data_too_large;
 					return;
 				}
 
 				destlen *= 2;
-				if (destlen > boost::uint32_t(maximum_size))
-					destlen = maximum_size;
+				if (destlen > std::uint32_t(maximum_size))
+					destlen = std::uint32_t(maximum_size);
 			}
 		} while (ret == 1);
 

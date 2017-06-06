@@ -1,7 +1,10 @@
-cmake_minimum_required(VERSION 2.6)
+cmake_minimum_required(VERSION 3.1.0 FATAL_ERROR)
+
 project(libtorrent)
-set (SOVERSION "8")
-set (VERSION "1.1.3")
+set (SOVERSION "10")
+set (VERSION "1.2.0")
+
+list(APPEND CMAKE_MODULE_PATH ${libtorrent_SOURCE_DIR}/cmake/Modules)
 
 set(sources
 	web_connection_base
@@ -32,6 +35,7 @@ set(sources
 	escape_string
 	string_util
 	file
+	path
 	fingerprint
 	gzip
 	hasher
@@ -42,6 +46,7 @@ set(sources
 	i2p_stream
 	identify_client
 	ip_filter
+	ip_notifier
 	ip_voter
 	performance_counters
 	peer_class
@@ -63,10 +68,11 @@ set(sources
 	puff
 	random
 	receive_buffer
+	read_resume_data
+	write_resume_data
 	request_blocks
 	resolve_links
 	resolver
-	rss
 	session
 	session_call
 	session_handle
@@ -75,12 +81,15 @@ set(sources
 	proxy_settings
 	session_stats
 	settings_pack
+	sha1_hash
 	socket_io
 	socket_type
 	socks5_stream
 	stat
 	stat_cache
 	storage
+	storage_piece_set
+	storage_utils
 	time
 	timestamp_history
 	torrent
@@ -100,28 +109,29 @@ set(sources
 	file_pool
 	lsd
 	disk_io_job
+	disk_job_fence
 	disk_job_pool
 	disk_buffer_pool
 	disk_io_thread
+	disk_io_thread_pool
 	enum_net
 	broadcast_socket
 	magnet_uri
 	parse_url
 	ConvertUTF
-	thread
 	xml_parse
 	version
+	ffs
 
 # -- extensions --
-	metadata_transfer
 	ut_pex
 	ut_metadata
 	smart_ban
-	lt_trackers
 )
 
 # -- kademlia --
 set(kademlia_sources
+	dht_state
 	dht_storage
 	dos_blocker
 	dht_tracker
@@ -138,6 +148,7 @@ set(kademlia_sources
 	item
 	get_peers
 	get_item
+	ed25519
 )
 
 # -- ed25519 --
@@ -148,8 +159,6 @@ set(ed25519_sources
 	key_exchange
 	keypair
 	sc
-	seed
-	sha512
 	sign
 	verify
 )
@@ -158,15 +167,15 @@ set(includes include ed25519/src)
 
 option(shared "build libtorrent as a shared library" ON)
 option(static_runtime "build libtorrent with static runtime" OFF)
-option(tcmalloc "link against google performance tools tcmalloc" OFF)
 option(pool-allocators "Uses a pool allocator for disk and piece buffers" ON)
 option(encryption "link against openssl and enable encryption" ON)
 option(dht "enable support for Mainline DHT" ON)
-option(resolve-countries "enable support for resolving countries from peer IPs" ON)
 option(unicode "enable unicode support" ON)
 option(deprecated-functions "enable deprecated functions for backwards compatibility" ON)
+option(disk-stats "enable disk activity logging feature" OFF)
 option(exceptions "build with exception support" ON)
-option(logging "build with logging" OFF)
+option(libiconv "enable linking against system libiconv" OFF)
+option(logging "build with logging" ON)
 option(build_tests "build tests" OFF)
 
 set(CMAKE_CONFIGURATION_TYPES Debug Release RelWithDebInfo)
@@ -193,17 +202,29 @@ find_package(Threads REQUIRED)
 include_directories(${includes})
 
 add_definitions(-DTORRENT_BUILDING_LIBRARY)
+if (disk-stats)
+	add_definitions(-DTORRENT_DISK_STATS)
+endif (disk-stats)
+
+if (libiconv)
+	find_package(Iconv REQUIRED)
+	add_definitions(-DTORRENT_USE_ICONV)
+	include_directories(SYSTEM ${ICONV_INCLUDE_DIR})
+endif (libiconv)
 
 if (encryption)
-	list(APPEND sources mpi pe_crypto)
+	list(APPEND sources pe_crypto)
 	if(NOT DEFINED OPENSSL_INCLUDE_DIR OR NOT DEFINED OPENSSL_LIBRARIES)
 		FIND_PACKAGE(OpenSSL REQUIRED)
 	endif()
 	add_definitions(-DTORRENT_USE_OPENSSL)
+	add_definitions(-DTORRENT_USE_LIBCRYPTO)
 	include_directories(${OPENSSL_INCLUDE_DIR})
 else()
 	add_definitions(-DTORRENT_DISABLE_ENCRYPTION)
-	list(APPEND sources sha1)
+	if (NOT WIN32 AND NOT APPLE)
+		list(APPEND sources sha1)
+	endif()
 endif (encryption)
 
 if (NOT logging)
@@ -221,6 +242,10 @@ if (dht)
 	foreach(s ${ed25519_sources})
 		list(APPEND sources2 ed25519/src/${s})
 	endforeach(s)
+	list(APPEND sources2 src/hasher512)
+	if (NOT encryption AND NOT WIN32 AND NOT APPLE)
+		list(APPEND sources2 src/sha512)
+	endif()
 else()
 	add_definitions(-DTORRENT_DISABLE_DHT)
 endif()
@@ -260,13 +285,12 @@ endif()
 
 # Boost
 if(NOT DEFINED Boost_INCLUDE_DIR OR NOT DEFINED Boost_LIBRARIES)
-	FIND_PACKAGE(Boost REQUIRED COMPONENTS system chrono random)
+	FIND_PACKAGE(Boost REQUIRED COMPONENTS system)
 endif()
 include_directories(${Boost_INCLUDE_DIRS})
 target_link_libraries(torrent-rasterbar ${Boost_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT})
 
-# this works around a bug in asio in boost-1.39
-#add_definitions(-DBOOST_ASIO_HASH_MAP_BUCKETS=1021  -D__USE_W32_SOCKETS -DWIN32_LEAN_AND_MEAN )
+add_definitions(-DBOOST_ASIO_HAS_STD_CHRONO=1 )
 
 if (WIN32)
 	message( ${CMAKE_SYSTEM_VERSION} )
@@ -285,16 +309,21 @@ if (WIN32)
 	endif()
 endif()
 
+if(APPLE)
+	# for ip_notifier
+	target_link_libraries(torrent-rasterbar "-framework CoreFoundation" "-framework SystemConfiguration")
+endif (APPLE)
+
 if (encryption)
 	target_link_libraries(torrent-rasterbar ${OPENSSL_LIBRARIES})
 endif()
 
+if (libiconv)
+	target_link_libraries(torrent-rasterbar ${ICONV_LIBRARIES})
+endif (libiconv)
+
 if (NOT pool-allocators)
 	add_definitions(-DTORRENT_DISABLE_POOL_ALLOCATOR)
-endif()
-
-if (NOT resolve-countries)
-	add_definitions(-DTORRENT_DISABLE_RESOLVE_COUNTRIES)
 endif()
 
 if (unicode)
@@ -330,20 +359,20 @@ if (MSVC)
 #$(SolutionDir)<toolset>msvc,<variant>release:<linkflags>/OPT:ICF=5
 #$(SolutionDir)<toolset>msvc,<variant>release:<linkflags>/OPT:REF
 elseif ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang")
-	add_definitions(-Wno-c++11-extensions)
 	add_definitions(-fcolor-diagnostics)
 endif()
 
 add_definitions(-D_FILE_OFFSET_BITS=64)
 add_definitions(-DBOOST_EXCEPTION_DISABLE)
 add_definitions(-DBOOST_ASIO_ENABLE_CANCELIO)
-
-if (tcmalloc)
-	target_link_libraries(torrent-rasterbar tcmalloc)
-endif()
+add_definitions(-DBOOST_ASIO_HAS_STD_CHRONO)
 
 set_target_properties(torrent-rasterbar PROPERTIES
 	SOVERSION ${SOVERSION})
+
+# libtorrent requires at least C++11
+set_property(TARGET torrent-rasterbar PROPERTY CXX_STANDARD 11)
+set_property(TARGET torrent-rasterbar PROPERTY CXX_STANDARD_REQUIRED ON)
 
 get_property (COMPILETIME_OPTIONS_LIST
 	DIRECTORY ${CMAKE_CURRENT_SOURCE_DIRECTORY}
@@ -383,16 +412,20 @@ if(build_tests)
 	add_library(test_common OBJECT test/main.cpp test/test.cpp
 		test/setup_transfer.cpp test/dht_server.cpp test/udp_tracker.cpp
 		test/peer_server.cpp test/web_seed_suite.cpp test/swarm_suite.cpp
-		test/test_utils.cpp)
+		test/test_utils.cpp test/make_torrent.hpp test/make_torrent.cpp
+		test/settings.hpp test/settings.cpp)
+		set_target_properties(test_common PROPERTIES CXX_STANDARD 11 CXX_STANDARD_REQUIRED ON)
 	enable_testing()
 
 	foreach(s ${tests})
 		get_filename_component (sn ${s} NAME_WE)
 		add_executable(${sn} ${s} $<TARGET_OBJECTS:test_common>)
 		target_link_libraries(${sn} torrent-rasterbar)
+		set_target_properties(${sn} PROPERTIES CXX_STANDARD 11 CXX_STANDARD_REQUIRED ON)
 		add_test(${sn} ${s})
 	endforeach(s)
 
 	add_executable(bdecode_benchmark test/bdecode_benchmark.cpp)
 	target_link_libraries(bdecode_benchmark torrent-rasterbar)
+	set_target_properties(bdecode_benchmark PROPERTIES CXX_STANDARD 11 CXX_STANDARD_REQUIRED ON)
 endif()

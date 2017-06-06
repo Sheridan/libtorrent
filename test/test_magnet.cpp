@@ -38,11 +38,13 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/bencode.hpp"
 #include "libtorrent/torrent_info.hpp" // for announce_entry
 #include "libtorrent/announce_entry.hpp"
+#include "libtorrent/hex.hpp" // to_hex
 #include "settings.hpp"
 
 using namespace libtorrent;
 namespace lt = libtorrent;
 
+#ifndef TORRENT_NO_DEPRECATE
 void test_remove_url(std::string url)
 {
 	lt::session s(settings());
@@ -70,6 +72,7 @@ TORRENT_TEST(remove_url2)
 {
 	test_remove_url("http://non-existent.com/test.torrent");
 }
+#endif
 
 TORRENT_TEST(magnet)
 {
@@ -88,7 +91,7 @@ TORRENT_TEST(magnet)
 	pack.set_bool(settings_pack::close_redundant_connections, false);
 	pack.set_int(settings_pack::auto_scrape_interval, 235);
 	pack.set_int(settings_pack::auto_scrape_min_interval, 62);
-	boost::scoped_ptr<lt::session> s(new lt::session(pack));
+	std::unique_ptr<lt::session> s(new lt::session(pack));
 
 	TEST_EQUAL(pack.get_str(settings_pack::user_agent), "test");
 	TEST_EQUAL(pack.get_int(settings_pack::tracker_receive_timeout), 1234);
@@ -108,20 +111,23 @@ TORRENT_TEST(magnet)
 	s->save_state(session_state);
 
 	// test magnet link parsing
-	add_torrent_params p;
-	p.flags &= ~add_torrent_params::flag_paused;
-	p.flags &= ~add_torrent_params::flag_auto_managed;
-	p.save_path = ".";
+	add_torrent_params model;
+	model.flags &= ~add_torrent_params::flag_paused;
+	model.flags &= ~add_torrent_params::flag_auto_managed;
+	model.save_path = ".";
 	error_code ec;
-	p.url = "magnet:?xt=urn:btih:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+	add_torrent_params p = model;
+	parse_magnet_uri("magnet:?xt=urn:btih:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
 		"&tr=http://1"
 		"&tr=http://2"
 		"&tr=http://3"
+		"&tr=http://3"
 		"&dn=foo"
-		"&dht=127.0.0.1:43";
+		"&dht=127.0.0.1:43", p, ec);
+	TEST_CHECK(!ec);
 	torrent_handle t = s->add_torrent(p, ec);
 	TEST_CHECK(!ec);
-	if (ec) fprintf(stderr, "%s\n", ec.message().c_str());
+	if (ec) std::printf("%s\n", ec.message().c_str());
 
 	std::vector<announce_entry> trackers = t.trackers();
 	TEST_EQUAL(trackers.size(), 3);
@@ -134,30 +140,34 @@ TORRENT_TEST(magnet)
 	TEST_CHECK(trackers_set.count("http://2") == 1);
 	TEST_CHECK(trackers_set.count("http://3") == 1);
 
-	p.url = "magnet:"
+	p = model;
+	parse_magnet_uri("magnet:"
 		"?tr=http://1"
 		"&tr=http://2"
 		"&dn=foo"
 		"&dht=127.0.0.1:43"
-		"&xt=urn:btih:c352cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd";
+		"&xt=urn:btih:c352cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd", p, ec);
+	TEST_CHECK(!ec);
 	torrent_handle t2 = s->add_torrent(p, ec);
 	TEST_CHECK(!ec);
-	if (ec) fprintf(stderr, "%s\n", ec.message().c_str());
+	if (ec) std::printf("%s\n", ec.message().c_str());
 
 	trackers = t2.trackers();
 	TEST_EQUAL(trackers.size(), 2);
 	TEST_EQUAL(trackers[0].tier, 0);
 	TEST_EQUAL(trackers[1].tier, 1);
 
-	p.url = "magnet:"
+	p = model;
+	parse_magnet_uri("magnet:"
 		"?tr=udp%3A%2F%2Ftracker.openbittorrent.com%3A80"
 		"&tr=udp%3A%2F%2Ftracker.publicbt.com%3A80"
 		"&tr=udp%3A%2F%2Ftracker.ccc.de%3A80"
 		"&xt=urn:btih:a38d02c287893842a32825aa866e00828a318f07"
-		"&dn=Ubuntu+11.04+%28Final%29";
+		"&dn=Ubuntu+11.04+%28Final%29", p, ec);
+	TEST_CHECK(!ec);
 	torrent_handle t3 = s->add_torrent(p, ec);
 	TEST_CHECK(!ec);
-	if (ec) fprintf(stderr, "%s\n", ec.message().c_str());
+	if (ec) std::printf("%s\n", ec.message().c_str());
 
 	trackers = t3.trackers();
 	TEST_EQUAL(trackers.size(), 3);
@@ -165,22 +175,23 @@ TORRENT_TEST(magnet)
 	{
 		TEST_EQUAL(trackers[0].url, "udp://tracker.openbittorrent.com:80");
 		TEST_EQUAL(trackers[0].tier, 0);
-		fprintf(stderr, "1: %s\n", trackers[0].url.c_str());
+		std::printf("1: %s\n", trackers[0].url.c_str());
 	}
 	if (trackers.size() > 1)
 	{
 		TEST_EQUAL(trackers[1].url, "udp://tracker.publicbt.com:80");
 		TEST_EQUAL(trackers[1].tier, 1);
-		fprintf(stderr, "2: %s\n", trackers[1].url.c_str());
+		std::printf("2: %s\n", trackers[1].url.c_str());
 	}
 	if (trackers.size() > 2)
 	{
 		TEST_EQUAL(trackers[2].url, "udp://tracker.ccc.de:80");
 		TEST_EQUAL(trackers[2].tier, 2);
-		fprintf(stderr, "3: %s\n", trackers[2].url.c_str());
+		std::printf("3: %s\n", trackers[2].url.c_str());
 	}
 
-	TEST_EQUAL(to_hex(t.info_hash().to_string()), "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd");
+	sha1_hash const ih = t.info_hash();
+	TEST_EQUAL(aux::to_hex(ih), "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd");
 
 	p1 = s->abort();
 	s.reset(new lt::session(settings()));
@@ -191,15 +202,15 @@ TORRENT_TEST(magnet)
 	int ret = bdecode(&buf[0], &buf[0] + buf.size(), session_state2, ec);
 	TEST_CHECK(ret == 0);
 
-	fprintf(stderr, "session_state\n%s\n", print_entry(session_state2).c_str());
+	std::printf("session_state\n%s\n", print_entry(session_state2).c_str());
 
 	// make sure settings that haven't been changed from their defaults are not saved
-	TEST_CHECK(session_state2.dict_find("settings")
-		.dict_find("optimistic_disk_retry") == 0);
+	TEST_CHECK(!session_state2.dict_find("settings")
+		.dict_find("optimistic_disk_retry"));
 
 	s->load_state(session_state2);
 
-#define CMP_SET(x) fprintf(stderr, #x ": %d %d\n"\
+#define CMP_SET(x) std::printf(#x ": %d %d\n"\
 	, s->get_settings().get_int(settings_pack:: x)\
 	, pack.get_int(settings_pack:: x)); \
 	TEST_EQUAL(s->get_settings().get_int(settings_pack:: x), pack.get_int(settings_pack:: x))
@@ -239,7 +250,8 @@ TORRENT_TEST(parse_web_seeds)
 	// parse_magnet_uri
 	error_code ec;
 	add_torrent_params p;
-	parse_magnet_uri("magnet:?xt=urn:btih:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd&ws=http://foo.com/bar&ws=http://bar.com/foo", p, ec);
+	parse_magnet_uri("magnet:?xt=urn:btih:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+		"&ws=http://foo.com/bar&ws=http://bar.com/foo", p, ec);
 	TEST_CHECK(!ec);
 	TEST_EQUAL(p.url_seeds.size(), 2);
 	TEST_EQUAL(p.url_seeds[0], "http://foo.com/bar");
@@ -285,16 +297,20 @@ TORRENT_TEST(parse_space_hash)
 
 TORRENT_TEST(parse_peer)
 {
-	std::vector<tcp::endpoint> peers;
-	parse_magnet_uri_peers("magnet:?xt=urn:btih:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd&dn=foo&x.pe=127.0.0.1:43&x.pe=<invalid1>&x.pe=<invalid2>:100&x.pe=[::1]:45", peers);
+	error_code ec;
+	add_torrent_params p;
+	parse_magnet_uri("magnet:?xt=urn:btih:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+		"&dn=foo&x.pe=127.0.0.1:43&x.pe=<invalid1>&x.pe=<invalid2>:100&x.pe=[::1]:45", p, ec);
+	TEST_CHECK(!ec);
 #if TORRENT_USE_IPV6
-	TEST_EQUAL(peers.size(), 2);
-	TEST_EQUAL(peers[0], ep("127.0.0.1", 43));
-	TEST_EQUAL(peers[1], ep("::1", 45));
+	TEST_EQUAL(p.peers.size(), 2);
+	TEST_EQUAL(p.peers[0], ep("127.0.0.1", 43));
+	TEST_EQUAL(p.peers[1], ep("::1", 45));
 #else
-	TEST_EQUAL(peers.size(), 1);
-	TEST_EQUAL(peers[0], ep("127.0.0.1", 43));
+	TEST_EQUAL(p.peers.size(), 1);
+	TEST_EQUAL(p.peers[0], ep("127.0.0.1", 43));
 #endif
+	ec.clear();
 }
 
 #ifndef TORRENT_DISABLE_DHT
@@ -302,14 +318,18 @@ TORRENT_TEST(parse_dht_node)
 {
 	error_code ec;
 	add_torrent_params p;
-	parse_magnet_uri("magnet:?xt=urn:btih:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd&dn=foo&dht=127.0.0.1:43", p, ec);
+	parse_magnet_uri("magnet:?xt=urn:btih:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+		"&dn=foo&dht=127.0.0.1:43&dht=10.0.0.1:1337", p, ec);
 	TEST_CHECK(!ec);
-	if (ec) fprintf(stderr, "%s\n", ec.message().c_str());
+	if (ec) std::printf("%s\n", ec.message().c_str());
 	ec.clear();
 
-	TEST_EQUAL(p.dht_nodes.size(), 1);
+	TEST_EQUAL(p.dht_nodes.size(), 2);
 	TEST_EQUAL(p.dht_nodes[0].first, "127.0.0.1");
 	TEST_EQUAL(p.dht_nodes[0].second, 43);
+
+	TEST_EQUAL(p.dht_nodes[1].first, "10.0.0.1");
+	TEST_EQUAL(p.dht_nodes[1].second, 1337);
 }
 #endif
 
@@ -318,8 +338,12 @@ TORRENT_TEST(make_magnet_uri)
 	// make_magnet_uri
 	entry info;
 	info["pieces"] = "aaaaaaaaaaaaaaaaaaaa";
-	info["name"] = "slightly shorter name, it's kind of sad that people started the trend of incorrectly encoding the regular name field and then adding another one with correct encoding";
-	info["name.utf-8"] = "this is a long ass name in order to try to make make_magnet_uri overflow and hopefully crash. Although, by the time you read this that particular bug should have been fixed";
+	info["name"] = "slightly shorter name, it's kind of sad that people started "
+		"the trend of incorrectly encoding the regular name field and then adding "
+		"another one with correct encoding";
+	info["name.utf-8"] = "this is a long ass name in order to try to make "
+		"make_magnet_uri overflow and hopefully crash. Although, by the time "
+		"you read this that particular bug should have been fixed";
 	info["piece length"] = 16 * 1024;
 	info["length"] = 3245;
 	entry torrent;
@@ -359,14 +383,14 @@ TORRENT_TEST(make_magnet_uri)
 	std::vector<char> buf;
 	bencode(std::back_inserter(buf), torrent);
 	buf.push_back('\0');
-	printf("%s\n", &buf[0]);
+	std::printf("%s\n", &buf[0]);
 	error_code ec;
-	torrent_info ti(&buf[0], buf.size(), ec);
+	torrent_info ti(&buf[0], int(buf.size()), ec);
 
 	TEST_EQUAL(al.size(), ti.trackers().size());
 
 	std::string magnet = make_magnet_uri(ti);
-	printf("%s len: %d\n", magnet.c_str(), int(magnet.size()));
+	std::printf("%s len: %d\n", magnet.c_str(), int(magnet.size()));
 }
 
 TORRENT_TEST(make_magnet_uri2)
@@ -386,12 +410,12 @@ TORRENT_TEST(make_magnet_uri2)
 	std::vector<char> buf;
 	bencode(std::back_inserter(buf), torrent);
 	buf.push_back('\0');
-	printf("%s\n", &buf[0]);
+	std::printf("%s\n", &buf[0]);
 	error_code ec;
-	torrent_info ti(&buf[0], buf.size(), ec);
+	torrent_info ti(&buf[0], int(buf.size()), ec);
 
 	std::string magnet = make_magnet_uri(ti);
-	printf("%s len: %d\n", magnet.c_str(), int(magnet.size()));
+	std::printf("%s len: %d\n", magnet.c_str(), int(magnet.size()));
 	TEST_CHECK(magnet.find("&ws=http%3a%2f%2ffoo.com%2fbar") != std::string::npos);
 }
 
@@ -400,11 +424,15 @@ TORRENT_TEST(trailing_whitespace)
 	session ses(settings());
 	add_torrent_params p;
 	p.save_path = ".";
-	p.url = "magnet:?xt=urn:btih:abaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n";
+	error_code ec;
+	parse_magnet_uri("magnet:?xt=urn:btih:abaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n", p, ec);
 	// invalid hash
+	TEST_CHECK(ec);
 	TEST_THROW(ses.add_torrent(p));
 
-	p.url = "magnet:?xt=urn:btih:abaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+	ec.clear();
+	parse_magnet_uri("magnet:?xt=urn:btih:abaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", p, ec);
+	TEST_CHECK(!ec);
 	// now it's valid, because there's no trailing whitespace
 	torrent_handle h = ses.add_torrent(p);
 	TEST_CHECK(h.is_valid());

@@ -53,13 +53,13 @@ TORRENT_TEST(web_seed_redirect)
 	file f("test_file", file::write_only, ec);
 	if (ec)
 	{
-		fprintf(stderr, "failed to create file \"test_file\": (%d) %s\n"
+		std::printf("failed to create file \"test_file\": (%d) %s\n"
 			, ec.value(), ec.message().c_str());
 		TEST_ERROR("failed to create file");
 		return;
 	}
-	file::iovec_t b = { random_data, size_t(16000)};
-	f.writev(0, &b, 1, ec);
+	iovec_t b = { random_data, size_t(16000)};
+	f.writev(0, b, ec);
 	fs.add_file("test_file", 16000);
 
 	int port = start_web_server();
@@ -69,7 +69,7 @@ TORRENT_TEST(web_seed_redirect)
 	libtorrent::create_torrent t(fs, piece_size, 0x4000);
 
 	char tmp[512];
-	snprintf(tmp, sizeof(tmp), "http://127.0.0.1:%d/redirect", port);
+	std::snprintf(tmp, sizeof(tmp), "http://127.0.0.1:%d/redirect", port);
 	t.add_url_seed(tmp);
 
 	// calculate the hash for all pieces
@@ -77,7 +77,7 @@ TORRENT_TEST(web_seed_redirect)
 
 	if (ec)
 	{
-		fprintf(stderr, "error creating hashes for test torrent: %s\n"
+		std::printf("error creating hashes for test torrent: %s\n"
 			, ec.message().c_str());
 		TEST_ERROR("failed to create hashes");
 		return;
@@ -85,8 +85,8 @@ TORRENT_TEST(web_seed_redirect)
 
 	std::vector<char> buf;
 	bencode(std::back_inserter(buf), t.generate());
-	boost::shared_ptr<torrent_info> torrent_file(new torrent_info(&buf[0]
-		, buf.size(), ec));
+	auto torrent_file = std::make_shared<torrent_info>(&buf[0]
+		, int(buf.size()), ec);
 
 	{
 		settings_pack p = settings();
@@ -96,7 +96,7 @@ TORRENT_TEST(web_seed_redirect)
 
 		// disable keep-alive because otherwise the test will choke on seeing
 		// the disconnect (from the redirect)
-		test_transfer(ses, torrent_file, 0, 0, "http", true, false, false, false);
+		test_transfer(ses, torrent_file, 0, nullptr, "http", true, false, false, false);
 	}
 
 	stop_web_server();

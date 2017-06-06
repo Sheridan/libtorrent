@@ -46,10 +46,23 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "simulator/utils.hpp"
 #include "setup_swarm.hpp"
 #include "utils.hpp"
+#include "setup_transfer.hpp" // for addr()
 
 using namespace sim;
 
 namespace lt = libtorrent;
+
+std::string make_ep_string(char const* address, bool const is_v6
+	, char const* port)
+{
+	std::string ret;
+	if (is_v6) ret += '[';
+	ret += address;
+	if (is_v6) ret += ']';
+	ret += ':';
+	ret += port;
+	return ret;
+}
 
 template <typename Setup, typename HandleAlerts, typename Test>
 void run_test(
@@ -95,13 +108,13 @@ void run_test(
 	pack.set_int(settings_pack::out_enc_policy, settings_pack::pe_disabled);
 	pack.set_int(settings_pack::allowed_enc_level, settings_pack::pe_plaintext);
 
-	pack.set_str(settings_pack::listen_interfaces, peer0_ip[use_ipv6] + std::string(":6881"));
+	pack.set_str(settings_pack::listen_interfaces, make_ep_string(peer0_ip[use_ipv6], use_ipv6, "6881"));
 
 	// create session
 	std::shared_ptr<lt::session> ses[2];
 	ses[0] = std::make_shared<lt::session>(pack, ios0);
 
-	pack.set_str(settings_pack::listen_interfaces, peer1_ip[use_ipv6] + std::string(":6881"));
+	pack.set_str(settings_pack::listen_interfaces, make_ep_string(peer1_ip[use_ipv6], use_ipv6, "6881"));
 	ses[1] = std::make_shared<lt::session>(pack, ios1);
 
 	setup(*ses[0], *ses[1]);
@@ -153,7 +166,7 @@ TORRENT_TEST(socks4_tcp)
 			set_proxy(ses0, settings_pack::socks4);
 			filter_ips(ses1);
 		},
-		[](lt::session& ses, lt::alert const* alert) {},
+		[](lt::session&, lt::alert const*) {},
 		[](std::shared_ptr<lt::session> ses[2]) {
 			TEST_EQUAL(is_seed(*ses[0]), true);
 		}
@@ -169,7 +182,7 @@ TORRENT_TEST(socks5_tcp_connect)
 			set_proxy(ses0, settings_pack::socks5);
 			filter_ips(ses1);
 		},
-		[](lt::session& ses, lt::alert const* alert) {},
+		[](lt::session&, lt::alert const*) {},
 		[](std::shared_ptr<lt::session> ses[2]) {
 			TEST_EQUAL(is_seed(*ses[0]), true);
 		}
@@ -182,7 +195,7 @@ TORRENT_TEST(encryption_tcp)
 	run_test(
 		[](lt::session& ses0, lt::session& ses1)
 		{ enable_enc(ses0); enable_enc(ses1); },
-		[](lt::session& ses, lt::alert const* alert) {},
+		[](lt::session&, lt::alert const*) {},
 		[](std::shared_ptr<lt::session> ses[2]) {
 			TEST_EQUAL(is_seed(*ses[0]), true);
 		}
@@ -193,8 +206,8 @@ TORRENT_TEST(no_proxy_tcp_ipv6)
 {
 	using namespace libtorrent;
 	run_test(
-		[](lt::session& ses0, lt::session& ses1) {},
-		[](lt::session& ses, lt::alert const* alert) {},
+		[](lt::session&, lt::session&) {},
+		[](lt::session&, lt::alert const*) {},
 		[](std::shared_ptr<lt::session> ses[2]) {
 			TEST_EQUAL(is_seed(*ses[0]), true);
 		},
@@ -206,8 +219,8 @@ TORRENT_TEST(no_proxy_utp_ipv6)
 {
 	using namespace libtorrent;
 	run_test(
-		[](lt::session& ses0, lt::session& ses1) {},
-		[](lt::session& ses, lt::alert const* alert) {},
+		[](lt::session&, lt::session&) {},
+		[](lt::session&, lt::alert const*) {},
 		[](std::shared_ptr<lt::session> ses[2]) {
 			TEST_EQUAL(is_seed(*ses[0]), true);
 		},
@@ -226,7 +239,7 @@ TORRENT_TEST(socks5_tcp_ipv6)
 			set_proxy(ses0, settings_pack::socks5);
 			filter_ips(ses1);
 		},
-		[](lt::session& ses, lt::alert const* alert) {},
+		[](lt::session&, lt::alert const*) {},
 		[](std::shared_ptr<lt::session> ses[2]) {
 			TEST_EQUAL(is_seed(*ses[0]), true);
 		},
@@ -239,8 +252,8 @@ TORRENT_TEST(no_proxy_tcp)
 {
 	using namespace libtorrent;
 	run_test(
-		[](lt::session& ses0, lt::session& ses1) {},
-		[](lt::session& ses, lt::alert const* alert) {},
+		[](lt::session&, lt::session&) {},
+		[](lt::session&, lt::alert const*) {},
 		[](std::shared_ptr<lt::session> ses[2]) {
 			TEST_EQUAL(is_seed(*ses[0]), true);
 		}
@@ -251,8 +264,8 @@ TORRENT_TEST(no_proxy_utp)
 {
 	using namespace libtorrent;
 	run_test(
-		[](lt::session& ses0, lt::session& ses1) {},
-		[](lt::session& ses, lt::alert const* alert) {},
+		[](lt::session&, lt::session&) {},
+		[](lt::session&, lt::alert const*) {},
 		[](std::shared_ptr<lt::session> ses[2]) {
 			TEST_EQUAL(is_seed(*ses[0]), true);
 		}
@@ -266,7 +279,7 @@ TORRENT_TEST(encryption_utp)
 	run_test(
 		[](lt::session& ses0, lt::session& ses1)
 		{ enable_enc(ses0); enable_enc(ses1); utp_only(ses0); },
-		[](lt::session& ses, lt::alert const* alert) {},
+		[](lt::session&, lt::alert const*) {},
 		[](std::shared_ptr<lt::session> ses[2]) {
 			TEST_EQUAL(is_seed(*ses[0]), true);
 		}
@@ -286,7 +299,7 @@ TORRENT_TEST(socks5_utp)
 			utp_only(ses0);
 			filter_ips(ses1);
 		},
-		[](lt::session& ses, lt::alert const* alert) {},
+		[](lt::session&, lt::alert const*) {},
 		[](std::shared_ptr<lt::session> ses[2]) {
 			TEST_EQUAL(is_seed(*ses[0]), true);
 		}
@@ -301,8 +314,8 @@ TORRENT_TEST(no_proxy_tcp_banned)
 {
 	using namespace libtorrent;
 	run_test(
-		[](lt::session& ses0, lt::session& ses1) { filter_ips(ses1); },
-		[](lt::session& ses, lt::alert const* alert) {},
+		[](lt::session&, lt::session& ses1) { filter_ips(ses1); },
+		[](lt::session&, lt::alert const*) {},
 		[](std::shared_ptr<lt::session> ses[2]) {
 			TEST_EQUAL(is_seed(*ses[0]), false);
 		}
@@ -313,8 +326,8 @@ TORRENT_TEST(no_proxy_utp_banned)
 {
 	using namespace libtorrent;
 	run_test(
-		[](lt::session& ses0, lt::session& ses1) { filter_ips(ses1); },
-		[](lt::session& ses, lt::alert const* alert) {},
+		[](lt::session&, lt::session& ses1) { filter_ips(ses1); },
+		[](lt::session&, lt::alert const*) {},
 		[](std::shared_ptr<lt::session> ses[2]) {
 			TEST_EQUAL(is_seed(*ses[0]), false);
 		}
@@ -325,13 +338,13 @@ TORRENT_TEST(auto_disk_cache_size)
 {
 	using namespace libtorrent;
 	run_test(
-		[](lt::session& ses0, lt::session& ses1) { set_cache_size(ses0, -1); },
-		[](lt::session& ses, lt::alert const* alert) {},
+		[](lt::session& ses0, lt::session&) { set_cache_size(ses0, -1); },
+		[](lt::session&, lt::alert const*) {},
 		[](std::shared_ptr<lt::session> ses[2]) {
 			TEST_EQUAL(is_seed(*ses[0]), true);
 
 			int const cache_size = get_cache_size(*ses[0]);
-			printf("cache size: %d\n", cache_size);
+			std::printf("cache size: %d\n", cache_size);
 			// this assumes the test torrent is at least 4 blocks
 			TEST_CHECK(cache_size > 4);
 		}
@@ -342,13 +355,13 @@ TORRENT_TEST(disable_disk_cache)
 {
 	using namespace libtorrent;
 	run_test(
-		[](lt::session& ses0, lt::session& ses1) { set_cache_size(ses0, 0); },
-		[](lt::session& ses, lt::alert const* alert) {},
+		[](lt::session& ses0, lt::session&) { set_cache_size(ses0, 0); },
+		[](lt::session&, lt::alert const*) {},
 		[](std::shared_ptr<lt::session> ses[2]) {
 			TEST_EQUAL(is_seed(*ses[0]), true);
 
 			int const cache_size = get_cache_size(*ses[0]);
-			printf("cache size: %d\n", cache_size);
+			std::printf("cache size: %d\n", cache_size);
 			TEST_EQUAL(cache_size, 0);
 		}
 	);

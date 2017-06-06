@@ -34,7 +34,6 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/settings_pack.hpp"
 #include "libtorrent/alert_types.hpp"
 #include "libtorrent/time.hpp" // for clock_type
-#include <boost/bind.hpp>
 
 #include "test.hpp"
 #include "setup_swarm.hpp"
@@ -66,7 +65,7 @@ TORRENT_TEST(utp)
 			params.flags |= add_torrent_params::flag_seed_mode;
 		}
 		// on alert
-		, [&](lt::alert const* a, lt::session& ses) {
+		, [&](lt::alert const*, lt::session& ses) {
 			if (!is_seed(ses)) return;
 
 			// if this check fails, there is a performance regression in the protocol,
@@ -76,7 +75,7 @@ TORRENT_TEST(utp)
 			TEST_CHECK(lt::clock_type::now() < start_time + lt::milliseconds(8500));
 		}
 		// terminate
-		, [](int ticks, lt::session& ses) -> bool
+		, [](int const ticks, lt::session&) -> bool
 		{
 			if (ticks > 100)
 			{

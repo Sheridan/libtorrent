@@ -30,6 +30,8 @@ POSSIBILITY OF SUCH DAMAGE.
 
 */
 
+#include "libtorrent/aux_/disable_warnings_push.hpp"
+
 #ifdef __GNUC__
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-macros"
@@ -62,31 +64,25 @@ POSSIBILITY OF SUCH DAMAGE.
 #pragma GCC diagnostic pop
 #endif
 
-#include "libtorrent/config.hpp"
-#include "libtorrent/alloca.hpp"
-#include "libtorrent/allocator.hpp" // page_size
-#include "libtorrent/file.hpp"
-#include <cstring>
-#include <vector>
+#include "libtorrent/aux_/disable_warnings_pop.hpp"
 
-#ifdef TORRENT_DEBUG_FILE_LEAKS
-#include <set>
-#include "libtorrent/thread.hpp"
-#endif
+#include "libtorrent/config.hpp"
+#include "libtorrent/aux_/alloca.hpp"
+#include "libtorrent/file.hpp"
+#include "libtorrent/aux_/path.hpp"
+#include "libtorrent/string_util.hpp"
+#include "libtorrent/aux_/max_path.hpp" // for TORRENT_MAX_PATH
+#include <cstring>
 
 // for convert_to_wstring and convert_to_native
 #include "libtorrent/aux_/escape_string.hpp"
-#include <stdio.h>
 #include "libtorrent/assert.hpp"
+#include "libtorrent/aux_/throw.hpp"
 
-#include <boost/scoped_ptr.hpp>
-#include <boost/static_assert.hpp>
-
-#ifdef TORRENT_DISK_STATS
-#include "libtorrent/io.hpp"
-#endif
+#include "libtorrent/aux_/disable_warnings_push.hpp"
 
 #include <sys/stat.h>
+#include <climits> // for IOV_MAX
 
 #ifdef TORRENT_WINDOWS
 // windows part
@@ -96,6 +92,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #endif
 
 #include "libtorrent/utf8.hpp"
+#include "libtorrent/aux_/win_util.hpp"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -113,19 +110,11 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #include <unistd.h>
 #include <sys/types.h>
-#include <errno.h>
+#include <cerrno>
 #include <dirent.h>
 
 #ifdef TORRENT_LINUX
 // linux specifics
-
-#ifdef TORRENT_ANDROID
-#include <sys/vfs.h>
-#define statvfs statfs
-#define fstatvfs fstatfs
-#else
-#include <sys/statvfs.h>
-#endif
 
 #include <sys/ioctl.h>
 #ifdef TORRENT_ANDROID
@@ -148,20 +137,22 @@ POSSIBILITY OF SUCH DAMAGE.
 // related functions support 64-bit offsets.
 // this test makes sure lseek() returns a type
 // at least 64 bits wide
-BOOST_STATIC_ASSERT(sizeof(lseek(0, 0, 0)) >= 8);
+static_assert(sizeof(lseek(0, 0, 0)) >= 8, "64 bit file operations are required");
 
 #endif // posix part
 
+#include "libtorrent/aux_/disable_warnings_pop.hpp"
+
 #if TORRENT_USE_PREADV
 # if defined TORRENT_WINDOWS
-namespace
-{
+namespace {
+
 	// wrap the windows function in something that looks
 	// like preadv() and pwritev()
 
 	// windows only lets us wait for 64 handles at a time, so this function makes
 	// sure we wait for all of them, partially in sequence
-	int wait_for_multiple_objects(int num_handles, HANDLE* h)
+	DWORD wait_for_multiple_objects(int num_handles, HANDLE* h)
 	{
 		int batch_size = (std::min)(num_handles, MAXIMUM_WAIT_OBJECTS);
 		while (WaitForMultipleObjects(batch_size, h, TRUE, INFINITE) != WAIT_FAILED)
@@ -174,20 +165,20 @@ namespace
 		return WAIT_FAILED;
 	}
 
-	int preadv(HANDLE fd, libtorrent::file::iovec_t const* bufs, int num_bufs, boost::int64_t file_offset)
+	int preadv(HANDLE fd, libtorrent::iovec_t const* bufs, int num_bufs, std::int64_t file_offset)
 	{
-		OVERLAPPED* ol = TORRENT_ALLOCA(OVERLAPPED, num_bufs);
-		memset(ol, 0, sizeof(OVERLAPPED) * num_bufs);
+		TORRENT_ALLOCA(ol, OVERLAPPED, num_bufs);
+		std::memset(ol.data(), 0, sizeof(OVERLAPPED) * num_bufs);
 
-		HANDLE* h = TORRENT_ALLOCA(HANDLE, num_bufs);
+		TORRENT_ALLOCA(h, HANDLE, num_bufs);
 
 		for (int i = 0; i < num_bufs; ++i)
 		{
 			ol[i].OffsetHigh = file_offset >> 32;
 			ol[i].Offset = file_offset & 0xffffffff;
-			ol[i].hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
+			ol[i].hEvent = CreateEvent(nullptr, TRUE, FALSE, nullptr);
 			h[i] = ol[i].hEvent;
-			if (h[i] == NULL)
+			if (h[i] == nullptr)
 			{
 				// we failed to create the event, roll-back and return an error
 				for (int j = 0; j < i; ++j) CloseHandle(h[i]);
@@ -200,7 +191,7 @@ namespace
 		for (int i = 0; i < num_bufs; ++i)
 		{
 			DWORD num_read;
-			if (ReadFile(fd, bufs[i].iov_base, bufs[i].iov_len, &num_read, &ol[i]) == FALSE
+			if (ReadFile(fd, bufs[i].iov_base, DWORD(bufs[i].iov_len), &num_read, &ol[i]) == FALSE
 				&& GetLastError() != ERROR_IO_PENDING
 #ifdef ERROR_CANT_WAIT
 				&& GetLastError() != ERROR_CANT_WAIT
@@ -212,21 +203,21 @@ namespace
 			}
 		}
 
-		if (wait_for_multiple_objects(num_bufs, h) == WAIT_FAILED)
+		if (wait_for_multiple_objects(int(h.size()), h.data()) == WAIT_FAILED)
 		{
 			ret = -1;
 			goto done;
 		}
 
-		for (int i = 0; i < num_bufs; ++i)
+		for (auto& o : ol)
 		{
-			if (WaitForSingleObject(ol[i].hEvent, INFINITE) == WAIT_FAILED)
+			if (WaitForSingleObject(o.hEvent, INFINITE) == WAIT_FAILED)
 			{
 				ret = -1;
 				break;
 			}
 			DWORD num_read;
-			if (GetOverlappedResult(fd, &ol[i], &num_read, FALSE) == FALSE)
+			if (GetOverlappedResult(fd, &o, &num_read, FALSE) == FALSE)
 			{
 #ifdef ERROR_CANT_WAIT
 				TORRENT_ASSERT(GetLastError() != ERROR_CANT_WAIT);
@@ -238,26 +229,26 @@ namespace
 		}
 done:
 
-		for (int i = 0; i < num_bufs; ++i)
-			CloseHandle(h[i]);
+		for (auto hnd : h)
+			CloseHandle(hnd);
 
 		return ret;
 	}
 
-	int pwritev(HANDLE fd, libtorrent::file::iovec_t const* bufs, int num_bufs, boost::int64_t file_offset)
+	int pwritev(HANDLE fd, libtorrent::iovec_t const* bufs, int num_bufs, std::int64_t file_offset)
 	{
-		OVERLAPPED* ol = TORRENT_ALLOCA(OVERLAPPED, num_bufs);
-		memset(ol, 0, sizeof(OVERLAPPED) * num_bufs);
+		TORRENT_ALLOCA(ol, OVERLAPPED, num_bufs);
+		std::memset(ol.data(), 0, sizeof(OVERLAPPED) * num_bufs);
 
-		HANDLE* h = TORRENT_ALLOCA(HANDLE, num_bufs);
+		TORRENT_ALLOCA(h, HANDLE, num_bufs);
 
 		for (int i = 0; i < num_bufs; ++i)
 		{
 			ol[i].OffsetHigh = file_offset >> 32;
 			ol[i].Offset = file_offset & 0xffffffff;
-			ol[i].hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
+			ol[i].hEvent = CreateEvent(nullptr, TRUE, FALSE, nullptr);
 			h[i] = ol[i].hEvent;
-			if (h[i] == NULL)
+			if (h[i] == nullptr)
 			{
 				// we failed to create the event, roll-back and return an error
 				for (int j = 0; j < i; ++j) CloseHandle(h[i]);
@@ -270,7 +261,7 @@ done:
 		for (int i = 0; i < num_bufs; ++i)
 		{
 			DWORD num_written;
-			if (WriteFile(fd, bufs[i].iov_base, bufs[i].iov_len, &num_written, &ol[i]) == FALSE
+			if (WriteFile(fd, bufs[i].iov_base, DWORD(bufs[i].iov_len), &num_written, &ol[i]) == FALSE
 				&& GetLastError() != ERROR_IO_PENDING
 #ifdef ERROR_CANT_WAIT
 				&& GetLastError() != ERROR_CANT_WAIT
@@ -282,21 +273,21 @@ done:
 			}
 		}
 
-		if (wait_for_multiple_objects(num_bufs, h) == WAIT_FAILED)
+		if (wait_for_multiple_objects(int(h.size()), h.data()) == WAIT_FAILED)
 		{
 			ret = -1;
 			goto done;
 		}
 
-		for (int i = 0; i < num_bufs; ++i)
+		for (auto& o : ol)
 		{
-			if (WaitForSingleObject(ol[i].hEvent, INFINITE) == WAIT_FAILED)
+			if (WaitForSingleObject(o.hEvent, INFINITE) == WAIT_FAILED)
 			{
 				ret = -1;
 				break;
 			}
 			DWORD num_written;
-			if (GetOverlappedResult(fd, &ol[i], &num_written, FALSE) == FALSE)
+			if (GetOverlappedResult(fd, &o, &num_written, FALSE) == FALSE)
 			{
 #ifdef ERROR_CANT_WAIT
 				TORRENT_ASSERT(GetLastError() != ERROR_CANT_WAIT);
@@ -308,8 +299,8 @@ done:
 		}
 done:
 
-		for (int i = 0; i < num_bufs; ++i)
-			CloseHandle(h[i]);
+		for (auto hnd : h)
+			CloseHandle(hnd);
 
 		return ret;
 	}
@@ -323,11 +314,9 @@ done:
 # endif
 #endif
 
-#ifdef TORRENT_DEBUG
-BOOST_STATIC_ASSERT((libtorrent::file::rw_mask & libtorrent::file::sparse) == 0);
-BOOST_STATIC_ASSERT((libtorrent::file::rw_mask & libtorrent::file::attribute_mask) == 0);
-BOOST_STATIC_ASSERT((libtorrent::file::sparse & libtorrent::file::attribute_mask) == 0);
-#endif
+static_assert((libtorrent::file::rw_mask & libtorrent::file::sparse) == 0, "internal flags error");
+static_assert((libtorrent::file::rw_mask & libtorrent::file::attribute_mask) == 0, "internal flags error");
+static_assert((libtorrent::file::sparse & libtorrent::file::attribute_mask) == 0, "internal flags error");
 
 #if defined TORRENT_WINDOWS && defined UNICODE && !TORRENT_USE_WSTRING
 
@@ -339,864 +328,56 @@ BOOST_STATIC_ASSERT((libtorrent::file::sparse & libtorrent::file::attribute_mask
 
 #endif // TORRENT_WINDOWS
 
-namespace libtorrent
-{
-	int bufs_size(file::iovec_t const* bufs, int num_bufs)
+namespace libtorrent {
+
+	template <typename T>
+	std::unique_ptr<T, decltype(&std::free)> make_free_holder(T* ptr)
 	{
-		std::size_t size = 0;
-		for (file::iovec_t const* i = bufs, *end(bufs + num_bufs); i < end; ++i)
-			size += i->iov_len;
-		return int(size);
-	}
-
-#ifdef TORRENT_WINDOWS
-	std::string convert_separators(std::string p)
-	{
-		for (int i = 0; i < int(p.size()); ++i)
-			if (p[i] == '/') p[i] = '\\';
-		return p;
-	}
-
-	time_t file_time_to_posix(FILETIME f)
-	{
-		const boost::uint64_t posix_time_offset = 11644473600LL;
-		boost::uint64_t ft = (boost::uint64_t(f.dwHighDateTime) << 32)
-			| f.dwLowDateTime;
-
-		// windows filetime is specified in 100 nanoseconds resolution.
-		// convert to seconds
-		return time_t(ft / 10000000 - posix_time_offset);
-	}
-#endif
-
-	void stat_file(std::string const& inf, file_status* s
-		, error_code& ec, int flags)
-	{
-		ec.clear();
-#ifdef TORRENT_WINDOWS
-
-		TORRENT_UNUSED(flags);
-
-		std::string p = convert_separators(inf);
-#if TORRENT_USE_UNC_PATHS
-		// UNC paths must be absolute
-		// network paths are already UNC paths
-		if (inf.substr(0,2) == "\\\\") p = inf;
-		else p = "\\\\?\\" + (is_complete(p) ? p : combine_path(current_working_directory(), p));
-#endif
-
-#if TORRENT_USE_WSTRING
-#define CreateFile_ CreateFileW
-		std::wstring f = convert_to_wstring(p);
-#else
-#define CreateFile_ CreateFileA
-		std::string f = convert_to_native(p);
-#endif
-
-		// in order to open a directory, we need the FILE_FLAG_BACKUP_SEMANTICS
-		HANDLE h = CreateFile_(f.c_str(), 0, FILE_SHARE_DELETE | FILE_SHARE_READ
-			| FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
-
-		if (h == INVALID_HANDLE_VALUE)
-		{
-			ec.assign(GetLastError(), system_category());
-			TORRENT_ASSERT(ec);
-			return;
-		}
-
-		BY_HANDLE_FILE_INFORMATION data;
-		if (!GetFileInformationByHandle(h, &data))
-		{
-			ec.assign(GetLastError(), system_category());
-			TORRENT_ASSERT(ec);
-			CloseHandle(h);
-			return;
-		}
-
-		s->file_size = (boost::uint64_t(data.nFileSizeHigh) << 32) | data.nFileSizeLow;
-		s->ctime = file_time_to_posix(data.ftCreationTime);
-		s->atime = file_time_to_posix(data.ftLastAccessTime);
-		s->mtime = file_time_to_posix(data.ftLastWriteTime);
-
-		s->mode = (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
-			? file_status::directory
-			: (data.dwFileAttributes & FILE_ATTRIBUTE_DEVICE)
-			? file_status::character_special : file_status::regular_file;
-		CloseHandle(h);
-#else
-
-		// posix version
-
-		std::string const& f = convert_to_native(inf);
-
-		struct stat ret;
-		int retval;
-		if (flags & dont_follow_links)
-			retval = ::lstat(f.c_str(), &ret);
-		else
-			retval = ::stat(f.c_str(), &ret);
-		if (retval < 0)
-		{
-			ec.assign(errno, system_category());
-			return;
-		}
-
-		s->file_size = ret.st_size;
-		s->atime = ret.st_atime;
-		s->mtime = ret.st_mtime;
-		s->ctime = ret.st_ctime;
-
-		s->mode = (S_ISREG(ret.st_mode) ? file_status::regular_file : 0)
-			| (S_ISDIR(ret.st_mode) ? file_status::directory : 0)
-			| (S_ISLNK(ret.st_mode) ? file_status::link : 0)
-			| (S_ISFIFO(ret.st_mode) ? file_status::fifo : 0)
-			| (S_ISCHR(ret.st_mode) ? file_status::character_special : 0)
-			| (S_ISBLK(ret.st_mode) ? file_status::block_special : 0)
-			| (S_ISSOCK(ret.st_mode) ? file_status::socket : 0);
-
-#endif // TORRENT_WINDOWS
-	}
-
-	void rename(std::string const& inf, std::string const& newf, error_code& ec)
-	{
-		ec.clear();
-
-#if TORRENT_USE_WSTRING && defined TORRENT_WINDOWS
-		std::wstring f1 = convert_to_wstring(inf);
-		std::wstring f2 = convert_to_wstring(newf);
-		if (_wrename(f1.c_str(), f2.c_str()) < 0)
-#else
-		std::string const& f1 = convert_to_native(inf);
-		std::string const& f2 = convert_to_native(newf);
-		if (::rename(f1.c_str(), f2.c_str()) < 0)
-#endif
-		{
-			ec.assign(errno, generic_category());
-			return;
-		}
-	}
-
-	void create_directories(std::string const& f, error_code& ec)
-	{
-		ec.clear();
-		if (is_directory(f, ec)) return;
-		if (ec != boost::system::errc::no_such_file_or_directory)
-			return;
-		ec.clear();
-		if (is_root_path(f)) return;
-		if (has_parent_path(f))
-		{
-			create_directories(parent_path(f), ec);
-			if (ec) return;
-		}
-		create_directory(f, ec);
-	}
-
-	void create_directory(std::string const& f, error_code& ec)
-	{
-		ec.clear();
-
-#ifdef TORRENT_WINDOWS
-#if TORRENT_USE_WSTRING
-#define CreateDirectory_ CreateDirectoryW
-		std::wstring n = convert_to_wstring(f);
-#else
-#define CreateDirectory_ CreateDirectoryA
-		std::string const& n = convert_to_native(f);
-#endif // TORRENT_USE_WSTRING
-
-		if (CreateDirectory_(n.c_str(), 0) == 0
-			&& GetLastError() != ERROR_ALREADY_EXISTS)
-			ec.assign(GetLastError(), system_category());
-#else
-		std::string n = convert_to_native(f);
-		int ret = mkdir(n.c_str(), 0777);
-		if (ret < 0 && errno != EEXIST)
-			ec.assign(errno, system_category());
-#endif
-	}
-
-	void hard_link(std::string const& file, std::string const& link
-		, error_code& ec)
-	{
-#ifdef TORRENT_WINDOWS
-
-#if TORRENT_USE_WSTRING
-#define CreateHardLink_ CreateHardLinkW
-		std::wstring n_exist = convert_to_wstring(file);
-		std::wstring n_link = convert_to_wstring(link);
-#else
-#define CreateHardLink_ CreateHardLinkA
-		std::string n_exist = convert_to_native(file);
-		std::string n_link = convert_to_native(link);
-#endif
-		BOOL ret = CreateHardLink_(n_link.c_str(), n_exist.c_str(), NULL);
-		if (ret)
-		{
-			ec.clear();
-			return;
-		}
-
-		// something failed. Does the filesystem not support hard links?
-		// TODO: 3 find out what error code is reported when the filesystem
-		// does not support hard links.
-		DWORD const error = GetLastError();
-		if (error != ERROR_NOT_SUPPORTED && error != ERROR_ACCESS_DENIED)
-		{
-			// it's possible CreateHardLink will copy the file internally too,
-			// if the filesystem does not support it.
-			ec.assign(GetLastError(), system_category());
-			return;
-		}
-
-		// fall back to making a copy
-
-#else
-
-		std::string n_exist = convert_to_native(file);
-		std::string n_link = convert_to_native(link);
-
-		// assume posix's link() function exists
-		int ret = ::link(n_exist.c_str(), n_link.c_str());
-
-		if (ret == 0)
-		{
-			ec.clear();
-			return;
-		}
-
-		// most errors are passed through, except for the ones that indicate that
-		// hard links are not supported and require a copy.
-		// TODO: 2 test this on a FAT volume to see what error we get!
-		if (errno != EMLINK || errno != EXDEV)
-		{
-			// some error happened, report up to the caller
-			ec.assign(errno, system_category());
-			return;
-		}
-
-		// fall back to making a copy
-
-#endif
-
-		// if we get here, we should copy the file
-		copy_file(file, link, ec);
-	}
-
-	bool is_directory(std::string const& f, error_code& ec)
-	{
-		ec.clear();
-		error_code e;
-		file_status s;
-		stat_file(f, &s, e);
-		if (!e && s.mode & file_status::directory) return true;
-		ec = e;
-		return false;
-	}
-
-	void recursive_copy(std::string const& old_path, std::string const& new_path, error_code& ec)
-	{
-		TORRENT_ASSERT(!ec);
-		if (is_directory(old_path, ec))
-		{
-			create_directory(new_path, ec);
-			if (ec) return;
-			for (directory i(old_path, ec); !i.done(); i.next(ec))
-			{
-				std::string f = i.file();
-				if (f == ".." || f == ".") continue;
-				recursive_copy(combine_path(old_path, f), combine_path(new_path, f), ec);
-				if (ec) return;
-			}
-		}
-		else if (!ec)
-		{
-			copy_file(old_path, new_path, ec);
-		}
-	}
-
-	void copy_file(std::string const& inf, std::string const& newf, error_code& ec)
-	{
-		ec.clear();
-#ifdef TORRENT_WINDOWS
-#if TORRENT_USE_WSTRING
-#define CopyFile_ CopyFileW
-		std::wstring f1 = convert_to_wstring(inf);
-		std::wstring f2 = convert_to_wstring(newf);
-#else
-#define CopyFile_ CopyFileA
-		std::string const& f1 = convert_to_native(inf);
-		std::string const& f2 = convert_to_native(newf);
-#endif
-
-		if (CopyFile_(f1.c_str(), f2.c_str(), false) == 0)
-			ec.assign(GetLastError(), system_category());
-#elif defined __APPLE__ && defined __MACH__ && MAC_OS_X_VERSION_MIN_REQUIRED >= 1050
-		std::string f1 = convert_to_native(inf);
-		std::string f2 = convert_to_native(newf);
-
-		// this only works on 10.5
-		copyfile_state_t state = copyfile_state_alloc();
-		if (copyfile(f1.c_str(), f2.c_str(), state, COPYFILE_ALL) < 0)
-			ec.assign(errno, system_category());
-		copyfile_state_free(state);
-#else
-		std::string f1 = convert_to_native(inf);
-		std::string f2 = convert_to_native(newf);
-
-		int infd = ::open(f1.c_str(), O_RDONLY);
-		if (infd < 0)
-		{
-			ec.assign(errno, system_category());
-			return;
-		}
-
-		// rely on default umask to filter x and w permissions
-		// for group and others
-		int permissions = S_IRUSR | S_IWUSR
-			| S_IRGRP | S_IWGRP
-			| S_IROTH | S_IWOTH;
-
-		int outfd = ::open(f2.c_str(), O_WRONLY | O_CREAT, permissions);
-		if (outfd < 0)
-		{
-			close(infd);
-			ec.assign(errno, system_category());
-			return;
-		}
-		char buffer[4096];
-		for (;;)
-		{
-			int num_read = read(infd, buffer, sizeof(buffer));
-			if (num_read == 0) break;
-			if (num_read < 0)
-			{
-				ec.assign(errno, system_category());
-				break;
-			}
-			int num_written = write(outfd, buffer, num_read);
-			if (num_written < num_read)
-			{
-				ec.assign(errno, system_category());
-				break;
-			}
-			if (num_read < int(sizeof(buffer))) break;
-		}
-		close(infd);
-		close(outfd);
-#endif // TORRENT_WINDOWS
-	}
-
-	void move_file(std::string const& inf, std::string const& newf, error_code& ec)
-	{
-		ec.clear();
-
-		file_status s;
-		stat_file(inf, &s, ec);
-		if (ec) return;
-
-		if (has_parent_path(newf))
-		{
-			create_directories(parent_path(newf), ec);
-			if (ec) return;
-		}
-
-		rename(inf, newf, ec);
-	}
-
-	std::string split_path(std::string const& f)
-	{
-		if (f.empty()) return f;
-
-		std::string ret;
-		char const* start = f.c_str();
-		char const* p = start;
-		while (*start != 0)
-		{
-			while (*p != '/'
-				&& *p != '\0'
-#if defined(TORRENT_WINDOWS) || defined(TORRENT_OS2)
-				&& *p != '\\'
-#endif
-				) ++p;
-			if (p - start > 0)
-			{
-				ret.append(start, p - start);
-				ret.append(1, '\0');
-			}
-			if (*p != 0) ++p;
-			start = p;
-		}
-		ret.append(1, '\0');
-		return ret;
-	}
-
-	char const* next_path_element(char const* p)
-	{
-		p += strlen(p) + 1;
-		if (*p == 0) return 0;
-		return p;
-	}
-
-	std::string extension(std::string const& f)
-	{
-		for (int i = f.size() - 1; i >= 0; --i)
-		{
-			if (f[i] == '/') break;
-#ifdef TORRENT_WINDOWS
-			if (f[i] == '\\') break;
-#endif
-			if (f[i] != '.') continue;
-			return f.substr(i);
-		}
-		return "";
-	}
-
-	std::string remove_extension(std::string const& f)
-	{
-		char const* slash = strrchr(f.c_str(), '/');
-#ifdef TORRENT_WINDOWS
-		slash = (std::max)((char const*)strrchr(f.c_str(), '\\'), slash);
-#endif
-		char const* ext = strrchr(f.c_str(), '.');
-		// if we don't have an extension, just return f
-		if (ext == 0 || ext == &f[0] || (slash != NULL && ext < slash)) return f;
-		return f.substr(0, ext - &f[0]);
-	}
-
-	void replace_extension(std::string& f, std::string const& ext)
-	{
-		for (int i = f.size() - 1; i >= 0; --i)
-		{
-			if (f[i] == '/') break;
-#ifdef TORRENT_WINDOWS
-			if (f[i] == '\\') break;
-#endif
-
-			if (f[i] != '.') continue;
-
-			f.resize(i);
-			break;
-		}
-		f += '.';
-		f += ext;
-	}
-
-	bool is_root_path(std::string const& f)
-	{
-		if (f.empty()) return false;
-
-#if defined(TORRENT_WINDOWS) || defined(TORRENT_OS2)
-		// match \\ form
-		if (f == "\\\\") return true;
-		int i = 0;
-		// match the xx:\ or xx:/ form
-		while (f[i] && is_alpha(f[i])) ++i;
-		if (i == int(f.size()-2) && f[i] == ':' && (f[i+1] == '\\' || f[i+1] == '/'))
-			return true;
-		// match network paths \\computer_name\ form
-		if (f.size() > 2 && f[0] == '\\' && f[1] == '\\')
-		{
-			// we don't care about the last character, since it's OK for it
-			// to be a slash or a back slash
-			bool found = false;
-			for (int i = 2; i < int(f.size()) - 1; ++i)
-			{
-				if (f[i] != '\\' && f[i] != '/') continue;
-				// there is a directory separator in here,
-				// i.e. this is not the root
-				found = true;
-				break;
-			}
-			if (!found) return true;
-		}
-#else
-		// as well as parent_path("/") should be "/".
-		if (f == "/") return true;
-#endif
-		return false;
-	}
-
-	bool has_parent_path(std::string const& f)
-	{
-		if (f.empty()) return false;
-		if (is_root_path(f)) return false;
-
-		int len = f.size() - 1;
-		// if the last character is / or \ ignore it
-		if (f[len] == '/' || f[len] == '\\') --len;
-		while (len >= 0)
-		{
-			if (f[len] == '/' || f[len] == '\\')
-				break;
-			--len;
-		}
-
-		return len >= 0;
-	}
-
-	std::string parent_path(std::string const& f)
-	{
-		if (f.empty()) return f;
-
-#ifdef TORRENT_WINDOWS
-		if (f == "\\\\") return "";
-#endif
-		if (f == "/") return "";
-
-		int len = f.size();
-		// if the last character is / or \ ignore it
-		if (f[len-1] == '/' || f[len-1] == '\\') --len;
-		while (len > 0)
-		{
-			--len;
-			if (f[len] == '/' || f[len] == '\\')
-				break;
-		}
-
-		if (f[len] == '/' || f[len] == '\\') ++len;
-		return std::string(f.c_str(), len);
-	}
-
-	char const* filename_cstr(char const* f)
-	{
-		if (f == 0) return f;
-
-		char const* sep = strrchr(f, '/');
-#ifdef TORRENT_WINDOWS
-		char const* altsep = strrchr(f, '\\');
-		if (sep == 0 || altsep > sep) sep = altsep;
-#endif
-		if (sep == 0) return f;
-		return sep+1;
-	}
-
-	std::string filename(std::string const& f)
-	{
-		if (f.empty()) return "";
-		char const* first = f.c_str();
-		char const* sep = strrchr(first, '/');
-#if defined(TORRENT_WINDOWS) || defined(TORRENT_OS2)
-		char const* altsep = strrchr(first, '\\');
-		if (sep == 0 || altsep > sep) sep = altsep;
-#endif
-		if (sep == 0) return f;
-
-		if (sep - first == int(f.size()) - 1)
-		{
-			// if the last character is a / (or \)
-			// ignore it
-			int len = 0;
-			while (sep > first)
-			{
-				--sep;
-				if (*sep == '/'
-#if defined(TORRENT_WINDOWS) || defined(TORRENT_OS2)
-					|| *sep == '\\'
-#endif
-					)
-					return std::string(sep + 1, len);
-				++len;
-			}
-			return std::string(first, len);
-
-		}
-		return std::string(sep + 1);
-	}
-
-	void append_path(std::string& branch, std::string const& leaf)
-	{
-		append_path(branch, leaf.c_str(), leaf.size());
-	}
-
-	void append_path(std::string& branch
-		, char const* str, int len)
-	{
-		TORRENT_ASSERT(!is_complete(std::string(str, len)));
-		if (branch.empty() || branch == ".")
-		{
-			branch.assign(str, len);
-			return;
-		}
-		if (len == 0) return;
-
-#if defined(TORRENT_WINDOWS) || defined(TORRENT_OS2)
-#define TORRENT_SEPARATOR_CHAR '\\'
-		bool need_sep = branch[branch.size()-1] != '\\'
-			&& branch[branch.size()-1] != '/';
-#else
-#define TORRENT_SEPARATOR_CHAR '/'
-		bool need_sep = branch[branch.size()-1] != '/';
-#endif
-
-		if (need_sep) branch += TORRENT_SEPARATOR_CHAR;
-		branch.append(str, len);
-	}
-
-	std::string combine_path(std::string const& lhs, std::string const& rhs)
-	{
-		TORRENT_ASSERT(!is_complete(rhs));
-		if (lhs.empty() || lhs == ".") return rhs;
-		if (rhs.empty() || rhs == ".") return lhs;
-
-#if defined(TORRENT_WINDOWS) || defined(TORRENT_OS2)
-#define TORRENT_SEPARATOR "\\"
-		bool need_sep = lhs[lhs.size()-1] != '\\' && lhs[lhs.size()-1] != '/';
-#else
-#define TORRENT_SEPARATOR "/"
-		bool need_sep = lhs[lhs.size()-1] != '/';
-#endif
-		std::string ret;
-		int target_size = lhs.size() + rhs.size() + 2;
-		ret.resize(target_size);
-		target_size = snprintf(&ret[0], target_size, "%s%s%s", lhs.c_str()
-			, (need_sep?TORRENT_SEPARATOR:""), rhs.c_str());
-		ret.resize(target_size);
-		return ret;
-	}
-
-	std::string current_working_directory()
-	{
-#if defined TORRENT_WINDOWS && !defined TORRENT_MINGW
-#if TORRENT_USE_WSTRING
-		wchar_t cwd[TORRENT_MAX_PATH];
-		_wgetcwd(cwd, sizeof(cwd) / sizeof(wchar_t));
-#else
-		char cwd[TORRENT_MAX_PATH];
-		_getcwd(cwd, sizeof(cwd));
-#endif // TORRENT_USE_WSTRING
-#else
-		char cwd[TORRENT_MAX_PATH];
-		if (getcwd(cwd, sizeof(cwd)) == 0) return "/";
-#endif
-#if defined TORRENT_WINDOWS && !defined TORRENT_MINGW && TORRENT_USE_WSTRING
-		return convert_from_wstring(cwd);
-#else
-		return convert_from_native(cwd);
-#endif
-	}
-
-#if TORRENT_USE_UNC_PATHS
-	std::string canonicalize_path(std::string const& f)
-	{
-		std::string ret;
-		ret.resize(f.size());
-		char* write_cur = &ret[0];
-		char* last_write_sep = write_cur;
-
-		char const* read_cur = f.c_str();
-		char const* last_read_sep = read_cur;
-
-		// the last_*_sep pointers point to one past
-		// the last path separator encountered and is
-		// initializes to the first character in the path
-		while (*read_cur)
-		{
-			if (*read_cur != '\\')
-			{
-				*write_cur++ = *read_cur++;
-				continue;
-			}
-			int element_len = read_cur - last_read_sep;
-			if (element_len == 1 && memcmp(last_read_sep, ".", 1) == 0)
-			{
-				--write_cur;
-				++read_cur;
-				last_read_sep = read_cur;
-				continue;
-			}
-			if (element_len == 2 && memcmp(last_read_sep, "..", 2) == 0)
-			{
-				// find the previous path separator
-				if (last_write_sep > &ret[0])
-				{
-					--last_write_sep;
-					while (last_write_sep > &ret[0]
-						&& last_write_sep[-1] != '\\')
-						--last_write_sep;
-				}
-				write_cur = last_write_sep;
-				// find the previous path separator
-				if (last_write_sep > &ret[0])
-				{
-					--last_write_sep;
-					while (last_write_sep > &ret[0]
-						&& last_write_sep[-1] != '\\')
-						--last_write_sep;
-				}
-				++read_cur;
-				last_read_sep = read_cur;
-				continue;
-			}
-			*write_cur++ = *read_cur++;
-			last_write_sep = write_cur;
-			last_read_sep = read_cur;
-		}
-		// terminate destination string
-		*write_cur = 0;
-		ret.resize(write_cur - &ret[0]);
-		return ret;
-	}
-#endif
-
-	boost::int64_t file_size(std::string const& f)
-	{
-		error_code ec;
-		file_status s;
-		stat_file(f, &s, ec);
-		if (ec) return 0;
-		return s.file_size;
-	}
-
-	bool exists(std::string const& f, error_code& ec)
-	{
-		file_status s;
-		stat_file(f, &s, ec);
-		if (ec)
-		{
-			if (ec == boost::system::errc::no_such_file_or_directory)
-				ec.clear();
-			return false;
-		}
-		return true;
-	}
-
-	bool exists(std::string const& f)
-	{
-		error_code ec;
-		return exists(f, ec);
-	}
-
-	void remove(std::string const& inf, error_code& ec)
-	{
-		ec.clear();
-
-#ifdef TORRENT_WINDOWS
-		// windows does not allow trailing / or \ in
-		// the path when removing files
-		std::string pruned;
-		if (inf[inf.size() - 1] == '/'
-			|| inf[inf.size() - 1] == '\\')
-			pruned = inf.substr(0, inf.size() - 1);
-		else
-			pruned = inf;
-#if TORRENT_USE_WSTRING
-#define DeleteFile_ DeleteFileW
-#define RemoveDirectory_ RemoveDirectoryW
-		std::wstring f = convert_to_wstring(pruned);
-#else
-#define DeleteFile_ DeleteFileA
-#define RemoveDirectory_ RemoveDirectoryA
-		std::string f = convert_to_native(pruned);
-#endif
-		if (DeleteFile_(f.c_str()) == 0)
-		{
-			if (GetLastError() == ERROR_ACCESS_DENIED)
-			{
-				if (RemoveDirectory_(f.c_str()) != 0)
-					return;
-			}
-			ec.assign(GetLastError(), system_category());
-			return;
-		}
-#else // TORRENT_WINDOWS
-		std::string const& f = convert_to_native(inf);
-		if (::remove(f.c_str()) < 0)
-		{
-			ec.assign(errno, system_category());
-			return;
-		}
-#endif // TORRENT_WINDOWS
-	}
-
-	void remove_all(std::string const& f, error_code& ec)
-	{
-		ec.clear();
-
-		file_status s;
-		stat_file(f, &s, ec);
-		if (ec) return;
-
-		if (s.mode & file_status::directory)
-		{
-			for (directory i(f, ec); !i.done(); i.next(ec))
-			{
-				if (ec) return;
-				std::string p = i.file();
-				if (p == "." || p == "..") continue;
-				remove_all(combine_path(f, p), ec);
-				if (ec) return;
-			}
-		}
-		remove(f, ec);
-	}
-
-	std::string complete(std::string const& f)
-	{
-		if (is_complete(f)) return f;
-		if (f == ".") return current_working_directory();
-		return combine_path(current_working_directory(), f);
-	}
-
-	bool is_complete(std::string const& f)
-	{
-		if (f.empty()) return false;
-#if defined(TORRENT_WINDOWS) || defined(TORRENT_OS2)
-		int i = 0;
-		// match the xx:\ or xx:/ form
-		while (f[i] && is_alpha(f[i])) ++i;
-		if (i < int(f.size()-1) && f[i] == ':' && (f[i+1] == '\\' || f[i+1] == '/'))
-			return true;
-
-		// match the \\ form
-		if (int(f.size()) >= 2 && f[0] == '\\' && f[1] == '\\')
-			return true;
-		return false;
-#else
-		if (f[0] == '/') return true;
-		return false;
-#endif
+		return std::unique_ptr<T, decltype(&std::free)>(ptr, &std::free);
 	}
 
 	directory::directory(std::string const& path, error_code& ec)
 		: m_done(false)
 	{
 		ec.clear();
+		std::string p{ path };
+
 #ifdef TORRENT_WINDOWS
-		m_inode = 0;
 		// the path passed to FindFirstFile() must be
 		// a pattern
-		std::string f = convert_separators(path);
-		if (!f.empty() && f[f.size()-1] != '\\') f += "\\*";
-		else f += "*";
+		p.append((!p.empty() && p.back() != '\\') ? "\\*" : "*");
+#else
+		// the path passed to opendir() may not
+		// end with a /
+		if (!p.empty() && p.back() == '/')
+			p.pop_back();
+#endif
+
+		native_path_string f = convert_to_native_path_string(p);
+
+#ifdef TORRENT_WINDOWS
+		m_inode = 0;
+
 #if TORRENT_USE_WSTRING
 #define FindFirstFile_ FindFirstFileW
-		std::wstring p = convert_to_wstring(f);
 #else
 #define FindFirstFile_ FindFirstFileA
-		std::string p = convert_to_native(f);
 #endif
-		m_handle = FindFirstFile_(p.c_str(), &m_fd);
+		m_handle = FindFirstFile_(f.c_str(), &m_fd);
 		if (m_handle == INVALID_HANDLE_VALUE)
 		{
 			ec.assign(GetLastError(), system_category());
 			m_done = true;
 			return;
 		}
+#undef FindFirstFile_
 #else
 
-		memset(&m_dirent, 0, sizeof(dirent));
+		std::memset(&m_dirent, 0, sizeof(dirent));
 		m_name[0] = 0;
 
-		// the path passed to opendir() may not
-		// end with a /
-		std::string p = path;
-		if (!path.empty() && path[path.size()-1] == '/')
-			p.resize(path.size()-1);
-
-		p = convert_to_native(p);
-		m_handle = opendir(p.c_str());
-		if (m_handle == 0)
+		m_handle = ::opendir(f.c_str());
+		if (m_handle == nullptr)
 		{
 			ec.assign(errno, system_category());
 			m_done = true;
@@ -1217,7 +398,7 @@ namespace libtorrent
 #endif
 	}
 
-	boost::uint64_t directory::inode() const
+	std::uint64_t directory::inode() const
 	{
 #ifdef TORRENT_WINDOWS
 		return m_inode;
@@ -1229,11 +410,7 @@ namespace libtorrent
 	std::string directory::file() const
 	{
 #ifdef TORRENT_WINDOWS
-#if TORRENT_USE_WSTRING
-		return convert_from_wstring(m_fd.cFileName);
-#else
-		return convert_from_native(m_fd.cFileName);
-#endif
+		return convert_from_native_path(m_fd.cFileName);
 #else
 		return convert_from_native(m_dirent.d_name);
 #endif
@@ -1255,6 +432,7 @@ namespace libtorrent
 			if (err != ERROR_NO_MORE_FILES)
 				ec.assign(err, system_category());
 		}
+#undef FindNextFile_
 		++m_inode;
 #else
 		dirent* dummy;
@@ -1263,12 +441,12 @@ namespace libtorrent
 			ec.assign(errno, system_category());
 			m_done = true;
 		}
-		if (dummy == 0) m_done = true;
+		if (dummy == nullptr) m_done = true;
 #endif
 	}
 
 #ifndef INVALID_HANDLE_VALUE
-#define INVALID_HANDLE_VALUE -1
+#define INVALID_HANDLE_VALUE (-1)
 #endif
 
 #ifdef TORRENT_WINDOWS
@@ -1276,7 +454,7 @@ namespace libtorrent
 	{
 		overlapped_t()
 		{
-			memset(&ol, 0, sizeof(ol));
+			std::memset(&ol, 0, sizeof(ol));
 			ol.hEvent = CreateEvent(0, true, false, 0);
 		}
 		~overlapped_t()
@@ -1293,7 +471,7 @@ namespace libtorrent
 				return -1;
 			}
 
-			DWORD ret = -1;
+			DWORD ret;
 			if (GetOverlappedResult(file, &ol, &ret, false) == 0)
 			{
 				DWORD last_error = GetLastError();
@@ -1324,19 +502,12 @@ namespace libtorrent
 	file::file()
 		: m_file_handle(INVALID_HANDLE_VALUE)
 		, m_open_mode(0)
-	{
-#ifdef TORRENT_DISK_STATS
-		m_file_id = 0;
-#endif
-	}
+	{}
 
-	file::file(std::string const& path, int mode, error_code& ec)
+	file::file(std::string const& path, std::uint32_t const mode, error_code& ec)
 		: m_file_handle(INVALID_HANDLE_VALUE)
 		, m_open_mode(0)
 	{
-#ifdef TORRENT_DISK_STATS
-		m_file_id = 0;
-#endif
 		// the return value is not important, since the
 		// error code contains the same information
 		open(path, mode, ec);
@@ -1347,33 +518,10 @@ namespace libtorrent
 		close();
 	}
 
-#ifdef TORRENT_DISK_STATS
-	namespace
-	{
-		boost::uint32_t silly_hash(std::string const& str)
-		{
-			boost::uint32_t ret = 1;
-			for (int i = 0; i < str.size(); ++i)
-			{
-				if (str[i] == 0) continue;
-					ret *= int(str[i]);
-			}
-			return ret;
-		}
-	}
-#endif
-
-	bool file::open(std::string const& path, int mode, error_code& ec)
+	bool file::open(std::string const& path, std::uint32_t mode, error_code& ec)
 	{
 		close();
-
-#ifdef TORRENT_DEBUG_FILE_LEAKS
-		m_file_path = path;
-#endif
-
-#ifdef TORRENT_DISK_STATS
-		m_file_id = silly_hash(path);
-#endif
+		native_path_string file_path = convert_to_native_path_string(path);
 
 #ifdef TORRENT_WINDOWS
 
@@ -1401,20 +549,10 @@ namespace libtorrent
 			FILE_ATTRIBUTE_HIDDEN, // hidden + executable
 		};
 
-		std::string p = convert_separators(path);
-#if TORRENT_USE_UNC_PATHS
-		// UNC paths must be absolute
-		// network paths are already UNC paths
-		if (path.substr(0,2) == "\\\\") p = path;
-		else p = "\\\\?\\" + (is_complete(p) ? p : combine_path(current_working_directory(), p));
-#endif
-
 #if TORRENT_USE_WSTRING
 #define CreateFile_ CreateFileW
-		std::wstring file_path = convert_to_wstring(p);
 #else
 #define CreateFile_ CreateFileA
-		std::string file_path = convert_to_native(p);
 #endif
 
 		TORRENT_ASSERT((mode & rw_mask) < sizeof(mode_array)/sizeof(mode_array[0]));
@@ -1433,6 +571,8 @@ namespace libtorrent
 		handle_type handle = CreateFile_(file_path.c_str(), m.rw_mode
 			, (mode & lock_file) ? FILE_SHARE_READ : FILE_SHARE_READ | FILE_SHARE_WRITE
 			, 0, m.create_mode, flags, 0);
+
+#undef CreateFile_
 
 		if (handle == INVALID_HANDLE_VALUE)
 		{
@@ -1476,11 +616,11 @@ namespace libtorrent
 			| ((mode & no_atime) ? O_NOATIME : 0)
 #endif
 #ifdef O_SYNC
-			| ((mode & no_cache) ? O_SYNC: 0)
+			| ((mode & no_cache) ? O_SYNC : 0)
 #endif
 			;
 
-		handle_type handle = ::open(convert_to_native(path).c_str()
+		handle_type handle = ::open(file_path.c_str()
 			, mode_array[mode & rw_mask] | open_mode
 			, permissions);
 
@@ -1492,7 +632,7 @@ namespace libtorrent
 		{
 			mode &= ~no_atime;
 			open_mode &= ~O_NOATIME;
-			handle = ::open(path.c_str(), mode_array[mode & rw_mask] | open_mode
+			handle = ::open(file_path.c_str(), mode_array[mode & rw_mask] | open_mode
 				, permissions);
 		}
 #endif
@@ -1549,14 +689,6 @@ namespace libtorrent
 		return true;
 	}
 
-#ifdef TORRENT_DEBUG_FILE_LEAKS
-	void file::print_info(FILE* out) const
-	{
-		if (!is_open()) return;
-		fprintf(out, "\n===> FILE: %s\n", m_file_path.c_str());
-	}
-#endif
-
 	bool file::is_open() const
 	{
 		return m_file_handle != INVALID_HANDLE_VALUE;
@@ -1572,13 +704,13 @@ namespace libtorrent
 			return false;
 
 		overlapped_t ol;
-		if (ol.ol.hEvent == NULL) return false;
+		if (ol.ol.hEvent == nullptr) return false;
 
-#ifdef TORRENT_MINGW
+#ifndef FSCTL_QUERY_ALLOCATED_RANGES
 typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
 	LARGE_INTEGER FileOffset;
 	LARGE_INTEGER Length;
-} FILE_ALLOCATED_RANGE_BUFFER, *PFILE_ALLOCATED_RANGE_BUFFER;
+} FILE_ALLOCATED_RANGE_BUFFER;
 #define FSCTL_QUERY_ALLOCATED_RANGES ((0x9 << 16) | (1 << 14) | (51 << 2) | 3)
 #endif
 		FILE_ALLOCATED_RANGE_BUFFER in;
@@ -1599,7 +731,6 @@ typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
 		}
 		else if (ret == FALSE)
 		{
-//			int error = GetLastError();
 			return true;
 		}
 
@@ -1614,10 +745,6 @@ typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
 
 	void file::close()
 	{
-#ifdef TORRENT_DISK_STATS
-		m_file_id = 0;
-#endif
-
 		if (!is_open()) return;
 
 #ifdef TORRENT_WINDOWS
@@ -1625,7 +752,7 @@ typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
 		// if this file is open for writing, has the sparse
 		// flag set, but there are no sparse regions, unset
 		// the flag
-		int rw_mode = m_open_mode & rw_mask;
+		std::uint32_t rw_mode = m_open_mode & rw_mask;
 		if ((rw_mode != read_only)
 			&& (m_open_mode & sparse)
 			&& !is_sparse(native_handle()))
@@ -1636,7 +763,7 @@ typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
 #ifdef TORRENT_MINGW
 			typedef struct _FILE_SET_SPARSE_BUFFER {
 				BOOLEAN SetSparse;
-			} FILE_SET_SPARSE_BUFFER, *PFILE_SET_SPARSE_BUFFER;
+			} FILE_SET_SPARSE_BUFFER;
 #endif
 			DWORD temp;
 			FILE_SET_SPARSE_BUFFER b;
@@ -1664,76 +791,76 @@ typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
 	namespace {
 
 #if !TORRENT_USE_PREADV
-	void gather_copy(file::iovec_t const* bufs, int num_bufs, char* dst)
+	void gather_copy(span<iovec_t const> bufs, char* dst)
 	{
 		std::size_t offset = 0;
-		for (int i = 0; i < num_bufs; ++i)
+		for (auto buf : bufs)
 		{
-			memcpy(dst + offset, bufs[i].iov_base, bufs[i].iov_len);
-			offset += bufs[i].iov_len;
+			std::memcpy(dst + offset, buf.iov_base, buf.iov_len);
+			offset += buf.iov_len;
 		}
 	}
 
-	void scatter_copy(file::iovec_t const* bufs, int num_bufs, char const* src)
+	void scatter_copy(span<iovec_t const> bufs, char const* src)
 	{
 		std::size_t offset = 0;
-		for (int i = 0; i < num_bufs; ++i)
+		for (auto buf : bufs)
 		{
-			memcpy(bufs[i].iov_base, src + offset, bufs[i].iov_len);
-			offset += bufs[i].iov_len;
+			std::memcpy(buf.iov_base, src + offset, buf.iov_len);
+			offset += buf.iov_len;
 		}
 	}
 
-	bool coalesce_read_buffers(file::iovec_t const*& bufs, int& num_bufs
-		, file::iovec_t* tmp)
+	bool coalesce_read_buffers(span<iovec_t const>& bufs
+		, iovec_t& tmp)
 	{
-		int const buf_size = bufs_size(bufs, num_bufs);
-		char* buf = static_cast<char*>(malloc(buf_size));
+		std::size_t const buf_size = aux::numeric_cast<std::size_t>(bufs_size(bufs));
+		char* buf = static_cast<char*>(std::malloc(buf_size));
 		if (!buf) return false;
-		tmp->iov_base = buf;
-		tmp->iov_len = buf_size;
-		bufs = tmp;
-		num_bufs = 1;
+		tmp.iov_base = buf;
+		tmp.iov_len = buf_size;
+		bufs = span<iovec_t const>(tmp);
 		return true;
 	}
 
-	void coalesce_read_buffers_end(file::iovec_t const* bufs, int const num_bufs
+	void coalesce_read_buffers_end(span<iovec_t const> bufs
 		, char* const buf, bool const copy)
 	{
-		if (copy) scatter_copy(bufs, num_bufs, buf);
-		free(buf);
+		if (copy) scatter_copy(bufs, buf);
+		std::free(buf);
 	}
 
-	bool coalesce_write_buffers(file::iovec_t const*& bufs, int& num_bufs
-		, file::iovec_t* tmp)
+	bool coalesce_write_buffers(span<iovec_t const>& bufs
+		, iovec_t& tmp)
 	{
-		int const buf_size = bufs_size(bufs, num_bufs);
-		char* buf = static_cast<char*>(malloc(buf_size));
+		std::size_t const buf_size = aux::numeric_cast<std::size_t>(bufs_size(bufs));
+		char* buf = static_cast<char*>(std::malloc(buf_size));
 		if (!buf) return false;
-		gather_copy(bufs, num_bufs, buf);
-		tmp->iov_base = buf;
-		tmp->iov_len = buf_size;
-		bufs = tmp;
-		num_bufs = 1;
+		gather_copy(bufs, buf);
+		tmp.iov_base = buf;
+		tmp.iov_len = buf_size;
+		bufs = span<iovec_t const>(tmp);
 		return true;
 	}
 #endif // TORRENT_USE_PREADV
 
 	template <class Fun>
-	boost::int64_t iov(Fun f, handle_type fd, boost::int64_t file_offset, file::iovec_t const* bufs_in
-		, int num_bufs_in, error_code& ec)
+	std::int64_t iov(Fun f, handle_type fd, std::int64_t file_offset
+		, span<iovec_t const> bufs, error_code& ec)
 	{
-		file::iovec_t const* bufs = bufs_in;
-		int num_bufs = num_bufs_in;
-
 #if TORRENT_USE_PREADV
 
 		int ret = 0;
-		while (num_bufs > 0)
+		while (!bufs.empty())
 		{
-			int nbufs = (std::min)(num_bufs, TORRENT_IOV_MAX);
+#ifdef IOV_MAX
+			auto const nbufs = bufs.first((std::min)(int(bufs.size()), IOV_MAX));
+#else
+			auto const nbufs = bufs;
+#endif
+
 			int tmp_ret = 0;
-			tmp_ret = f(fd, bufs, nbufs, file_offset);
+			tmp_ret = f(fd, nbufs.data(), int(nbufs.size()), file_offset);
 			if (tmp_ret < 0)
 			{
 #ifdef TORRENT_WINDOWS
@@ -1750,20 +877,19 @@ typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
 			// just need to issue the read/write operation again. In either case,
 			// punt that to the upper layer, as reissuing the operations is
 			// complicated here
-			const int expected_len = bufs_size(bufs, nbufs);
+			const int expected_len = bufs_size(nbufs);
 			if (tmp_ret < expected_len) break;
 
-			num_bufs -= nbufs;
-			bufs += nbufs;
+			bufs = bufs.subspan(nbufs.size());
 		}
 		return ret;
 
 #elif TORRENT_USE_PREAD
 
-		int ret = 0;
-		for (file::iovec_t const* i = bufs, *end(bufs + num_bufs); i < end; ++i)
+		std::int64_t ret = 0;
+		for (auto i : bufs)
 		{
-			int tmp_ret = f(fd, i->iov_base, i->iov_len, file_offset);
+			std::int64_t const tmp_ret = f(fd, i.iov_base, i.iov_len, file_offset);
 			if (tmp_ret < 0)
 			{
 #ifdef TORRENT_WINDOWS
@@ -1775,7 +901,7 @@ typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
 			}
 			file_offset += tmp_ret;
 			ret += tmp_ret;
-			if (tmp_ret < int(i->iov_len)) break;
+			if (tmp_ret < int(i.iov_len)) break;
 		}
 
 		return ret;
@@ -1798,9 +924,9 @@ typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
 		}
 #endif
 
-		for (file::iovec_t const* i = bufs, *end(bufs + num_bufs); i < end; ++i)
+		for (auto i : bufs)
 		{
-			int tmp_ret = f(fd, i->iov_base, i->iov_len);
+			int tmp_ret = f(fd, i.iov_base, i.iov_len);
 			if (tmp_ret < 0)
 			{
 #ifdef TORRENT_WINDOWS
@@ -1812,20 +938,20 @@ typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
 			}
 			file_offset += tmp_ret;
 			ret += tmp_ret;
-			if (tmp_ret < int(i->iov_len)) break;
+			if (tmp_ret < int(i.iov_len)) break;
 		}
 
 		return ret;
 
-#endif
+#endif // USE_PREADV
 	}
 
 	} // anonymous namespace
 
 	// this has to be thread safe and atomic. i.e. on posix systems it has to be
 	// turned into a series of pread() calls
-	boost::int64_t file::readv(boost::int64_t file_offset, iovec_t const* bufs, int num_bufs
-		, error_code& ec, int flags)
+	std::int64_t file::readv(std::int64_t file_offset, span<iovec_t const> bufs
+		, error_code& ec, std::uint32_t flags)
 	{
 		if (m_file_handle == INVALID_HANDLE_VALUE)
 		{
@@ -1837,40 +963,38 @@ typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
 			return -1;
 		}
 		TORRENT_ASSERT((m_open_mode & rw_mask) == read_only || (m_open_mode & rw_mask) == read_write);
-		TORRENT_ASSERT(bufs);
-		TORRENT_ASSERT(num_bufs > 0);
+		TORRENT_ASSERT(!bufs.empty());
 		TORRENT_ASSERT(is_open());
 
 #if TORRENT_USE_PREADV
 		TORRENT_UNUSED(flags);
 
-		int ret = iov(&::preadv, native_handle(), file_offset, bufs, num_bufs, ec);
+		std::int64_t ret = iov(&::preadv, native_handle(), file_offset, bufs, ec);
 #else
 
 		// there's no point in coalescing single buffer writes
-		if (num_bufs == 1)
+		if (bufs.size() == 1)
 		{
 			flags &= ~file::coalesce_buffers;
 		}
 
-		file::iovec_t tmp;
-		file::iovec_t const* const orig_bufs = bufs;
-		int const orig_num_bufs = num_bufs;
+		iovec_t tmp;
+		span<iovec_t const> tmp_bufs = bufs;
 		if ((flags & file::coalesce_buffers))
 		{
-			if (!coalesce_read_buffers(bufs, num_bufs, &tmp))
+			if (!coalesce_read_buffers(tmp_bufs, tmp))
 				// ok, that failed, don't coalesce this read
 				flags &= ~file::coalesce_buffers;
 		}
 
 #if TORRENT_USE_PREAD
-		int ret = iov(&::pread, native_handle(), file_offset, bufs, num_bufs, ec);
+		std::int64_t ret = iov(&::pread, native_handle(), file_offset, tmp_bufs, ec);
 #else
-		int ret = iov(&::read, native_handle(), file_offset, bufs, num_bufs, ec);
+		std::int64_t ret = iov(&::read, native_handle(), file_offset, tmp_bufs, ec);
 #endif
 
 		if ((flags & file::coalesce_buffers))
-			coalesce_read_buffers_end(orig_bufs, orig_num_bufs
+			coalesce_read_buffers_end(bufs
 				, static_cast<char*>(tmp.iov_base), !ec);
 
 #endif
@@ -1880,8 +1004,8 @@ typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
 	// This has to be thread safe, i.e. atomic.
 	// that means, on posix this has to be turned into a series of
 	// pwrite() calls
-	boost::int64_t file::writev(boost::int64_t file_offset, iovec_t const* bufs, int num_bufs
-		, error_code& ec, int flags)
+	std::int64_t file::writev(std::int64_t file_offset, span<iovec_t const> bufs
+		, error_code& ec, std::uint32_t flags)
 	{
 		if (m_file_handle == INVALID_HANDLE_VALUE)
 		{
@@ -1893,8 +1017,7 @@ typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
 			return -1;
 		}
 		TORRENT_ASSERT((m_open_mode & rw_mask) == write_only || (m_open_mode & rw_mask) == read_write);
-		TORRENT_ASSERT(bufs);
-		TORRENT_ASSERT(num_bufs > 0);
+		TORRENT_ASSERT(!bufs.empty());
 		TORRENT_ASSERT(is_open());
 
 		ec.clear();
@@ -1902,31 +1025,31 @@ typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
 #if TORRENT_USE_PREADV
 		TORRENT_UNUSED(flags);
 
-		int ret = iov(&::pwritev, native_handle(), file_offset, bufs, num_bufs, ec);
+		std::int64_t ret = iov(&::pwritev, native_handle(), file_offset, bufs, ec);
 #else
 
 		// there's no point in coalescing single buffer writes
-		if (num_bufs == 1)
+		if (bufs.size() == 1)
 		{
 			flags &= ~file::coalesce_buffers;
 		}
 
-		file::iovec_t tmp;
+		iovec_t tmp;
 		if (flags & file::coalesce_buffers)
 		{
-			if (!coalesce_write_buffers(bufs, num_bufs, &tmp))
+			if (!coalesce_write_buffers(bufs, tmp))
 				// ok, that failed, don't coalesce writes
 				flags &= ~file::coalesce_buffers;
 		}
 
 #if TORRENT_USE_PREAD
-		int ret = iov(&::pwrite, native_handle(), file_offset, bufs, num_bufs, ec);
+		std::int64_t ret = iov(&::pwrite, native_handle(), file_offset, bufs, ec);
 #else
-		int ret = iov(&::write, native_handle(), file_offset, bufs, num_bufs, ec);
+		std::int64_t ret = iov(&::write, native_handle(), file_offset, bufs, ec);
 #endif
 
 		if (flags & file::coalesce_buffers)
-			free(tmp.iov_base);
+			std::free(tmp.iov_base);
 
 #endif
 #if TORRENT_USE_FDATASYNC \
@@ -1966,38 +1089,23 @@ typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
 			PTOKEN_PRIVILEGES PreviousState,
 			PDWORD ReturnLength);
 
-		static OpenProcessToken_t pOpenProcessToken = NULL;
-		static LookupPrivilegeValue_t pLookupPrivilegeValue = NULL;
-		static AdjustTokenPrivileges_t pAdjustTokenPrivileges = NULL;
-		static bool failed_advapi = false;
+		auto OpenProcessToken =
+			aux::get_library_procedure<aux::advapi32, OpenProcessToken_t>("OpenProcessToken");
+		auto LookupPrivilegeValue =
+			aux::get_library_procedure<aux::advapi32, LookupPrivilegeValue_t>("LookupPrivilegeValueA");
+		auto AdjustTokenPrivileges =
+			aux::get_library_procedure<aux::advapi32, AdjustTokenPrivileges_t>("AdjustTokenPrivileges");
 
-		if (pOpenProcessToken == NULL && !failed_advapi)
-		{
-			HMODULE advapi = LoadLibraryA("advapi32");
-			if (advapi == NULL)
-			{
-				failed_advapi = true;
-				return false;
-			}
-			pOpenProcessToken = (OpenProcessToken_t)GetProcAddress(advapi, "OpenProcessToken");
-			pLookupPrivilegeValue = (LookupPrivilegeValue_t)GetProcAddress(advapi, "LookupPrivilegeValueA");
-			pAdjustTokenPrivileges = (AdjustTokenPrivileges_t)GetProcAddress(advapi, "AdjustTokenPrivileges");
-			if (pOpenProcessToken == NULL
-				|| pLookupPrivilegeValue == NULL
-				|| pAdjustTokenPrivileges == NULL)
-			{
-				failed_advapi = true;
-				return false;
-			}
-		}
+		if (OpenProcessToken == nullptr || LookupPrivilegeValue == nullptr || AdjustTokenPrivileges == nullptr) return false;
+
 
 		HANDLE token;
-		if (!pOpenProcessToken(GetCurrentProcess()
+		if (!OpenProcessToken(GetCurrentProcess()
 			, TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token))
 			return false;
 
 		TOKEN_PRIVILEGES privs;
-		if (!pLookupPrivilegeValue(NULL, "SeManageVolumePrivilege"
+		if (!LookupPrivilegeValue(nullptr, "SeManageVolumePrivilege"
 			, &privs.Privileges[0].Luid))
 		{
 			CloseHandle(token);
@@ -2007,7 +1115,7 @@ typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
 		privs.PrivilegeCount = 1;
 		privs.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
 
-		bool ret = pAdjustTokenPrivileges(token, FALSE, &privs, 0, NULL, NULL)
+		bool ret = AdjustTokenPrivileges(token, FALSE, &privs, 0, nullptr, nullptr)
 			&& GetLastError() == ERROR_SUCCESS;
 
 		CloseHandle(token);
@@ -2015,37 +1123,21 @@ typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
 		return ret;
 	}
 
-	void set_file_valid_data(HANDLE f, boost::int64_t size)
+	void set_file_valid_data(HANDLE f, std::int64_t size)
 	{
 		typedef BOOL (WINAPI *SetFileValidData_t)(HANDLE, LONGLONG);
-		static SetFileValidData_t pSetFileValidData = NULL;
-		static bool failed_kernel32 = false;
+		auto SetFileValidData =
+			aux::get_library_procedure<aux::kernel32, SetFileValidData_t>("SetFileValidData");
 
-		if (pSetFileValidData == NULL && !failed_kernel32)
-		{
-			HMODULE k32 = LoadLibraryA("kernel32");
-			if (k32 == NULL)
-			{
-				failed_kernel32 = true;
-				return;
-			}
-			pSetFileValidData = (SetFileValidData_t)GetProcAddress(k32, "SetFileValidData");
-			if (pSetFileValidData == NULL)
-			{
-				failed_kernel32 = true;
-				return;
-			}
-		}
-
-		TORRENT_ASSERT(pSetFileValidData);
+		if (SetFileValidData == nullptr) return;
 
 		// we don't necessarily expect to have enough
 		// privilege to do this, so ignore errors.
-		pSetFileValidData(f, size);
+		SetFileValidData(f, size);
 	}
 #endif
 
-	bool file::set_size(boost::int64_t s, error_code& ec)
+	bool file::set_size(std::int64_t s, error_code& ec)
 	{
 		TORRENT_ASSERT(is_open());
 		TORRENT_ASSERT(s >= 0);
@@ -2085,30 +1177,16 @@ typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
 				, LPVOID lpFileInformation
 				, DWORD dwBufferSize);
 
-			static GetFileInformationByHandleEx_t GetFileInformationByHandleEx_ = NULL;
-
-			static bool failed_kernel32 = false;
-
-			if ((GetFileInformationByHandleEx_ == NULL) && !failed_kernel32)
-			{
-				HMODULE kernel32 = LoadLibraryA("kernel32.dll");
-				if (kernel32)
-				{
-					GetFileInformationByHandleEx_ = (GetFileInformationByHandleEx_t)GetProcAddress(kernel32, "GetFileInformationByHandleEx");
-				}
-				else
-				{
-					failed_kernel32 = true;
-				}
-			}
+			auto GetFileInformationByHandleEx =
+				aux::get_library_procedure<aux::kernel32, GetFileInformationByHandleEx_t>("GetFileInformationByHandleEx");
 
 			offs.QuadPart = 0;
-			if (GetFileInformationByHandleEx_)
+			if (GetFileInformationByHandleEx != nullptr)
 			{
 				// only allocate the space if the file
 				// is not fully allocated
 				FILE_STANDARD_INFO inf;
-				if (GetFileInformationByHandleEx_(native_handle()
+				if (GetFileInformationByHandleEx(native_handle()
 					, FileStandardInfo, &inf, sizeof(inf)) == FALSE)
 				{
 					ec.assign(GetLastError(), system_category());
@@ -2148,7 +1226,7 @@ typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
 		// update the modification time of the file for no good
 		// reason.
 		if ((m_open_mode & sparse) == 0
-			&& st.st_blocks < (s + st.st_blksize - 1) / st.st_blksize)
+			&& std::int64_t(st.st_blocks) < (s + st.st_blksize - 1) / st.st_blksize)
 		{
 			// How do we know that the file is already allocated?
 			// if we always try to allocate the space, we'll update
@@ -2186,16 +1264,12 @@ typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
 
 #endif // F_ALLOCSP64
 
-#if defined TORRENT_LINUX || TORRENT_HAS_FALLOCATE
-			int ret;
-#endif
-
 #if TORRENT_HAS_FALLOCATE
 			// if fallocate failed, we have to use posix_fallocate
 			// which can be painfully slow
 			// if you get a compile error here, you might want to
 			// define TORRENT_HAS_FALLOCATE to 0.
-			ret = posix_fallocate(native_handle(), 0, s);
+			int const ret = posix_fallocate(native_handle(), 0, s);
 			// posix_allocate fails with EINVAL in case the underlying
 			// filesystem does not support this operation
 			if (ret != 0 && ret != EINVAL)
@@ -2209,7 +1283,7 @@ typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
 		return true;
 	}
 
-	boost::int64_t file::get_size(error_code& ec) const
+	std::int64_t file::get_size(error_code& ec) const
 	{
 #ifdef TORRENT_WINDOWS
 		LARGE_INTEGER file_size;
@@ -2230,15 +1304,15 @@ typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
 #endif
 	}
 
-	boost::int64_t file::sparse_end(boost::int64_t start) const
+	std::int64_t file::sparse_end(std::int64_t start) const
 	{
 #ifdef TORRENT_WINDOWS
 
-#ifdef TORRENT_MINGW
+#ifndef FSCTL_QUERY_ALLOCATED_RANGES
 typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
 	LARGE_INTEGER FileOffset;
 	LARGE_INTEGER Length;
-} FILE_ALLOCATED_RANGE_BUFFER, *PFILE_ALLOCATED_RANGE_BUFFER;
+} FILE_ALLOCATED_RANGE_BUFFER;
 #define FSCTL_QUERY_ALLOCATED_RANGES ((0x9 << 16) | (1 << 14) | (51 << 2) | 3)
 #endif // TORRENT_MINGW
 
@@ -2246,7 +1320,7 @@ typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
 		DWORD bytes_returned = 0;
 		FILE_ALLOCATED_RANGE_BUFFER in;
 		error_code ec;
-		boost::int64_t file_size = get_size(ec);
+		std::int64_t file_size = get_size(ec);
 		if (ec) return start;
 
 		in.FileOffset.QuadPart = start;
@@ -2273,81 +1347,11 @@ typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
 
 #elif defined SEEK_DATA
 		// this is supported on solaris
-		boost::int64_t ret = lseek(native_handle(), start, SEEK_DATA);
+		std::int64_t ret = lseek(native_handle(), start, SEEK_DATA);
 		if (ret < 0) return start;
 		return start;
 #else
 		return start;
 #endif
 	}
-
-#ifdef TORRENT_DEBUG_FILE_LEAKS
-	std::set<file_handle*> global_file_handles;
-	mutex file_handle_mutex;
-
-	file_handle::file_handle()
-	{
-		mutex::scoped_lock l(file_handle_mutex);
-		global_file_handles.insert(this);
-		stack[0] = 0;
-	}
-	file_handle::file_handle(file* f): m_file(f)
-	{
-		mutex::scoped_lock l(file_handle_mutex);
-		global_file_handles.insert(this);
-		if (f) print_backtrace(stack, sizeof(stack), 10);
-		else stack[0] = 0;
-	}
-	file_handle::file_handle(file_handle const& fh)
-	{
-		mutex::scoped_lock l(file_handle_mutex);
-		global_file_handles.insert(this);
-		m_file = fh.m_file;
-		if (m_file) print_backtrace(stack, sizeof(stack), 10);
-		else stack[0] = 0;
-	}
-	file_handle::~file_handle()
-	{
-		mutex::scoped_lock l(file_handle_mutex);
-		global_file_handles.erase(this);
-		stack[0] = 0;
-	}
-	file* file_handle::operator->() { return m_file.get(); }
-	file const* file_handle::operator->() const { return m_file.get(); }
-	file& file_handle::operator*() { return *m_file.get(); }
-	file const& file_handle::operator*() const { return *m_file.get(); }
-	file* file_handle::get() { return m_file.get(); }
-	file const* file_handle::get() const { return m_file.get(); }
-	file_handle::operator bool() const { return m_file.get(); }
-	file_handle& file_handle::reset(file* f)
-	{
-		mutex::scoped_lock l(file_handle_mutex);
-		if (f) print_backtrace(stack, sizeof(stack), 10);
-		else stack[0] = 0;
-		l.unlock();
-		m_file.reset(f);
-		return *this;
-	}
-
-	void print_open_files(char const* event, char const* name)
-	{
-		FILE* out = fopen("open_files.log", "a+");
-		mutex::scoped_lock l(file_handle_mutex);
-		fprintf(out, "\n\nEVENT: %s TORRENT: %s\n\n", event, name);
-		for (std::set<file_handle*>::iterator i = global_file_handles.begin()
-			, end(global_file_handles.end()); i != end; ++i)
-		{
-			TORRENT_ASSERT(*i != NULL);
-			if (!*i) continue;
-			file_handle const& h = **i;
-			if (!h) continue;
-
-			if (!h->is_open()) continue;
-			h->print_info(out);
-			fprintf(out, "\n%s\n\n", h.stack);
-		}
-		fclose(out);
-	}
-#endif
 }
-

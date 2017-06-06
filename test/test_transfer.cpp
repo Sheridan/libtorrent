@@ -35,17 +35,16 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/hasher.hpp"
 #include "libtorrent/alert_types.hpp"
 #include "libtorrent/bencode.hpp"
-#include "libtorrent/thread.hpp"
 #include "libtorrent/time.hpp"
-#include "libtorrent/file.hpp"
+#include "libtorrent/aux_/path.hpp"
 #include "libtorrent/torrent_info.hpp"
 
 #include "test.hpp"
 #include "setup_transfer.hpp"
 #include "test_utils.hpp"
 
-#include <boost/tuple/tuple.hpp>
-#include <boost/bind.hpp>
+#include <tuple>
+#include <functional>
 
 #include <fstream>
 #include <iostream>
@@ -53,7 +52,7 @@ POSSIBILITY OF SUCH DAMAGE.
 using namespace libtorrent;
 namespace lt = libtorrent;
 
-using boost::tuples::ignore;
+using std::ignore;
 
 const int mask = alert::all_categories & ~(alert::performance_warning | alert::stats_notification);
 
@@ -72,55 +71,53 @@ bool on_alert(alert const* a)
 // simulate a full disk
 struct test_storage : default_storage
 {
-	test_storage(storage_params const& params)
-		: default_storage(params)
+	test_storage(storage_params const& params, file_pool& pool)
+		: default_storage(params, pool)
 		, m_written(0)
 		, m_limit(16 * 1024 * 2)
 	{}
 
-	virtual void set_file_priority(std::vector<boost::uint8_t> const& p
-		, storage_error& ec) {}
+	void set_file_priority(aux::vector<std::uint8_t, file_index_t> const& p
+		, storage_error& ec) override {}
 
 	void set_limit(int lim)
 	{
-		mutex::scoped_lock l(m_mutex);
+		std::lock_guard<std::mutex> l(m_mutex);
 		m_limit = lim;
 	}
 
 	int writev(
-		file::iovec_t const* bufs
-		, int num_bufs
-		, int piece_index
+		span<iovec_t const> bufs
+		, piece_index_t piece_index
 		, int offset
-		, int flags
-		, storage_error& se)
+		, std::uint32_t const flags
+		, storage_error& se) override
 	{
-		mutex::scoped_lock l(m_mutex);
+		std::unique_lock<std::mutex> l(m_mutex);
 		if (m_written >= m_limit)
 		{
-			std::cerr << "storage written: " << m_written << " limit: " << m_limit << std::endl;
+			std::cout << "storage written: " << m_written << " limit: " << m_limit << std::endl;
 			error_code ec;
 			ec = error_code(boost::system::errc::no_space_on_device, generic_category());
 			se.ec = ec;
 			return 0;
 		}
 
-		for (int i = 0; i < num_bufs; ++i)
-			m_written += bufs[i].iov_len;
+		for (auto const& b : bufs) m_written += int(b.iov_len);
 		l.unlock();
-		return default_storage::writev(bufs, num_bufs, piece_index, offset, flags, se);
+		return default_storage::writev(bufs, piece_index, offset, flags, se);
 	}
 
-	virtual ~test_storage() {}
+	~test_storage() override = default;
 
 	int m_written;
 	int m_limit;
-	mutex m_mutex;
+	std::mutex m_mutex;
 };
 
-storage_interface* test_storage_constructor(storage_params const& params)
+storage_interface* test_storage_constructor(storage_params const& params, file_pool& pool)
 {
-	return new test_storage(params);
+	return new test_storage(params, pool);
 }
 
 void test_transfer(int proxy_type, settings_pack const& sett
@@ -129,7 +126,7 @@ void test_transfer(int proxy_type, settings_pack const& sett
 {
 	char const* test_name[] = {"no", "SOCKS4", "SOCKS5", "SOCKS5 password", "HTTP", "HTTP password"};
 
-	fprintf(stderr, "\n\n  ==== TESTING %s proxy ==== disk-full: %s\n\n\n"
+	std::printf("\n\n  ==== TESTING %s proxy ==== disk-full: %s\n\n\n"
 		, test_name[proxy_type], test_disk_full ? "true": "false");
 
 	// in case the previous run was terminated
@@ -228,7 +225,7 @@ void test_transfer(int proxy_type, settings_pack const& sett
 
 	create_directory("tmp1_transfer", ec);
 	std::ofstream file("tmp1_transfer/temporary");
-	boost::shared_ptr<torrent_info> t = ::create_torrent(&file, "temporary", 32 * 1024, 13, false);
+	std::shared_ptr<torrent_info> t = ::create_torrent(&file, "temporary", 32 * 1024, 13, false);
 	file.close();
 
 	TEST_CHECK(exists(combine_path("tmp1_transfer", "temporary")));
@@ -248,7 +245,7 @@ void test_transfer(int proxy_type, settings_pack const& sett
 	peer_disconnects = 0;
 
 	// test using piece sizes smaller than 16kB
-	boost::tie(tor1, tor2, ignore) = setup_transfer(&ses1, &ses2, 0
+	std::tie(tor1, tor2, ignore) = setup_transfer(&ses1, &ses2, nullptr
 		, true, false, true, "_transfer", 8 * 1024, &t, false, test_disk_full?&addp:&params);
 
 	int num_pieces = tor2.torrent_file()->num_pieces();
@@ -267,8 +264,8 @@ void test_transfer(int proxy_type, settings_pack const& sett
 		torrent_status st1 = tor1.status();
 		torrent_status st2 = tor2.status();
 
-		print_alerts(ses1, "ses1", true, true, true, &on_alert);
-		print_alerts(ses2, "ses2", true, true, true, &on_alert);
+		print_alerts(ses1, "ses1", true, true, &on_alert);
+		print_alerts(ses2, "ses2", true, true, &on_alert);
 
 		if (i % 10 == 0)
 		{
@@ -280,7 +277,7 @@ void test_transfer(int proxy_type, settings_pack const& sett
 			test_move_storage = true;
 			tor1.move_storage("tmp1_transfer_moved");
 			tor2.move_storage("tmp2_transfer_moved");
-			std::cerr << "moving storage" << std::endl;
+			std::cout << "moving storage" << std::endl;
 		}
 
 		// wait 10 loops before we restart the torrent. This lets
@@ -297,29 +294,29 @@ void test_transfer(int proxy_type, settings_pack const& sett
 			// jobs failing right after, putting us back in upload mode. So,
 			// give the disk some time to fail all disk jobs before resetting
 			// upload mode to false
-			test_sleep(500);
+			std::this_thread::sleep_for(lt::milliseconds(500));
 
 			// then we need to drain the alert queue, so the peer_disconnects
 			// counter doesn't get incremented by old alerts
-			print_alerts(ses1, "ses1", true, true, true, &on_alert);
-			print_alerts(ses2, "ses2", true, true, true, &on_alert);
+			print_alerts(ses1, "ses1", true, true, &on_alert);
+			print_alerts(ses2, "ses2", true, true, &on_alert);
 
 			lt::error_code err = tor2.status().errc;
-			fprintf(stderr, "error: \"%s\"\n", err.message().c_str());
+			std::printf("error: \"%s\"\n", err.message().c_str());
 			TEST_CHECK(!err);
 			tor2.set_upload_mode(false);
 
 			// at this point we probably disconnected the seed
 			// so we need to reconnect as well
-			fprintf(stderr, "%s: reconnecting peer\n", time_now_string());
+			std::printf("%s: reconnecting peer\n", time_now_string());
 			error_code ec;
 			tor2.connect_peer(tcp::endpoint(address::from_string("127.0.0.1", ec)
 				, ses1.listen_port()));
 
 			TEST_CHECK(tor2.status().is_finished == false);
-			fprintf(stderr, "disconnects: %d\n", peer_disconnects);
+			std::printf("disconnects: %d\n", peer_disconnects);
 			TEST_CHECK(peer_disconnects >= 2);
-			fprintf(stderr, "%s: discovered disk full mode. Raise limit and disable upload-mode\n", time_now_string());
+			std::printf("%s: discovered disk full mode. Raise limit and disable upload-mode\n", time_now_string());
 			peer_disconnects = 0;
 			continue;
 		}
@@ -337,7 +334,7 @@ void test_transfer(int proxy_type, settings_pack const& sett
 		// if nothing is being transferred after 2 seconds, we're failing the test
 //		if (!test_disk_full && st1.upload_payload_rate == 0 && i > 20) break;
 
-		test_sleep(100);
+		std::this_thread::sleep_for(lt::milliseconds(100));
 	}
 
 	TEST_CHECK(tor2.status().is_seeding);
@@ -358,6 +355,7 @@ void cleanup()
 	remove_all("tmp2_transfer_moved", ec);
 }
 
+#ifndef TORRENT_NO_DEPRECATE
 TORRENT_TEST(no_contiguous_buffers)
 {
 	using namespace libtorrent;
@@ -369,6 +367,7 @@ TORRENT_TEST(no_contiguous_buffers)
 
 	cleanup();
 }
+#endif
 
 	// test with all kinds of proxies
 TORRENT_TEST(socks5_pw)
@@ -449,7 +448,7 @@ TORRENT_TEST(allocate)
 {
 	using namespace libtorrent;
 	// test storage_mode_allocate
-	fprintf(stderr, "full allocation mode\n");
+	std::printf("full allocation mode\n");
 	test_transfer(0, settings_pack(), false, storage_mode_allocate);
 
 	cleanup();

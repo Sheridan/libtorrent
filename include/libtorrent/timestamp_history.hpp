@@ -33,9 +33,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #ifndef TIMESTAMP_HISTORY_HPP
 #define TIMESTAMP_HISTORY_HPP
 
-#include "libtorrent/aux_/disable_warnings_push.hpp"
-#include <boost/cstdint.hpp>
-#include "libtorrent/aux_/disable_warnings_pop.hpp"
+#include <cstdint>
 
 #include "libtorrent/config.hpp"
 #include "libtorrent/assert.hpp"
@@ -53,22 +51,22 @@ struct TORRENT_EXTRA_EXPORT timestamp_history
 
 	// add a sample to the timestamp history. If step is true, it's been
 	// a minute since the last step
-	boost::uint32_t add_sample(boost::uint32_t sample, bool step);
-	boost::uint32_t base() const { TORRENT_ASSERT(initialized()); return m_base; }
+	std::uint32_t add_sample(std::uint32_t sample, bool step);
+	std::uint32_t base() const { TORRENT_ASSERT(initialized()); return m_base; }
 	void adjust_base(int change);
 
 private:
 
 	// this is a circular buffer
-	boost::uint32_t m_history[history_size];
+	std::uint32_t m_history[history_size];
 
 	// this is the lowest sample seen in the
 	// last 'history_size' minutes
-	boost::uint32_t m_base;
+	std::uint32_t m_base;
 
 	// and this is the index we're currently at
 	// in the circular buffer
-	boost::uint16_t m_index;
+	std::uint16_t m_index;
 
 	enum { not_initialized = 0xffff };
 
@@ -78,7 +76,7 @@ private:
 	// if this is set to 'not_initialized' we
 	// have bit seen any samples at all yet
 	// and m_base is not initialized yet
-	boost::uint16_t m_num_samples;
+	std::uint16_t m_num_samples;
 };
 
 }

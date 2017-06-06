@@ -34,14 +34,15 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/peer_class.hpp"
 #include "libtorrent/peer_class_set.hpp"
 #include "libtorrent/peer_class_type_filter.hpp"
+#include "libtorrent/aux_/path.hpp"
 
 using namespace libtorrent;
 
 std::string class_name(peer_class_t id, peer_class_pool const& p)
 {
 	peer_class const* c = p.at(id);
-	TEST_CHECK(c != NULL);
-	if (c == NULL) return "";
+	TEST_CHECK(c != nullptr);
+	if (c == nullptr) return "";
 	peer_class_info i;
 	c->get_info(&i);
 	return i.label;
@@ -63,7 +64,7 @@ TORRENT_TEST(peer_class)
 
 	peer_class_t id3 = pool.new_peer_class("test3");
 
-	TEST_CHECK(id3 == id2 + 1);
+	TEST_CHECK(id3 == next(id2));
 
 	// make sure refcounting works
 	TEST_EQUAL(class_name(id3, pool), "test3");
@@ -73,7 +74,7 @@ TORRENT_TEST(peer_class)
 	TEST_EQUAL(class_name(id3, pool), "test3");
 	pool.decref(id3);
 	// it should have been deleted now
-	TEST_CHECK(pool.at(id3) == NULL);
+	TEST_CHECK(pool.at(id3) == nullptr);
 
 	// test setting and retrieving upload and download rates
 	pool.at(id2)->set_upload_limit(1000);
@@ -93,24 +94,24 @@ TORRENT_TEST(peer_class)
 			, 0xffffffff) == 0xffffffff);
 	}
 
-	filter.disallow((libtorrent::peer_class_type_filter::socket_type_t)0, 0);
+	filter.disallow((libtorrent::peer_class_type_filter::socket_type_t)0, peer_class_t{0});
 	TEST_CHECK(filter.apply((libtorrent::peer_class_type_filter::socket_type_t)0
 		, 0xffffffff) == 0xfffffffe);
 	TEST_CHECK(filter.apply((libtorrent::peer_class_type_filter::socket_type_t)1
 		, 0xffffffff) == 0xffffffff);
-	filter.allow((libtorrent::peer_class_type_filter::socket_type_t)0, 0);
+	filter.allow((libtorrent::peer_class_type_filter::socket_type_t)0, peer_class_t{0});
 	TEST_CHECK(filter.apply((libtorrent::peer_class_type_filter::socket_type_t)0
 		, 0xffffffff) == 0xffffffff);
 
 	TEST_CHECK(filter.apply((libtorrent::peer_class_type_filter::socket_type_t)0, 0) == 0);
-	filter.add((libtorrent::peer_class_type_filter::socket_type_t)0, 0);
+	filter.add((libtorrent::peer_class_type_filter::socket_type_t)0, peer_class_t{0});
 	TEST_CHECK(filter.apply((libtorrent::peer_class_type_filter::socket_type_t)0, 0) == 1);
-	filter.remove((libtorrent::peer_class_type_filter::socket_type_t)0, 0);
+	filter.remove((libtorrent::peer_class_type_filter::socket_type_t)0, peer_class_t{0});
 	TEST_CHECK(filter.apply((libtorrent::peer_class_type_filter::socket_type_t)0, 0) == 0);
 
 	pool.decref(id2);
 	pool.decref(id1);
-	TEST_CHECK(pool.at(id2) == NULL);
-	TEST_CHECK(pool.at(id1) == NULL);
+	TEST_CHECK(pool.at(id2) == nullptr);
+	TEST_CHECK(pool.at(id1) == nullptr);
 }
 

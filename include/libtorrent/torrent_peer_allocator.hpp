@@ -42,8 +42,7 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #include "libtorrent/aux_/disable_warnings_pop.hpp"
 
-namespace libtorrent
-{
+namespace libtorrent {
 
 	struct TORRENT_EXTRA_EXPORT torrent_peer_allocator_interface
 	{
@@ -60,7 +59,7 @@ namespace libtorrent
 		~torrent_peer_allocator_interface() {}
 	};
 
-	struct TORRENT_EXTRA_EXPORT torrent_peer_allocator TORRENT_FINAL
+	struct TORRENT_EXTRA_EXPORT torrent_peer_allocator final
 		: torrent_peer_allocator_interface
 	{
 		torrent_peer_allocator();
@@ -68,13 +67,13 @@ namespace libtorrent
 		torrent_peer* allocate_peer_entry(int type);
 		void free_peer_entry(torrent_peer* p);
 
-		boost::uint64_t total_bytes() const { return m_total_bytes; }
-		boost::uint64_t total_allocations() const { return m_total_allocations; }
+		std::uint64_t total_bytes() const { return m_total_bytes; }
+		std::uint64_t total_allocations() const { return m_total_allocations; }
 		int live_bytes() const { return m_live_bytes; }
 		int live_allocations() const { return m_live_allocations; }
 
 	private:
-	
+
 		// this is a shared pool where torrent_peer objects
 		// are allocated. It's a pool since we're likely
 		// to have tens of thousands of peers, and a pool
@@ -89,9 +88,9 @@ namespace libtorrent
 #endif
 
 		// the total number of bytes allocated (cumulative)
-		boost::uint64_t m_total_bytes;
+		std::uint64_t m_total_bytes;
 		// the total number of allocations (cumulative)
-		boost::uint64_t m_total_allocations;
+		std::uint64_t m_total_allocations;
 		// the number of currently live bytes
 		int m_live_bytes;
 		// the number of currently live allocations

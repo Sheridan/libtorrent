@@ -68,7 +68,6 @@ category_mapping = {
 	'add_torrent_params.hpp': 'Core',
 	'session_status.hpp': 'Core',
 	'error_code.hpp': 'Error Codes',
-	'file.hpp': 'File',
 	'storage.hpp': 'Custom Storage',
 	'storage_defs.hpp': 'Storage',
 	'file_storage.hpp': 'Storage',
@@ -77,9 +76,7 @@ category_mapping = {
 	'ut_metadata.hpp': 'Plugins',
 	'ut_pex.hpp': 'Plugins',
 	'ut_trackers.hpp': 'Plugins',
-	'metadata_transfer.hpp': 'Plugins',
 	'smart_ban.hpp': 'Plugins',
-	'lt_trackers.hpp': 'Plugins',
 	'create_torrent.hpp': 'Create Torrents',
 	'alert.hpp': 'Alerts',
 	'alert_types.hpp': 'Alerts',
@@ -96,8 +93,8 @@ category_mapping = {
 	'bitfield.hpp': 'Utility',
 	'sha1_hash.hpp': 'Utility',
 	'hasher.hpp': 'Utility',
+	'hasher512.hpp': 'Utility',
 	'identify_client.hpp': 'Utility',
-	'thread.hpp': 'Utility',
 	'ip_filter.hpp': 'Filter',
 	'session_settings.hpp': 'Settings',
 	'settings_pack.hpp': 'Settings',
@@ -149,7 +146,6 @@ def is_visible(desc):
 	return True
 
 def highlight_signature(s):
-	s = s.replace('TORRENT_OVERRIDE', 'override').replace('TORRENT_FINAL', 'final')
 	name = s.split('(', 1)
 	name2 = name[0].split(' ')
 	if len(name2[-1]) == 0: return s
@@ -302,7 +298,6 @@ def parse_class(lno, lines, filename):
 		state = 'private'
 		class_type = 'class'
 
-	decl = decl.replace('TORRENT_FINAL', 'final')
 	name = decl.split(':')[0].replace('class ', '').replace('struct ', '').replace('final', '').strip()
 
 
@@ -535,33 +530,26 @@ def consume_ifdef(lno, lines, warn_on_ifdefs = False):
 
 	if verbose: print 'prep  %s' % l
 
-	if warn_on_ifdefs and ('TORRENT_DEBUG' in l):
+	if warn_on_ifdefs and l.strip().startswith('#if'):
 		while l.endswith('\\'):
 			lno += 1
 			l += lines[lno].strip()
 			if verbose: print 'prep  %s' % lines[lno].trim()
 		define = trim_define(l)
-		print '\x1b[31mWARNING: possible ABI breakage in public struct! "%s" \x1b[34m %s:%d\x1b[0m' % \
-			(define, filename, lno)
-		# we've already warned once, no need to do it twice
-		warn_on_ifdefs = False
-
-	if warn_on_ifdefs and '#if' in l:
-		while l.endswith('\\'):
-			lno += 1
-			l += lines[lno].strip()
-			if verbose: print 'prep  %s' % lines[lno].trim()
-		define = trim_define(l)
-		if define != '':
+		if 'TORRENT_' in define:
+			print '\x1b[31mWARNING: possible ABI breakage in public struct! "%s" \x1b[34m %s:%d\x1b[0m' % \
+				(define, filename, lno)
+			# we've already warned once, no need to do it twice
+			warn_on_ifdefs = False
+		elif define != '':
 			print '\x1b[33msensitive define in public struct: "%s"\x1b[34m %s:%d\x1b[0m' % (define, filename, lno)
 
-	if l == '#ifndef TORRENT_NO_DEPRECATE' or \
-		l == '#ifdef TORRENT_DEBUG' or \
-		(l.startswith('#if ') and ' TORRENT_USE_ASSERTS' in l) or \
-		(l.startswith('#if ') and ' TORRENT_USE_INVARIANT_CHECKS' in l) or \
-		l == '#ifdef TORRENT_ASIO_DEBUGGING' or \
-		(l.startswith('#if') and 'defined TORRENT_DEBUG' in l) or \
-		(l.startswith('#if') and 'defined TORRENT_ASIO_DEBUGGING' in l):
+	if (l.startswith('#if') and (
+		' TORRENT_USE_ASSERTS' in l or
+		' TORRENT_USE_INVARIANT_CHECKS' in l or
+		' TORRENT_ASIO_DEBUGGING' in l) or
+		l == '#ifndef TORRENT_NO_DEPRECATE'
+		):
 		while lno < len(lines):
 			l = lines[lno].strip()
 			lno += 1
@@ -627,7 +615,6 @@ for filename in files:
 			continue
 
 		if (l == 'namespace detail' or \
-			l == 'namespace dht_detail' or \
 			l == 'namespace impl' or \
 			l == 'namespace aux') \
 			and not internal:
@@ -1005,7 +992,7 @@ for cat in categories:
 
 	out.write('''
 :Author: Arvid Norberg, arvid@libtorrent.org
-:Version: 1.1.3
+:Version: 1.2.0
 
 `home`__
 

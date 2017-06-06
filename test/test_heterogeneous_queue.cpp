@@ -38,14 +38,14 @@ struct A
 	int a;
 	explicit A(int a_) : a(a_) {}
 	virtual int type() = 0;
-	virtual ~A() {}
+	virtual ~A() = default;
 };
 
 struct B : A
 {
 	int b;
 	explicit B(int a_, int b_) : A(a_), b(b_) {}
-	virtual int type() { return 1; }
+	int type() override { return 1; }
 };
 
 struct C : A
@@ -55,7 +55,7 @@ struct C : A
 	{
 		memset(c, c_, sizeof(c));
 	}
-	virtual int type() { return 2; }
+	int type() override { return 2; }
 };
 
 struct D
@@ -69,7 +69,7 @@ struct D
 
 struct E
 {
-	E(char const* msg) : string_member(msg) {}
+	explicit E(char const* msg) : string_member(msg) {}
 	std::string string_member;
 };
 
@@ -77,7 +77,7 @@ int D::instances = 0;
 
 struct F
 {
-	F(int f_)
+	explicit F(int f_)
 		: self(this)
 		, f(f_)
 		, constructed(true)
@@ -96,7 +96,6 @@ struct F
 		TEST_EQUAL(f_.gutted, false);
 	}
 
-#if __cplusplus >= 201103L
 	F(F&& f_)
 		: self(this)
 		, f(f_.f)
@@ -109,7 +108,6 @@ struct F
 		TEST_EQUAL(f_.gutted, false);
 		f_.gutted = true;
 	}
-#endif
 
 	~F()
 	{
@@ -138,24 +136,31 @@ private:
 	F& operator=(F const& f);
 };
 
-// test push_back of heterogeneous types
+struct G : A
+{
+	G(int base, int v) : A(base), g(v) {}
+	int type() override { return 3; }
+	std::int64_t g;
+};
+
+// test emplace_back of heterogeneous types
 // and retrieval of their pointers
-TORRENT_TEST(push_back)
+TORRENT_TEST(emplace_back)
 {
 	using namespace libtorrent;
 
 	heterogeneous_queue<A> q;
-	q.push_back(B(0, 1));
+	q.emplace_back<B>(0, 1);
 	TEST_EQUAL(q.size(), 1);
-	q.push_back(B(2, 3));
+	q.emplace_back<B>(2, 3);
 	TEST_EQUAL(q.size(), 2);
-	q.push_back(B(4, 5));
+	q.emplace_back<B>(4, 5);
 	TEST_EQUAL(q.size(), 3);
-	q.push_back(C(6, 7));
+	q.emplace_back<C>(6, 7);
 	TEST_EQUAL(q.size(), 4);
-	q.push_back(C(8, 9));
+	q.emplace_back<C>(8, 9);
 	TEST_EQUAL(q.size(), 5);
-	q.push_back(C(10, 11));
+	q.emplace_back<C>(10, 11);
 	TEST_EQUAL(q.size(), 6);
 
 	std::vector<A*> ptrs;
@@ -188,6 +193,31 @@ TORRENT_TEST(push_back)
 	TEST_EQUAL(static_cast<C*>(ptrs[5])->c[0], 11);
 }
 
+TORRENT_TEST(emplace_back_over_aligned)
+{
+	using namespace libtorrent;
+
+	heterogeneous_queue<A> q;
+	q.emplace_back<G>(1, 2);
+	q.emplace_back<G>(3, 4);
+	q.emplace_back<B>(5, 6);
+
+	std::vector<A*> ptrs;
+	q.get_pointers(ptrs);
+
+	TEST_EQUAL(int(ptrs.size()), q.size());
+	TEST_EQUAL(ptrs.size(), 3);
+	TEST_EQUAL(ptrs[0]->type(), 3);
+	TEST_EQUAL(static_cast<G*>(ptrs[0])->a, 1);
+	TEST_EQUAL(static_cast<G*>(ptrs[0])->g, 2);
+	TEST_EQUAL(ptrs[1]->type(), 3);
+	TEST_EQUAL(static_cast<G*>(ptrs[1])->a, 3);
+	TEST_EQUAL(static_cast<G*>(ptrs[1])->g, 4);
+	TEST_EQUAL(ptrs[2]->type(), 1);
+	TEST_EQUAL(static_cast<B*>(ptrs[2])->a, 5);
+	TEST_EQUAL(static_cast<B*>(ptrs[2])->b, 6);
+}
+
 // test swap
 TORRENT_TEST(swap)
 {
@@ -196,13 +226,13 @@ TORRENT_TEST(swap)
 	heterogeneous_queue<A> q1;
 	heterogeneous_queue<A> q2;
 
-	q1.push_back(B(0, 1));
-	q1.push_back(B(2, 3));
-	q1.push_back(B(4, 5));
+	q1.emplace_back<B>(0, 1);
+	q1.emplace_back<B>(2, 3);
+	q1.emplace_back<B>(4, 5);
 	TEST_EQUAL(q1.size(), 3);
 
-	q2.push_back(C(6, 7));
-	q2.push_back(C(8, 9));
+	q2.emplace_back<C>(6, 7);
+	q2.emplace_back<C>(8, 9);
 	TEST_EQUAL(q2.size(), 2);
 
 	std::vector<A*> ptrs;
@@ -245,13 +275,13 @@ TORRENT_TEST(destruction)
 	heterogeneous_queue<D> q;
 	TEST_EQUAL(D::instances, 0);
 
-	q.push_back(D());
+	q.emplace_back<D>();
 	TEST_EQUAL(D::instances, 1);
-	q.push_back(D());
+	q.emplace_back<D>();
 	TEST_EQUAL(D::instances, 2);
-	q.push_back(D());
+	q.emplace_back<D>();
 	TEST_EQUAL(D::instances, 3);
-	q.push_back(D());
+	q.emplace_back<D>();
 	TEST_EQUAL(D::instances, 4);
 
 	q.clear();
@@ -269,7 +299,7 @@ TORRENT_TEST(copy_move)
 	// make sure the queue has to grow at some point, to exercise its
 	// copy/move of elements
 	for (int i = 0; i < 1000; ++i)
-		q.push_back(F(i));
+		q.emplace_back<F>(i);
 
 	std::vector<F*> ptrs;
 	q.get_pointers(ptrs);
@@ -293,8 +323,6 @@ TORRENT_TEST(nontrivial)
 	heterogeneous_queue<E> q;
 	for (int i = 0; i < 10000; ++i)
 	{
-		q.push_back(E("testing to allocate non-trivial objects"));
+		q.emplace_back<E>("testing to allocate non-trivial objects");
 	}
 }
-
-

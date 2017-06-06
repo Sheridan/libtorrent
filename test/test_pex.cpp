@@ -38,10 +38,10 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/session_settings.hpp"
 #include "libtorrent/hasher.hpp"
 #include "libtorrent/extensions/ut_pex.hpp"
-#include "libtorrent/thread.hpp"
 #include "libtorrent/ip_filter.hpp"
 #include "libtorrent/torrent_status.hpp"
-#include <boost/tuple/tuple.hpp>
+#include "libtorrent/aux_/path.hpp"
+#include <tuple>
 
 #include "setup_transfer.hpp"
 #include <iostream>
@@ -98,11 +98,11 @@ void test_pex()
 	torrent_handle tor2;
 	torrent_handle tor3;
 
-	boost::tie(tor1, tor2, tor3) = setup_transfer(&ses1, &ses2, &ses3, true, false, false, "_pex");
+	std::tie(tor1, tor2, tor3) = setup_transfer(&ses1, &ses2, &ses3, true, false, false, "_pex");
 
 	ses2.apply_settings(pack);
 
-	test_sleep(100);
+	std::this_thread::sleep_for(lt::milliseconds(100));
 
 	// in this test, ses1 is a seed, ses2 is connected to ses1 and ses3.
 	// the expected behavior is that ses2 will introduce ses1 and ses3 to each other
@@ -134,12 +134,12 @@ void test_pex()
 		// through session 2
 		if (st3.state == torrent_status::seeding) break;
 
-		test_sleep(100);
+		std::this_thread::sleep_for(lt::milliseconds(100));
 	}
 
 	TEST_CHECK(st1.num_peers == 2 && st2.num_peers == 2 && st3.num_peers == 2)
 
-	if (!tor2.status().is_seeding && tor3.status().is_seeding) std::cerr << "done\n";
+	if (!tor2.status().is_seeding && tor3.status().is_seeding) std::cout << "done\n";
 
 	// this allows shutting down the sessions in parallel
 	p1 = ses1.abort();

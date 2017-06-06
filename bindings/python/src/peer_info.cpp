@@ -10,29 +10,20 @@
 using namespace boost::python;
 using namespace libtorrent;
 
-boost::int64_t get_last_active(peer_info const& pi)
+std::int64_t get_last_active(peer_info const& pi)
 {
     return total_seconds(pi.last_active);
 }
 
-boost::int64_t get_last_request(peer_info const& pi)
+std::int64_t get_last_request(peer_info const& pi)
 {
     return total_seconds(pi.last_request);
 }
 
-boost::int64_t get_download_queue_time(peer_info const& pi)
+std::int64_t get_download_queue_time(peer_info const& pi)
 {
     return total_seconds(pi.download_queue_time);
 }
-
-#ifndef TORRENT_NO_DEPRECATE
-#ifndef TORRENT_DISABLE_RESOLVE_COUNTRIES
-str get_country(peer_info const& pi)
-{
-    return str(pi.country, 2);
-}
-#endif
-#endif // TORRENT_NO_DEPRECATE
 
 tuple get_local_endpoint(peer_info const& pi)
 {
@@ -56,6 +47,7 @@ list get_pieces(peer_info const& pi)
     return ret;
 }
 
+using by_value = return_value_policy<return_by_value>;
 void bind_peer_info()
 {
     scope pi = class_<peer_info>("peer_info")
@@ -76,6 +68,7 @@ void bind_peer_info()
         .def_readonly("upload_limit", &peer_info::upload_limit)
         .def_readonly("download_limit", &peer_info::download_limit)
         .def_readonly("load_balancing", &peer_info::load_balancing)
+        .def_readonly("remote_dl_rate", &peer_info::remote_dl_rate)
 #endif
         .add_property("last_request", get_last_request)
         .add_property("last_active", get_last_active)
@@ -87,21 +80,15 @@ void bind_peer_info()
         .def_readonly("receive_buffer_size", &peer_info::receive_buffer_size)
         .def_readonly("used_receive_buffer", &peer_info::used_receive_buffer)
         .def_readonly("num_hashfails", &peer_info::num_hashfails)
-#ifndef TORRENT_NO_DEPRECATE
-#ifndef TORRENT_DISABLE_RESOLVE_COUNTRIES
-        .add_property("country", get_country)
-#endif
-#endif // TORRENT_NO_DEPRECATE
         .def_readonly("download_queue_length", &peer_info::download_queue_length)
         .def_readonly("upload_queue_length", &peer_info::upload_queue_length)
         .def_readonly("failcount", &peer_info::failcount)
-        .def_readonly("downloading_piece_index", &peer_info::downloading_piece_index)
-        .def_readonly("downloading_block_index", &peer_info::downloading_block_index)
+        .add_property("downloading_piece_index", make_getter(&peer_info::downloading_piece_index, by_value()))
+        .add_property("downloading_block_index", make_getter(&peer_info::downloading_block_index, by_value()))
         .def_readonly("downloading_progress", &peer_info::downloading_progress)
         .def_readonly("downloading_total", &peer_info::downloading_total)
         .def_readonly("client", &peer_info::client)
         .def_readonly("connection_type", &peer_info::connection_type)
-        .def_readonly("remote_dl_rate", &peer_info::remote_dl_rate)
         .def_readonly("pending_disk_bytes", &peer_info::pending_disk_bytes)
         .def_readonly("send_quota", &peer_info::send_quota)
         .def_readonly("receive_quota", &peer_info::receive_quota)

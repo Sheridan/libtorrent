@@ -34,8 +34,8 @@ POSSIBILITY OF SUCH DAMAGE.
 #ifndef TORRENT_OPERATIONS_HPP_INCLUDED
 #define TORRENT_OPERATIONS_HPP_INCLUDED
 
-namespace libtorrent
-{
+namespace libtorrent {
+
 	// these constants are used to identify the operation that failed, causing a
 	// peer to disconnect
 	enum operation_t
@@ -96,7 +96,10 @@ namespace libtorrent
 		op_ssl_handshake,
 
 		// a connection failed to satisfy the bind interface setting
-		op_get_interface
+		op_get_interface,
+
+		// the error was unexpected and it is unknown which operation caused it
+		op_unknown,
 	};
 
 }

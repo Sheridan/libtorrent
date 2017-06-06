@@ -33,47 +33,32 @@ POSSIBILITY OF SUCH DAMAGE.
 #ifndef OBSERVER_HPP
 #define OBSERVER_HPP
 
+#include <cstdint>
+#include <memory>
+
 #include <libtorrent/time.hpp>
 #include <libtorrent/address.hpp>
 
-#include "libtorrent/aux_/disable_warnings_push.hpp"
-
-#include <boost/pool/pool.hpp>
-#include <boost/detail/atomic_count.hpp>
-#include <boost/intrusive_ptr.hpp>
-#include <boost/cstdint.hpp>
-
-#include "libtorrent/aux_/disable_warnings_pop.hpp"
-
-namespace libtorrent {
-namespace dht {
-
+namespace libtorrent { namespace dht {
 struct dht_observer;
 struct observer;
 struct msg;
 struct traversal_algorithm;
 
-// defined in rpc_manager.cpp
-TORRENT_EXTRA_EXPORT void intrusive_ptr_add_ref(observer const*);
-TORRENT_EXTRA_EXPORT void intrusive_ptr_release(observer const*);
-
 struct TORRENT_EXTRA_EXPORT observer : boost::noncopyable
+	, std::enable_shared_from_this<observer>
 {
-	friend TORRENT_EXTRA_EXPORT void intrusive_ptr_add_ref(observer const*);
-	friend TORRENT_EXTRA_EXPORT void intrusive_ptr_release(observer const*);
-
-	observer(boost::intrusive_ptr<traversal_algorithm> const& a
+	observer(std::shared_ptr<traversal_algorithm> const& a
 		, udp::endpoint const& ep, node_id const& id)
 		: m_sent()
 		, m_algorithm(a)
 		, m_id(id)
-		, m_refs(0)
 		, m_port(0)
 		, m_transaction_id()
 		, flags(0)
 	{
 		TORRENT_ASSERT(a);
-#if defined TORRENT_DEBUG || defined TORRENT_RELEASE_ASSERTS
+#if TORRENT_USE_ASSERTS
 		m_in_constructor = true;
 		m_was_sent = false;
 		m_was_abandoned = false;
@@ -117,10 +102,10 @@ struct TORRENT_EXTRA_EXPORT observer : boost::noncopyable
 	void set_id(node_id const& id);
 	node_id const& id() const { return m_id; }
 
-	void set_transaction_id(boost::uint16_t tid)
+	void set_transaction_id(std::uint16_t tid)
 	{ m_transaction_id = tid; }
 
-	boost::uint16_t transaction_id() const
+	std::uint16_t transaction_id() const
 	{ return m_transaction_id; }
 
 	enum {
@@ -140,13 +125,16 @@ protected:
 
 private:
 
+	std::shared_ptr<observer> self()
+	{ return shared_from_this(); }
+
 	time_point m_sent;
 
-	const boost::intrusive_ptr<traversal_algorithm> m_algorithm;
+	const std::shared_ptr<traversal_algorithm> m_algorithm;
 
 	node_id m_id;
 
-	TORRENT_UNION addr_t
+	union addr_t
 	{
 #if TORRENT_USE_IPV6
 		address_v6::bytes_type v6;
@@ -154,17 +142,14 @@ private:
 		address_v4::bytes_type v4;
 	} m_addr;
 
-	// reference counter for intrusive_ptr
-	mutable boost::uint16_t m_refs;
-
-	boost::uint16_t m_port;
+	std::uint16_t m_port;
 
 	// the transaction ID for this call
-	boost::uint16_t m_transaction_id;
+	std::uint16_t m_transaction_id;
 public:
-	unsigned char flags;
+	std::uint8_t flags;
 
-#if defined TORRENT_DEBUG || defined TORRENT_RELEASE_ASSERTS
+#if TORRENT_USE_ASSERTS
 	bool m_in_constructor:1;
 	bool m_was_sent:1;
 	bool m_was_abandoned:1;
@@ -172,9 +157,8 @@ public:
 #endif
 };
 
-typedef boost::intrusive_ptr<observer> observer_ptr;
+typedef std::shared_ptr<observer> observer_ptr;
 
 } }
 
 #endif
-

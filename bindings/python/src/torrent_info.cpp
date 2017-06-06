@@ -2,12 +2,8 @@
 // subject to the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 
-#include "libtorrent/aux_/disable_warnings_push.hpp"
-
 #include "boost_python.hpp"
-#include <boost/shared_ptr.hpp>
-
-#include "libtorrent/aux_/disable_warnings_pop.hpp"
+#include <memory>
 
 #include "libtorrent/torrent_info.hpp"
 #include "libtorrent/session_settings.hpp"
@@ -15,6 +11,12 @@
 #include "libtorrent/socket_io.hpp"
 #include "libtorrent/announce_entry.hpp"
 #include "bytes.hpp"
+
+#ifdef _MSC_VER
+#pragma warning(push)
+// warning C4996: X: was declared deprecated
+#pragma warning( disable : 4996 )
+#endif
 
 using namespace boost::python;
 using namespace libtorrent;
@@ -42,12 +44,8 @@ namespace
     {
         list result;
 
-        typedef std::vector<std::pair<std::string, int> > list_type;
-
-        for (list_type::const_iterator i = ti.nodes().begin(); i != ti.nodes().end(); ++i)
-        {
-            result.append(boost::python::make_tuple(i->first, i->second));
-        }
+        for (auto const& i : ti.nodes())
+            result.append(boost::python::make_tuple(i.first, i.second));
 
         return result;
     }
@@ -72,7 +70,7 @@ namespace
     void set_web_seeds(torrent_info& ti, list ws)
     {
         std::vector<web_seed_entry> web_seeds;
-        int const len = boost::python::len(ws);
+        int const len = static_cast<int>(boost::python::len(ws));
         for (int i = 0; i < len; i++)
         {
            dict e = extract<dict>(ws[i]);
@@ -100,13 +98,13 @@ namespace
     void set_merkle_tree(torrent_info& ti, list hashes)
     {
         std::vector<sha1_hash> h;
-        for (int i = 0, e = len(hashes); i < e; ++i)
-            h.push_back(sha1_hash(bytes(extract<bytes>(hashes[i])).arr));
+        for (int i = 0, e = int(len(hashes)); i < e; ++i)
+            h.push_back(sha1_hash(bytes(extract<bytes>(hashes[i])).arr.data()));
 
         ti.set_merkle_tree(h);
     }
 
-    bytes hash_for_piece(torrent_info const& ti, int i)
+    bytes hash_for_piece(torrent_info const& ti, piece_index_t i)
     {
         return bytes(ti.hash_for_piece(i).to_string());
     }
@@ -116,7 +114,7 @@ namespace
         return bytes(ti.metadata().get(), ti.metadata_size());
     }
 
-    list map_block(torrent_info& ti, int piece, boost::int64_t offset, int size)
+    list map_block(torrent_info& ti, piece_index_t piece, std::int64_t offset, int size)
     {
        std::vector<file_slice> p = ti.map_block(piece, offset, size);
        list result;
@@ -137,7 +135,6 @@ namespace
     bool get_updating(announce_entry const& ae) { return ae.updating; }
     bool get_start_sent(announce_entry const& ae) { return ae.start_sent; }
     bool get_complete_sent(announce_entry const& ae) { return ae.complete_sent; }
-    bool get_send_stats(announce_entry const& ae) { return ae.send_stats; }
     // announce_entry method requires lt::time_point.
     bool can_announce(announce_entry const& ae, bool is_seed) {
         lt::time_point now = lt::clock_type::now();
@@ -145,9 +142,10 @@ namespace
     }
 
 #ifndef TORRENT_NO_DEPRECATE
-    boost::int64_t get_size(file_entry const& fe) { return fe.size; }
-    boost::int64_t get_offset(file_entry const& fe) { return fe.offset; }
-    boost::int64_t get_file_base(file_entry const& fe) { return fe.file_base; }
+    bool get_send_stats(announce_entry const& ae) { return ae.send_stats; }
+    std::int64_t get_size(file_entry const& fe) { return fe.size; }
+    std::int64_t get_offset(file_entry const& fe) { return fe.offset; }
+    std::int64_t get_file_base(file_entry const& fe) { return fe.file_base; }
     void set_file_base(file_entry& fe, int b) { fe.file_base = b; }
     bool get_pad_file(file_entry const& fe) { return fe.pad_file; }
     bool get_executable_attribute(file_entry const& fe) { return fe.executable_attribute; }
@@ -157,39 +155,39 @@ namespace
 
 } // namespace unnamed
 
-boost::shared_ptr<torrent_info> buffer_constructor0(char const* buf, int len, int flags)
+std::shared_ptr<torrent_info> buffer_constructor0(char const* buf, int len, int flags)
 {
    error_code ec;
-   boost::shared_ptr<torrent_info> ret(boost::make_shared<torrent_info>(buf
-		, len, boost::ref(ec), flags));
+   std::shared_ptr<torrent_info> ret = std::make_shared<torrent_info>(buf
+		, len, ec, flags);
 #ifndef BOOST_NO_EXCEPTIONS
-   if (ec) throw libtorrent_exception(ec);
+   if (ec) throw system_error(ec);
 #endif
    return ret;
 }
 
-boost::shared_ptr<torrent_info> buffer_constructor1(char const* buf, int len)
+std::shared_ptr<torrent_info> buffer_constructor1(char const* buf, int len)
 {
 	return buffer_constructor0(buf, len, 0);
 }
 
-boost::shared_ptr<torrent_info> file_constructor0(std::string const& filename, int flags)
+std::shared_ptr<torrent_info> file_constructor0(std::string const& filename, int flags)
 {
    error_code ec;
-   boost::shared_ptr<torrent_info> ret(boost::make_shared<torrent_info>(filename
-		, boost::ref(ec), flags));
+   std::shared_ptr<torrent_info> ret = std::make_shared<torrent_info>(filename
+		, ec, flags);
 #ifndef BOOST_NO_EXCEPTIONS
-   if (ec) throw libtorrent_exception(ec);
+   if (ec) throw system_error(ec);
 #endif
    return ret;
 }
 
-boost::shared_ptr<torrent_info> file_constructor1(std::string const& filename)
+std::shared_ptr<torrent_info> file_constructor1(std::string const& filename)
 {
 	return file_constructor0(filename, 0);
 }
 
-boost::shared_ptr<torrent_info> bencoded_constructor0(entry const& ent, int flags)
+std::shared_ptr<torrent_info> bencoded_constructor0(entry const& ent, int flags)
 {
 	std::vector<char> buf;
 	bencode(std::back_inserter(buf), ent);
@@ -199,39 +197,40 @@ boost::shared_ptr<torrent_info> bencoded_constructor0(entry const& ent, int flag
 	if (buf.size() == 0 || bdecode(&buf[0], &buf[0] + buf.size(), e, ec) != 0)
 	{
 #ifndef BOOST_NO_EXCEPTIONS
-		throw invalid_torrent_file(ec);
+		throw system_error(ec);
 #endif
 	}
 
-	boost::shared_ptr<torrent_info> ret(boost::make_shared<torrent_info>(e
-			, boost::ref(ec), flags));
+	std::shared_ptr<torrent_info> ret = std::make_shared<torrent_info>(e
+			, ec, flags);
 #ifndef BOOST_NO_EXCEPTIONS
-	if (ec) throw libtorrent_exception(ec);
+	if (ec) throw system_error(ec);
 #endif
 	return ret;
 }
 
-boost::shared_ptr<torrent_info> bencoded_constructor1(entry const& ent)
+std::shared_ptr<torrent_info> bencoded_constructor1(entry const& ent)
 {
 	return bencoded_constructor0(ent, 0);
 }
 
+using by_value = return_value_policy<return_by_value>;
 void bind_torrent_info()
 {
     return_value_policy<copy_const_reference> copy;
 
-    void (torrent_info::*rename_file0)(int, std::string const&) = &torrent_info::rename_file;
+    void (torrent_info::*rename_file0)(file_index_t, std::string const&) = &torrent_info::rename_file;
 #if TORRENT_USE_WSTRING && !defined TORRENT_NO_DEPRECATE
-    void (torrent_info::*rename_file1)(int, std::wstring const&) = &torrent_info::rename_file;
+    void (torrent_info::*rename_file1)(file_index_t, std::wstring const&) = &torrent_info::rename_file;
 #endif
 
     class_<file_slice>("file_slice")
-        .def_readwrite("file_index", &file_slice::file_index)
+        .add_property("file_index", make_getter((&file_slice::file_index), by_value()))
         .def_readwrite("offset", &file_slice::offset)
         .def_readwrite("size", &file_slice::size)
         ;
 
-    class_<torrent_info, boost::shared_ptr<torrent_info> >("torrent_info", no_init)
+    class_<torrent_info, std::shared_ptr<torrent_info>>("torrent_info", no_init)
         .def(init<sha1_hash const&, int>((arg("info_hash"), arg("flags") = 0)))
         .def("__init__", make_constructor(&bencoded_constructor0))
         .def("__init__", make_constructor(&bencoded_constructor1))
@@ -329,10 +328,11 @@ void bind_torrent_info()
         .add_property("updating", &get_updating)
         .add_property("start_sent", &get_start_sent)
         .add_property("complete_sent", &get_complete_sent)
+#if !defined TORRENT_NO_DEPRECATE
         .add_property("send_stats", &get_send_stats)
-
         .def("next_announce_in", &announce_entry::next_announce_in)
         .def("min_announce_in", &announce_entry::min_announce_in)
+#endif
         .def("reset", &announce_entry::reset)
         .def("can_announce", can_announce)
         .def("is_working", &announce_entry::is_working)
@@ -346,9 +346,10 @@ void bind_torrent_info()
         .value("source_tex", announce_entry::source_tex)
     ;
 
-#if BOOST_VERSION > 104200
-    implicitly_convertible<boost::shared_ptr<torrent_info>, boost::shared_ptr<const torrent_info> >();
-    boost::python::register_ptr_to_python<boost::shared_ptr<const torrent_info> >();
-#endif
+    implicitly_convertible<std::shared_ptr<torrent_info>, std::shared_ptr<const torrent_info>>();
+    boost::python::register_ptr_to_python<std::shared_ptr<const torrent_info>>();
 }
 
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif

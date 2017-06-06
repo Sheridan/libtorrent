@@ -40,46 +40,32 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <libtorrent/kademlia/observer.hpp>
 #include <libtorrent/kademlia/msg.hpp>
 
-#include "libtorrent/aux_/disable_warnings_push.hpp"
-
 #include <vector>
 #include <map>
 
-#include <boost/optional.hpp>
-#include <boost/function/function1.hpp>
-#include <boost/function/function2.hpp>
+namespace libtorrent { namespace dht {
 
-#include "libtorrent/aux_/disable_warnings_pop.hpp"
-
-namespace libtorrent { namespace dht
-{
-
-typedef std::vector<char> packet_t;
-
-class rpc_manager;
 class node;
 
 // -------- find data -----------
 
 struct find_data : traversal_algorithm
 {
-	typedef boost::function<void(std::vector<std::pair<node_entry, std::string> > const&)> nodes_callback;
+	typedef std::function<void(std::vector<std::pair<node_entry, std::string>> const&)> nodes_callback;
 
-	find_data(node & node, node_id target
+	find_data(node& dht_node, node_id const& target
 		, nodes_callback const& ncallback);
 
-	void got_write_token(node_id const& n, std::string const& write_token);
+	void got_write_token(node_id const& n, std::string write_token);
 
 	virtual void start();
 
 	virtual char const* name() const;
 
-	node_id const target() const { return m_target; }
-
 protected:
 
 	virtual void done();
-	virtual observer_ptr new_observer(void* ptr, udp::endpoint const& ep
+	virtual observer_ptr new_observer(udp::endpoint const& ep
 		, node_id const& id);
 
 	nodes_callback m_nodes_callback;
@@ -90,7 +76,7 @@ protected:
 struct find_data_observer : traversal_observer
 {
 	find_data_observer(
-		boost::intrusive_ptr<traversal_algorithm> const& algorithm
+		std::shared_ptr<traversal_algorithm> const& algorithm
 		, udp::endpoint const& ep, node_id const& id)
 		: traversal_observer(algorithm, ep, id)
 	{}
@@ -101,4 +87,3 @@ struct find_data_observer : traversal_observer
 } } // namespace libtorrent::dht
 
 #endif // FIND_DATA_050323_HPP
-

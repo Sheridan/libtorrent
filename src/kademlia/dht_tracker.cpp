@@ -30,44 +30,28 @@ POSSIBILITY OF SUCH DAMAGE.
 
 */
 
-#include <set>
-#include <numeric>
-
-#include "libtorrent/config.hpp"
-
-#include "libtorrent/kademlia/node.hpp"
-#include "libtorrent/kademlia/node_id.hpp"
-#include "libtorrent/kademlia/traversal_algorithm.hpp"
 #include "libtorrent/kademlia/dht_tracker.hpp"
-#include "libtorrent/kademlia/msg.hpp"
-#include "libtorrent/kademlia/dht_observer.hpp"
 
-#include "libtorrent/socket.hpp"
-#include "libtorrent/socket_io.hpp"
-#include "libtorrent/bencode.hpp"
-#include "libtorrent/io.hpp"
-#include "libtorrent/version.hpp"
-#include "libtorrent/time.hpp"
-#include "libtorrent/performance_counters.hpp" // for counters
+#include <libtorrent/config.hpp>
 
-#include "libtorrent/aux_/disable_warnings_push.hpp"
+#include <libtorrent/kademlia/msg.hpp>
+#include <libtorrent/kademlia/dht_observer.hpp>
 
-#include <boost/bind.hpp>
-#include <boost/function/function0.hpp>
-#include <boost/ref.hpp>
+#include <libtorrent/bencode.hpp>
+#include <libtorrent/version.hpp>
+#include <libtorrent/time.hpp>
+#include <libtorrent/performance_counters.hpp> // for counters
+#include <libtorrent/aux_/time.hpp>
+#include <libtorrent/session_status.hpp>
+#include <libtorrent/session_settings.hpp>
 
-#include "libtorrent/aux_/disable_warnings_pop.hpp"
+#ifndef TORRENT_DISABLE_LOGGING
+#include <libtorrent/hex.hpp> // to_hex
+#endif
 
-using boost::ref;
-using libtorrent::dht::node;
-using libtorrent::dht::node_id;
-using libtorrent::dht::packet_t;
-using libtorrent::dht::msg;
-using libtorrent::detail::write_endpoint;
+using namespace std::placeholders;
 
-namespace libtorrent { namespace dht
-{
-	void incoming_error(entry& e, char const* msg);
+namespace libtorrent { namespace dht {
 
 	namespace {
 
@@ -75,13 +59,22 @@ namespace libtorrent { namespace dht
 	time_duration const key_refresh
 		= duration_cast<time_duration>(minutes(5));
 
-	node_id extract_node_id(entry const& e)
+	void add_dht_counters(node const& dht, counters& c)
 	{
-		if (e.type() != entry::dictionary_t) return (node_id::min)();
-		entry const* nid = e.find_key("node-id");
-		if (nid == NULL || nid->type() != entry::string_t || nid->string().length() != 20)
-			return (node_id::min)();
-		return node_id(nid->string().c_str());
+		int nodes, replacements, allocated_observers;
+		std::tie(nodes, replacements, allocated_observers) = dht.get_stats_counters();
+
+		c.inc_stats_counter(counters::dht_nodes, nodes);
+		c.inc_stats_counter(counters::dht_node_cache, replacements);
+		c.inc_stats_counter(counters::dht_allocated_observers, allocated_observers);
+	}
+
+	std::vector<udp::endpoint> concat(std::vector<udp::endpoint> const& v1
+		, std::vector<udp::endpoint> const& v2)
+	{
+		std::vector<udp::endpoint> r = v1;
+		r.insert(r.end(), v2.begin(), v2.end());
+		return r;
 	}
 
 	} // anonymous namespace
@@ -89,61 +82,93 @@ namespace libtorrent { namespace dht
 	// class that puts the networking and the kademlia node in a single
 	// unit and connecting them together.
 	dht_tracker::dht_tracker(dht_observer* observer
-		, rate_limited_udp_socket& sock
+		, io_service& ios
+		, send_fun_t const& send_fun
 		, dht_settings const& settings
 		, counters& cnt
-		, dht_storage_constructor_type storage_constructor
-		, entry const& state)
+		, dht_storage_interface& storage
+		, dht_state state)
 		: m_counters(cnt)
-		, m_dht(this, settings, extract_node_id(state), observer, cnt, storage_constructor)
-		, m_sock(sock)
+		, m_storage(storage)
+		, m_state(std::move(state))
+		, m_dht(udp::v4(), this, settings, m_state.nid
+			, observer, cnt, m_nodes, storage)
+#if TORRENT_USE_IPV6
+		, m_dht6(udp::v6(), this, settings, m_state.nid6
+			, observer, cnt, m_nodes, storage)
+#endif
+		, m_send_fun(send_fun)
 		, m_log(observer)
-		, m_key_refresh_timer(sock.get_io_service())
-		, m_connection_timer(sock.get_io_service())
-		, m_refresh_timer(sock.get_io_service())
+		, m_key_refresh_timer(ios)
+		, m_connection_timer(ios)
+#if TORRENT_USE_IPV6
+		, m_connection_timer6(ios)
+#endif
+		, m_refresh_timer(ios)
 		, m_settings(settings)
 		, m_abort(false)
-		, m_host_resolver(sock.get_io_service())
+		, m_host_resolver(ios)
+		, m_send_quota(settings.upload_rate_limit)
+		, m_last_tick(aux::time_now())
 	{
+		m_blocker.set_block_timer(m_settings.block_timeout);
+		m_blocker.set_rate_limit(m_settings.block_ratelimit);
+
+		m_nodes.insert(std::make_pair(m_dht.protocol_family_name(), &m_dht));
+#if TORRENT_USE_IPV6
+		m_nodes.insert(std::make_pair(m_dht6.protocol_family_name(), &m_dht6));
+#endif
+
+		update_storage_node_ids();
+
 #ifndef TORRENT_DISABLE_LOGGING
-		m_log->log(dht_logger::tracker, "starting DHT tracker with node id: %s"
-			, to_hex(m_dht.nid().to_string()).c_str());
+		if (m_log->should_log(dht_logger::tracker))
+		{
+			m_log->log(dht_logger::tracker, "starting IPv4 DHT tracker with node id: %s"
+				, aux::to_hex(m_dht.nid()).c_str());
+#if TORRENT_USE_IPV6
+			m_log->log(dht_logger::tracker, "starting IPv6 DHT tracker with node id: %s"
+				, aux::to_hex(m_dht6.nid()).c_str());
+#endif
+		}
 #endif
 	}
 
-	dht_tracker::~dht_tracker() {}
+	dht_tracker::~dht_tracker() = default;
 
 	void dht_tracker::update_node_id()
 	{
 		m_dht.update_node_id();
+#if TORRENT_USE_IPV6
+		m_dht6.update_node_id();
+#endif
+		update_storage_node_ids();
 	}
 
-	// defined in node.cpp
-	void nop();
-
-	void dht_tracker::start(entry const& bootstrap
-		, find_data::nodes_callback const& f)
+	void dht_tracker::start(find_data::nodes_callback const& f)
 	{
-		std::vector<udp::endpoint> initial_nodes;
-
-		if (bootstrap.type() == entry::dictionary_t)
-		{
-			TORRENT_TRY {
-				if (entry const* nodes = bootstrap.find_key("nodes"))
-					read_endpoint_list<udp::endpoint>(nodes, initial_nodes);
-			} TORRENT_CATCH(std::exception&) {}
-		}
-
 		error_code ec;
 		refresh_key(ec);
 
 		m_connection_timer.expires_from_now(seconds(1), ec);
 		m_connection_timer.async_wait(
-			boost::bind(&dht_tracker::connection_timeout, self(), _1));
+			std::bind(&dht_tracker::connection_timeout, self(), std::ref(m_dht), _1));
+
+#if TORRENT_USE_IPV6
+		m_connection_timer6.expires_from_now(seconds(1), ec);
+		m_connection_timer6.async_wait(
+			std::bind(&dht_tracker::connection_timeout, self(), std::ref(m_dht6), _1));
+#endif
 
 		m_refresh_timer.expires_from_now(seconds(5), ec);
-		m_refresh_timer.async_wait(boost::bind(&dht_tracker::refresh_timeout, self(), _1));
-		m_dht.bootstrap(initial_nodes, f);
+		m_refresh_timer.async_wait(std::bind(&dht_tracker::refresh_timeout, self(), _1));
+
+		// bootstrap with mix of IP protocols via want/nodes/nodes6
+		m_dht.bootstrap(concat(m_state.nodes, m_state.nodes6), f);
+#if TORRENT_USE_IPV6
+		m_dht6.bootstrap(concat(m_state.nodes6, m_state.nodes), f);
+#endif
+		m_state.clear();
 	}
 
 	void dht_tracker::stop()
@@ -152,6 +177,9 @@ namespace libtorrent { namespace dht
 		error_code ec;
 		m_key_refresh_timer.cancel(ec);
 		m_connection_timer.cancel(ec);
+#if TORRENT_USE_IPV6
+		m_connection_timer6.cancel(ec);
+#endif
 		m_refresh_timer.cancel(ec);
 		m_host_resolver.cancel();
 	}
@@ -159,7 +187,19 @@ namespace libtorrent { namespace dht
 #ifndef TORRENT_NO_DEPRECATE
 	void dht_tracker::dht_status(session_status& s)
 	{
+		s.dht_torrents += int(m_storage.num_torrents());
+
+		s.dht_nodes = 0;
+		s.dht_node_cache = 0;
+		s.dht_global_nodes = 0;
+		s.dht_torrents = 0;
+		s.active_requests.clear();
+		s.dht_total_allocations = 0;
+
 		m_dht.status(s);
+#if TORRENT_USE_IPV6
+		m_dht6.status(s);
+#endif
 	}
 #endif
 
@@ -167,21 +207,42 @@ namespace libtorrent { namespace dht
 		, std::vector<dht_lookup>& requests)
 	{
 		m_dht.status(table, requests);
+#if TORRENT_USE_IPV6
+		m_dht6.status(table, requests);
+#endif
 	}
 
 	void dht_tracker::update_stats_counters(counters& c) const
 	{
-		m_dht.update_stats_counters(c);
+		const dht_storage_counters& dht_cnt = m_storage.counters();
+		c.set_value(counters::dht_torrents, dht_cnt.torrents);
+		c.set_value(counters::dht_peers, dht_cnt.peers);
+		c.set_value(counters::dht_immutable_data, dht_cnt.immutable_data);
+		c.set_value(counters::dht_mutable_data, dht_cnt.mutable_data);
+
+		c.set_value(counters::dht_nodes, 0);
+		c.set_value(counters::dht_node_cache, 0);
+		c.set_value(counters::dht_allocated_observers, 0);
+
+		add_dht_counters(m_dht, c);
+#if TORRENT_USE_IPV6
+		add_dht_counters(m_dht6, c);
+#endif
 	}
 
-	void dht_tracker::connection_timeout(error_code const& e)
+	void dht_tracker::connection_timeout(node& n, error_code const& e)
 	{
 		if (e || m_abort) return;
 
-		time_duration d = m_dht.connection_timeout();
+		time_duration d = n.connection_timeout();
 		error_code ec;
-		m_connection_timer.expires_from_now(d, ec);
-		m_connection_timer.async_wait(boost::bind(&dht_tracker::connection_timeout, self(), _1));
+#if TORRENT_USE_IPV6
+		deadline_timer& timer = n.protocol() == udp::v4() ? m_connection_timer : m_connection_timer6;
+#else
+		deadline_timer& timer = m_connection_timer;
+#endif
+		timer.expires_from_now(d, ec);
+		timer.async_wait(std::bind(&dht_tracker::connection_timeout, self(), std::ref(n), _1));
 	}
 
 	void dht_tracker::refresh_timeout(error_code const& e)
@@ -189,6 +250,9 @@ namespace libtorrent { namespace dht
 		if (e || m_abort) return;
 
 		m_dht.tick();
+#if TORRENT_USE_IPV6
+		m_dht6.tick();
+#endif
 
 		// periodically update the DOS blocker's settings from the dht_settings
 		m_blocker.set_block_timer(m_settings.block_timeout);
@@ -197,7 +261,7 @@ namespace libtorrent { namespace dht
 		error_code ec;
 		m_refresh_timer.expires_from_now(seconds(5), ec);
 		m_refresh_timer.async_wait(
-			boost::bind(&dht_tracker::refresh_timeout, self(), _1));
+			std::bind(&dht_tracker::refresh_timeout, self(), _1));
 	}
 
 	void dht_tracker::refresh_key(error_code const& e)
@@ -206,100 +270,218 @@ namespace libtorrent { namespace dht
 
 		error_code ec;
 		m_key_refresh_timer.expires_from_now(key_refresh, ec);
-		m_key_refresh_timer.async_wait(boost::bind(&dht_tracker::refresh_key, self(), _1));
+		m_key_refresh_timer.async_wait(std::bind(&dht_tracker::refresh_key, self(), _1));
 
 		m_dht.new_write_key();
+#if TORRENT_USE_IPV6
+		m_dht6.new_write_key();
+#endif
 #ifndef TORRENT_DISABLE_LOGGING
 		m_log->log(dht_logger::tracker, "*** new write key***");
 #endif
 	}
 
-/*
-#if defined TORRENT_DEBUG && TORRENT_USE_IOSTREAM
-		std::ofstream st("dht_routing_table_state.txt", std::ios_base::trunc);
-		m_dht.print_state(st);
+	void dht_tracker::update_storage_node_ids()
+	{
+		std::vector<sha1_hash> ids;
+		ids.push_back(m_dht.nid());
+#if TORRENT_USE_IPV6
+		ids.push_back(m_dht6.nid());
 #endif
-*/
+		m_storage.update_node_ids(ids);
+	}
 
 	void dht_tracker::get_peers(sha1_hash const& ih
-		, boost::function<void(std::vector<tcp::endpoint> const&)> f)
+		, std::function<void(std::vector<tcp::endpoint> const&)> f)
 	{
-		m_dht.get_peers(ih, f, NULL, false);
+		std::function<void(std::vector<std::pair<node_entry, std::string>> const&)> empty;
+		m_dht.get_peers(ih, f, empty, false);
+#if TORRENT_USE_IPV6
+		m_dht6.get_peers(ih, f, empty, false);
+#endif
 	}
 
 	void dht_tracker::announce(sha1_hash const& ih, int listen_port, int flags
-		, boost::function<void(std::vector<tcp::endpoint> const&)> f)
+		, std::function<void(std::vector<tcp::endpoint> const&)> f)
 	{
 		m_dht.announce(ih, listen_port, flags, f);
+#if TORRENT_USE_IPV6
+		m_dht6.announce(ih, listen_port, flags, f);
+#endif
 	}
 
-	void dht_tracker::get_item(sha1_hash const& target
-		, boost::function<void(item const&)> cb)
+	namespace {
+
+	struct get_immutable_item_ctx
 	{
-		m_dht.get_item(target, cb);
+		explicit get_immutable_item_ctx(int traversals)
+			: active_traversals(traversals)
+			, item_posted(false)
+		{}
+		int active_traversals;
+		bool item_posted;
+	};
+
+	// these functions provide a slightly higher level
+	// interface to the get/put functionality in the DHT
+	void get_immutable_item_callback(item const& it, std::shared_ptr<get_immutable_item_ctx> ctx
+		, std::function<void(item const&)> f)
+	{
+		// the reason to wrap here is to control the return value
+		// since it controls whether we re-put the content
+		TORRENT_ASSERT(!it.is_mutable());
+		--ctx->active_traversals;
+		if (!ctx->item_posted && (!it.empty() || ctx->active_traversals == 0))
+		{
+			ctx->item_posted = true;
+			f(it);
+		}
+	}
+
+	struct get_mutable_item_ctx
+	{
+		explicit get_mutable_item_ctx(int traversals) : active_traversals(traversals) {}
+		int active_traversals;
+		item it;
+	};
+
+	void get_mutable_item_callback(item const& it, bool authoritative
+		, std::shared_ptr<get_mutable_item_ctx> ctx
+		, std::function<void(item const&, bool)> f)
+	{
+		TORRENT_ASSERT(it.is_mutable());
+		if (authoritative) --ctx->active_traversals;
+		authoritative = authoritative && ctx->active_traversals == 0;
+		if ((ctx->it.empty() && !it.empty()) || (ctx->it.seq() < it.seq()))
+		{
+			ctx->it = it;
+			f(it, authoritative);
+		}
+		else if (authoritative)
+			f(it, authoritative);
+	}
+
+	struct put_item_ctx
+	{
+		explicit put_item_ctx(int traversals)
+			: active_traversals(traversals)
+			, response_count(0)
+		{}
+
+		int active_traversals;
+		int response_count;
+	};
+
+	void put_immutable_item_callback(int responses, std::shared_ptr<put_item_ctx> ctx
+		, std::function<void(int)> f)
+	{
+		ctx->response_count += responses;
+		if (--ctx->active_traversals == 0)
+			f(ctx->response_count);
+	}
+
+	void put_mutable_item_callback(item const& it, int responses, std::shared_ptr<put_item_ctx> ctx
+		, std::function<void(item const&, int)> cb)
+	{
+		ctx->response_count += responses;
+		if (--ctx->active_traversals == 0)
+			cb(it, ctx->response_count);
+	}
+
+	} // anonymous namespace
+
+	void dht_tracker::get_item(sha1_hash const& target
+		, std::function<void(item const&)> cb)
+	{
+		auto ctx = std::make_shared<get_immutable_item_ctx>((TORRENT_USE_IPV6) ? 2 : 1);
+		m_dht.get_item(target, std::bind(&get_immutable_item_callback, _1, ctx, cb));
+#if TORRENT_USE_IPV6
+		m_dht6.get_item(target, std::bind(&get_immutable_item_callback, _1, ctx, cb));
+#endif
 	}
 
 	// key is a 32-byte binary string, the public key to look up.
 	// the salt is optional
-	void dht_tracker::get_item(char const* key
-		, boost::function<void(item const&, bool)> cb
+	void dht_tracker::get_item(public_key const& key
+		, std::function<void(item const&, bool)> cb
 		, std::string salt)
 	{
-		m_dht.get_item(key, salt, cb);
+		auto ctx = std::make_shared<get_mutable_item_ctx>((TORRENT_USE_IPV6) ? 2 : 1);
+		m_dht.get_item(key, salt, std::bind(&get_mutable_item_callback, _1, _2, ctx, cb));
+#if TORRENT_USE_IPV6
+		m_dht6.get_item(key, salt, std::bind(&get_mutable_item_callback, _1, _2, ctx, cb));
+#endif
 	}
 
 	void dht_tracker::put_item(entry const& data
-		, boost::function<void(int)> cb)
+		, std::function<void(int)> cb)
 	{
 		std::string flat_data;
 		bencode(std::back_inserter(flat_data), data);
-		sha1_hash target = item_target_id(
-			std::pair<char const*, int>(flat_data.c_str(), flat_data.size()));
+		sha1_hash const target = item_target_id(flat_data);
 
-		m_dht.put_item(target, data, cb);
-	}
-
-	void dht_tracker::put_item(char const* key
-		, boost::function<void(item const&, int)> cb
-		, boost::function<void(item&)> data_cb, std::string salt)
-	{
-		m_dht.put_item(key, salt, cb, data_cb);
-	}
-
-	void dht_tracker::direct_request(udp::endpoint ep, entry& e
-		, boost::function<void(msg const&)> f)
-	{
-		m_dht.direct_request(ep, e, f);
-	}
-
-	// translate bittorrent kademlia message into the generice kademlia message
-	// used by the library
-	bool dht_tracker::incoming_packet(error_code const& ec
-		, udp::endpoint const& ep, char const* buf, int size)
-	{
-		if (ec)
-		{
-			if (ec == boost::asio::error::connection_refused
-				|| ec == boost::asio::error::connection_reset
-				|| ec == boost::asio::error::connection_aborted
-#ifdef _WIN32
-				|| ec == error_code(ERROR_HOST_UNREACHABLE, system_category())
-				|| ec == error_code(ERROR_PORT_UNREACHABLE, system_category())
-				|| ec == error_code(ERROR_CONNECTION_REFUSED, system_category())
-				|| ec == error_code(ERROR_CONNECTION_ABORTED, system_category())
+		auto ctx = std::make_shared<put_item_ctx>((TORRENT_USE_IPV6) ? 2 : 1);
+		m_dht.put_item(target, data, std::bind(&put_immutable_item_callback
+			, _1, ctx, cb));
+#if TORRENT_USE_IPV6
+		m_dht6.put_item(target, data, std::bind(&put_immutable_item_callback
+			, _1, ctx, cb));
 #endif
-				)
-			{
-				m_dht.unreachable(ep);
-			}
-			return false;
+	}
+
+	void dht_tracker::put_item(public_key const& key
+		, std::function<void(item const&, int)> cb
+		, std::function<void(item&)> data_cb, std::string salt)
+	{
+		auto ctx = std::make_shared<put_item_ctx>((TORRENT_USE_IPV6) ? 2 : 1);
+		m_dht.put_item(key, salt, std::bind(&put_mutable_item_callback
+			, _1, _2, ctx, cb), data_cb);
+#if TORRENT_USE_IPV6
+		m_dht6.put_item(key, salt, std::bind(&put_mutable_item_callback
+			, _1, _2, ctx, cb), data_cb);
+#endif
+	}
+
+	void dht_tracker::direct_request(udp::endpoint const& ep, entry& e
+		, std::function<void(msg const&)> f)
+	{
+#if TORRENT_USE_IPV6
+		if (ep.protocol() == udp::v6())
+			m_dht6.direct_request(ep, e, f);
+		else
+#endif
+			m_dht.direct_request(ep, e, f);
+	}
+
+	void dht_tracker::incoming_error(error_code const& ec, udp::endpoint const& ep)
+	{
+		if (ec == boost::asio::error::connection_refused
+			|| ec == boost::asio::error::connection_reset
+			|| ec == boost::asio::error::connection_aborted
+#ifdef _WIN32
+			|| ec == error_code(ERROR_HOST_UNREACHABLE, system_category())
+			|| ec == error_code(ERROR_PORT_UNREACHABLE, system_category())
+			|| ec == error_code(ERROR_CONNECTION_REFUSED, system_category())
+			|| ec == error_code(ERROR_CONNECTION_ABORTED, system_category())
+#endif
+			)
+		{
+			m_dht.unreachable(ep);
+#if TORRENT_USE_IPV6
+			m_dht6.unreachable(ep);
+#endif
 		}
+	}
 
-		if (size <= 20 || *buf != 'd' || buf[size-1] != 'e') return false;
-		// remove this line/check once the DHT supports IPv6
-		if (!ep.address().is_v4()) return false;
+	bool dht_tracker::incoming_packet(udp::endpoint const& ep
+		, span<char const> const buf)
+	{
+		int const buf_size = int(buf.size());
+		if (buf_size <= 20
+			|| buf.front() != 'd'
+			|| buf.back() != 'e') return false;
 
-		m_counters.inc_stats_counter(counters::dht_bytes_in, size);
+		m_counters.inc_stats_counter(counters::dht_bytes_in, buf_size);
 		// account for IP and UDP overhead
 		m_counters.inc_stats_counter(counters::recv_ip_overhead_bytes
 			, ep.address().is_v6() ? 48 : 28);
@@ -311,129 +493,171 @@ namespace libtorrent { namespace dht
 
 			// these are class A networks not available to the public
 			// if we receive messages from here, that seems suspicious
-			boost::uint8_t class_a[] = { 3, 6, 7, 9, 11, 19, 21, 22, 25
+			static std::uint8_t const class_a[] = { 3, 6, 7, 9, 11, 19, 21, 22, 25
 				, 26, 28, 29, 30, 33, 34, 48, 51, 56 };
 
-			int num = sizeof(class_a)/sizeof(class_a[0]);
-			if (std::find(class_a, class_a + num, b[0]) != class_a + num)
+			if (std::find(std::begin(class_a), std::end(class_a), b[0]) != std::end(class_a))
+			{
+				m_counters.inc_stats_counter(counters::dht_messages_in_dropped);
 				return true;
+			}
 		}
 
 		if (!m_blocker.incoming(ep.address(), clock_type::now(), m_log))
+		{
+			m_counters.inc_stats_counter(counters::dht_messages_in_dropped);
 			return true;
+		}
 
-		using libtorrent::entry;
-		using libtorrent::bdecode;
-
-		TORRENT_ASSERT(size > 0);
+		TORRENT_ASSERT(buf_size > 0);
 
 		int pos;
 		error_code err;
-		int ret = bdecode(buf, buf + size, m_msg, err, &pos, 10, 500);
+		int ret = bdecode(buf.data(), buf.data() + buf_size, m_msg, err, &pos, 10, 500);
 		if (ret != 0)
 		{
+			m_counters.inc_stats_counter(counters::dht_messages_in_dropped);
 #ifndef TORRENT_DISABLE_LOGGING
-			m_log->log_packet(dht_logger::incoming_message, buf, size, ep);
+			m_log->log_packet(dht_logger::incoming_message, buf, ep);
 #endif
 			return false;
 		}
 
 		if (m_msg.type() != bdecode_node::dict_t)
 		{
+			m_counters.inc_stats_counter(counters::dht_messages_in_dropped);
 #ifndef TORRENT_DISABLE_LOGGING
-			m_log->log_packet(dht_logger::incoming_message, buf, size, ep);
+			m_log->log_packet(dht_logger::incoming_message, buf, ep);
 #endif
 			// it's not a good idea to send a response to an invalid messages
 			return false;
 		}
 
 #ifndef TORRENT_DISABLE_LOGGING
-		m_log->log_packet(dht_logger::incoming_message, buf
-			, size, ep);
+		m_log->log_packet(dht_logger::incoming_message, buf, ep);
 #endif
 
 		libtorrent::dht::msg m(m_msg, ep);
 		m_dht.incoming(m);
+#if TORRENT_USE_IPV6
+		m_dht6.incoming(m);
+#endif
 		return true;
+	}
+
+	std::vector<std::pair<node_id, udp::endpoint>> dht_tracker::live_nodes(node_id const& nid)
+	{
+		std::vector<std::pair<node_id, udp::endpoint>> ret;
+
+		// TODO: figure out a better solution when multi-home is implemented
+		node const* dht = m_dht.nid() == nid ? &m_dht
+#if TORRENT_USE_IPV6
+			: m_dht6.nid() == nid ? &m_dht6 : nullptr;
+#else
+			: nullptr;
+#endif
+
+		if (dht == nullptr) return ret;
+
+		dht->m_table.for_each_node([&ret](node_entry const& e)
+		{ ret.emplace_back(e.id, e.endpoint); }, nullptr);
+
+		return ret;
 	}
 
 	namespace {
 
-	void add_node_fun(void* userdata, node_entry const& e)
+	std::vector<udp::endpoint> save_nodes(node const& dht)
 	{
-		entry* n = static_cast<entry*>(userdata);
-		std::string node;
-		std::back_insert_iterator<std::string> out(node);
-		write_endpoint(e.ep(), out);
-		n->list().push_back(entry(node));
+		std::vector<udp::endpoint> ret;
+
+		dht.m_table.for_each_node([&ret](node_entry const& e)
+		{ ret.push_back(e.ep()); });
+
+		return ret;
 	}
 
 	} // anonymous namespace
 
-	entry dht_tracker::state() const
+	dht_state dht_tracker::state() const
 	{
-		entry ret(entry::dictionary_t);
-		{
-			entry nodes(entry::list_t);
-			m_dht.m_table.for_each_node(&add_node_fun, &add_node_fun, &nodes);
-			if (!nodes.list().empty())
-				ret["nodes"] = nodes;
-		}
-
-		ret["node-id"] = m_dht.nid().to_string();
+		dht_state ret;
+		ret.nid = m_dht.nid();
+		ret.nodes = save_nodes(m_dht);
+#if TORRENT_USE_IPV6
+		ret.nid6 = m_dht6.nid();
+		ret.nodes6 = save_nodes(m_dht6);
+#endif
 		return ret;
 	}
 
-	void dht_tracker::add_node(udp::endpoint node)
+	void dht_tracker::add_node(udp::endpoint const& node)
 	{
 		m_dht.add_node(node);
+#if TORRENT_USE_IPV6
+		m_dht6.add_node(node);
+#endif
 	}
 
 	void dht_tracker::add_router_node(udp::endpoint const& node)
 	{
 		m_dht.add_router_node(node);
+#if TORRENT_USE_IPV6
+		m_dht6.add_router_node(node);
+#endif
 	}
 
 	bool dht_tracker::has_quota()
 	{
-		return m_sock.has_quota();
+		time_point const now = clock_type::now();
+		time_duration const delta = now - m_last_tick;
+		m_last_tick = now;
+
+		// add any new quota we've accrued since last time
+		m_send_quota += int(std::int64_t(m_settings.upload_rate_limit)
+			* total_microseconds(delta) / 1000000);
+
+		// allow 3 seconds worth of burst
+		if (m_send_quota > 3 * m_settings.upload_rate_limit)
+			m_send_quota = 3 * m_settings.upload_rate_limit;
+
+		return m_send_quota > 0;
 	}
 
-	bool dht_tracker::send_packet(libtorrent::entry& e, udp::endpoint const& addr, int send_flags)
+	bool dht_tracker::send_packet(entry& e, udp::endpoint const& addr)
 	{
-		using libtorrent::bencode;
-		using libtorrent::entry;
-
 		static char const version_str[] = {'L', 'T'
 			, LIBTORRENT_VERSION_MAJOR, LIBTORRENT_VERSION_MINOR};
 		e["v"] = std::string(version_str, version_str + 4);
 
 		m_send_buf.clear();
 		bencode(std::back_inserter(m_send_buf), e);
-		error_code ec;
 
-		bool ret = m_sock.send(addr, &m_send_buf[0], int(m_send_buf.size()), ec, send_flags);
-		if (!ret || ec)
+		// update the quota. We won't prevent the packet to be sent if we exceed
+		// the quota, we'll just (potentially) block the next incoming request.
+
+		m_send_quota -= int(m_send_buf.size());
+
+		error_code ec;
+		m_send_fun(addr, m_send_buf, ec, 0);
+		if (ec)
 		{
 			m_counters.inc_stats_counter(counters::dht_messages_out_dropped);
 #ifndef TORRENT_DISABLE_LOGGING
-			m_log->log_packet(dht_logger::outgoing_message, &m_send_buf[0]
-				, m_send_buf.size(), addr);
+			m_log->log_packet(dht_logger::outgoing_message, m_send_buf, addr);
 #endif
 			return false;
 		}
 
-		m_counters.inc_stats_counter(counters::dht_bytes_out, m_send_buf.size());
+		m_counters.inc_stats_counter(counters::dht_bytes_out, int(m_send_buf.size()));
 		// account for IP and UDP overhead
 		m_counters.inc_stats_counter(counters::sent_ip_overhead_bytes
 			, addr.address().is_v6() ? 48 : 28);
 		m_counters.inc_stats_counter(counters::dht_messages_out);
 #ifndef TORRENT_DISABLE_LOGGING
-		m_log->log_packet(dht_logger::outgoing_message, &m_send_buf[0]
-			, m_send_buf.size(), addr);
+		m_log->log_packet(dht_logger::outgoing_message, m_send_buf, addr);
 #endif
 		return true;
 	}
 
 }}
-

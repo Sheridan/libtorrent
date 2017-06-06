@@ -39,7 +39,6 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <libtorrent/torrent_handle.hpp>
 #include <libtorrent/alert_types.hpp>
 #include <libtorrent/magnet_uri.hpp>
-#include <libtorrent/error_code.hpp>
 
 namespace lt = libtorrent;
 int main(int argc, char const* argv[])
@@ -58,7 +57,7 @@ int main(int argc, char const* argv[])
 		return 1;
 	}
 	atp.save_path = "."; // save in current dir
-	lt::torrent_handle h = ses.add_torrent(atp);
+	lt::torrent_handle h = ses.add_torrent(std::move(atp));
 
 	for (;;) {
 		std::vector<lt::alert*> alerts;

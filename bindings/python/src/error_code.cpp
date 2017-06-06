@@ -34,6 +34,17 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <libtorrent/bdecode.hpp>
 #include <libtorrent/upnp.hpp>
 #include <libtorrent/socks5_stream.hpp>
+
+namespace boost
+{
+	// this fixe mysterious link error on msvc
+	boost::system::error_category const volatile*
+	get_pointer(boost::system::error_category const volatile* p)
+	{
+		return p;
+	}
+}
+
 #include <boost/asio/error.hpp>
 #if defined TORRENT_USE_OPENSSL
 #include <boost/asio/ssl/error.hpp>
@@ -111,7 +122,9 @@ namespace {
 
 void bind_error_code()
 {
-    class_<boost::system::error_category, boost::noncopyable>("error_category", no_init)
+    using boost::noncopyable;
+
+    class_<boost::system::error_category, noncopyable>("error_category", no_init)
         .def("name", &error_category::name)
         .def("message", &error_category::message)
         .def(self == self)
@@ -125,12 +138,12 @@ void bind_error_code()
         .def("value", &error_code::value)
         .def("clear", &error_code::clear)
         .def("category", &error_code::category
-           , return_internal_reference<>())
+           , return_value_policy<reference_existing_object>())
         .def("assign", &error_code::assign)
         .def_pickle(ec_pickle_suite())
         ;
 
-typedef return_value_policy<reference_existing_object> return_existing;
+using return_existing = return_value_policy<reference_existing_object>;
 
     def("libtorrent_category", &libtorrent_category, return_existing());
     def("upnp_category", &upnp_category, return_existing());

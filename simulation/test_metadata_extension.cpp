@@ -40,7 +40,6 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/torrent_info.hpp"
 #include "libtorrent/add_torrent_params.hpp"
 #include "libtorrent/magnet_uri.hpp"
-#include "libtorrent/extensions/metadata_transfer.hpp"
 #include "libtorrent/extensions/ut_metadata.hpp"
 
 using namespace libtorrent;
@@ -97,11 +96,13 @@ void run_metadata_test(int flags)
 
 	setup_swarm(2, (flags & reverse) ? swarm_test::upload : swarm_test::download
 		// add session
-		, [](lt::settings_pack& pack) {}
+		, [](lt::settings_pack&) {}
 		// add torrent
 		, [](lt::add_torrent_params& params) {
 			// we want to add the torrent via magnet link
-			params.url = lt::make_magnet_uri(*params.ti);
+			error_code ec;
+			parse_magnet_uri(lt::make_magnet_uri(*params.ti), params, ec);
+			TEST_CHECK(!ec);
 			params.ti.reset();
 			params.flags &= ~add_torrent_params::flag_upload_mode;
 		}
@@ -112,7 +113,7 @@ void run_metadata_test(int flags)
 			{
 				metadata_alerts += 1;
 
-				boost::shared_ptr<torrent_info> ti = boost::make_shared<torrent_info>(
+				auto ti = std::make_shared<torrent_info>(
 					*ses.get_torrents()[0].torrent_file());
 
 				if (flags & disconnect)

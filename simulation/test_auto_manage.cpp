@@ -36,6 +36,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/alert_types.hpp"
 #include "libtorrent/deadline_timer.hpp"
 #include "settings.hpp"
+#include "utils.hpp"
 #include "create_torrent.hpp"
 #include "simulator/simulator.hpp"
 #include "simulator/utils.hpp" // for timer
@@ -48,14 +49,6 @@ const int num_torrents = 10;
 namespace lt = libtorrent;
 
 using sim::asio::ip::address_v4;
-
-std::unique_ptr<sim::asio::io_service> make_io_service(sim::simulation& sim, int i)
-{
-	char ep[30];
-	snprintf(ep, sizeof(ep), "50.0.%d.%d", (i + 1) >> 8, (i + 1) & 0xff);
-	return std::unique_ptr<sim::asio::io_service>(new sim::asio::io_service(
-		sim, asio::ip::address_v4::from_string(ep)));
-}
 
 // this is the general template for these tests. create the session with custom
 // settings (Settings), set up the test, by adding torrents with certain
@@ -127,7 +120,7 @@ TORRENT_TEST(dont_count_slow_torrents)
 			int num_started = 0;
 			for (alert* a : alerts)
 			{
-				printf("%-3d %s\n", int(duration_cast<lt::seconds>(a->timestamp()
+				std::printf("%-3d %s\n", int(duration_cast<lt::seconds>(a->timestamp()
 						- start_time).count()), a->message().c_str());
 				if (alert_cast<torrent_resumed_alert>(a) == nullptr) continue;
 
@@ -186,7 +179,7 @@ TORRENT_TEST(count_slow_torrents)
 			int num_started = 0;
 			for (alert* a : alerts)
 			{
-				printf("%-3d %s\n", int(duration_cast<lt::seconds>(a->timestamp()
+				std::printf("%-3d %s\n", int(duration_cast<lt::seconds>(a->timestamp()
 						- start_time).count()), a->message().c_str());
 				if (alert_cast<torrent_resumed_alert>(a) == nullptr) continue;
 				++num_started;
@@ -236,7 +229,7 @@ TORRENT_TEST(force_stopped_download)
 
 			for (alert* a : alerts)
 			{
-				printf("%-3d %s\n", int(duration_cast<lt::seconds>(a->timestamp()
+				std::printf("%-3d %s\n", int(duration_cast<lt::seconds>(a->timestamp()
 						- start_time).count()), a->message().c_str());
 				// we don't expect any torrents being started or stopped, since
 				// they're all force stopped
@@ -284,7 +277,7 @@ TORRENT_TEST(force_started)
 
 			for (alert* a : alerts)
 			{
-				printf("%-3d %s\n", int(duration_cast<lt::seconds>(a->timestamp()
+				std::printf("%-3d %s\n", int(duration_cast<lt::seconds>(a->timestamp()
 						- start_time).count()), a->message().c_str());
 				// we don't expect any torrents being started or stopped, since
 				// they're all force started
@@ -336,13 +329,13 @@ TORRENT_TEST(seed_limit)
 			int num_seeding = 0;
 			for (alert* a : alerts)
 			{
-				fprintf(stderr, "%-3d %s\n", int(duration_cast<lt::seconds>(a->timestamp()
+				std::printf("%-3d %s\n", int(duration_cast<lt::seconds>(a->timestamp()
 						- start_time).count()), a->message().c_str());
 				if (alert_cast<torrent_resumed_alert>(a))
 				{
 					++num_started;
 
-					fprintf(stderr, "started: %d checking: %d seeding: %d\n"
+					std::printf("started: %d checking: %d seeding: %d\n"
 						, num_started, num_checking, num_seeding);
 				}
 				else if (alert_cast<torrent_paused_alert>(a))
@@ -350,7 +343,7 @@ TORRENT_TEST(seed_limit)
 					TEST_CHECK(num_started > 0);
 					--num_started;
 
-					fprintf(stderr, "started: %d checking: %d seeding: %d\n"
+					std::printf("started: %d checking: %d seeding: %d\n"
 						, num_started, num_checking, num_seeding);
 				}
 				else if (state_changed_alert* sc = alert_cast<state_changed_alert>(a))
@@ -365,7 +358,7 @@ TORRENT_TEST(seed_limit)
 					else if (sc->state == torrent_status::seeding)
 						++num_seeding;
 
-					fprintf(stderr, "started: %d checking: %d seeding: %d\n"
+					std::printf("started: %d checking: %d seeding: %d\n"
 						, num_started, num_checking, num_seeding);
 
 					// while at least one torrent is checking, there may be another
@@ -425,13 +418,13 @@ TORRENT_TEST(download_limit)
 			int num_downloading = 0;
 			for (alert* a : alerts)
 			{
-				fprintf(stderr, "%-3d %s\n", int(duration_cast<lt::seconds>(a->timestamp()
+				std::printf("%-3d %s\n", int(duration_cast<lt::seconds>(a->timestamp()
 						- start_time).count()), a->message().c_str());
 				if (alert_cast<torrent_resumed_alert>(a))
 				{
 					++num_started;
 
-					fprintf(stderr, "started: %d checking: %d downloading: %d\n"
+					std::printf("started: %d checking: %d downloading: %d\n"
 						, num_started, num_checking, num_downloading);
 				}
 				else if (alert_cast<torrent_paused_alert>(a))
@@ -439,7 +432,7 @@ TORRENT_TEST(download_limit)
 					TEST_CHECK(num_started > 0);
 					--num_started;
 
-					fprintf(stderr, "started: %d checking: %d downloading: %d\n"
+					std::printf("started: %d checking: %d downloading: %d\n"
 						, num_started, num_checking, num_downloading);
 				}
 				else if (state_changed_alert* sc = alert_cast<state_changed_alert>(a))
@@ -454,7 +447,7 @@ TORRENT_TEST(download_limit)
 					else if (sc->state == torrent_status::downloading)
 						++num_downloading;
 
-					fprintf(stderr, "started: %d checking: %d downloading: %d\n"
+					std::printf("started: %d checking: %d downloading: %d\n"
 						, num_started, num_checking, num_downloading);
 
 					// while at least one torrent is checking, there may be another
@@ -521,7 +514,7 @@ TORRENT_TEST(checking_announce)
 			int num_announce = 0;
 			for (alert* a : alerts)
 			{
-				fprintf(stderr, "%-3d %s\n", int(duration_cast<lt::seconds>(a->timestamp()
+				std::printf("%-3d %s\n", int(duration_cast<lt::seconds>(a->timestamp()
 						- start_time).count()), a->message().c_str());
 				if (alert_cast<tracker_announce_alert>(a))
 					++num_announce;
@@ -571,7 +564,7 @@ TORRENT_TEST(paused_checking)
 
 			for (alert* a : alerts)
 			{
-				fprintf(stderr, "%-3d %s\n", int(duration_cast<lt::seconds>(a->timestamp()
+				std::printf("%-3d %s\n", int(duration_cast<lt::seconds>(a->timestamp()
 						- start_time).count()), a->message().c_str());
 				if (state_changed_alert* sc = alert_cast<state_changed_alert>(a))
 				{
@@ -597,7 +590,7 @@ TORRENT_TEST(paused_checking)
 TORRENT_TEST(stop_when_ready)
 {
 	run_test(
-		[](settings_pack& sett) {},
+		[](settings_pack&) {},
 
 		[](lt::session& ses) {
 			// add torrents
@@ -620,7 +613,7 @@ TORRENT_TEST(stop_when_ready)
 			int num_paused = 0;
 			for (alert* a : alerts)
 			{
-				fprintf(stderr, "%-3d %s\n", int(duration_cast<lt::seconds>(a->timestamp()
+				std::printf("%-3d %s\n", int(duration_cast<lt::seconds>(a->timestamp()
 						- start_time).count()), a->message().c_str());
 
 				if (alert_cast<torrent_paused_alert>(a))
@@ -639,7 +632,7 @@ TORRENT_TEST(stop_when_ready)
 				}
 				// there should not have been any announces. the torrent should have
 				// been stopped *before* announcing.
-				TEST_CHECK(alert_cast<tracker_announce_alert>(a) == NULL);
+				TEST_CHECK(alert_cast<tracker_announce_alert>(a) == nullptr);
 			}
 
 			for (torrent_handle const& h : ses.get_torrents())
@@ -657,9 +650,9 @@ TORRENT_TEST(stop_when_ready)
 		});
 }
 
-// This test makes sure that the fastresume check will still run, and
-// potentially fail, for stopped torrents. The actual checking of files won't
-// start until the torrent is un-paused/resumed though
+// This test makes sure that the fastresume check will still run for stopped
+// torrents. The actual checking of files won't start until the torrent is
+// un-paused/resumed though
 TORRENT_TEST(resume_reject_when_paused)
 {
 	run_test(
@@ -672,13 +665,11 @@ TORRENT_TEST(resume_reject_when_paused)
 			lt::add_torrent_params params = create_torrent(0, true);
 
 			// the torrent is not auto managed and paused. Once the resume data
-			// check completes, it will stay paused but the resume_rejected_alert
-			// will be posted
+			// check completes, it will stay paused but the state_changed_alert
+			// will be posted, when it goes to check the files
 			params.flags &= ~add_torrent_params::flag_auto_managed;
 			params.flags |= add_torrent_params::flag_paused;
 
-			// an empty dictionary will be rejected
-			params.resume_data = {'d', 'e'};
 			ses.async_add_torrent(params);
 		},
 
@@ -689,12 +680,12 @@ TORRENT_TEST(resume_reject_when_paused)
 			lt::time_point start_time = alerts[0]->timestamp();
 
 			int num_piece_finished = 0;
-			int resume_rejected = 0;
+			int checking_files = 0;
 			int state_changed = 0;
 
 			for (alert* a : alerts)
 			{
-				fprintf(stderr, "%-3d %-25s %s\n", int(duration_cast<lt::seconds>(a->timestamp()
+				std::printf("%-3d %-25s %s\n", int(duration_cast<lt::seconds>(a->timestamp()
 						- start_time).count())
 					, a->what()
 					, a->message().c_str());
@@ -702,13 +693,11 @@ TORRENT_TEST(resume_reject_when_paused)
 				if (alert_cast<piece_finished_alert>(a))
 					++num_piece_finished;
 
-				if (alert_cast<fastresume_rejected_alert>(a))
-					++resume_rejected;
-
 				if (auto sc = alert_cast<state_changed_alert>(a))
 				{
 					if (sc->state == torrent_status::checking_files)
-						++state_changed;
+						++checking_files;
+					++state_changed;
 				}
 			}
 
@@ -725,8 +714,12 @@ TORRENT_TEST(resume_reject_when_paused)
 			}
 
 			TEST_EQUAL(num_piece_finished, 0);
-			TEST_EQUAL(resume_rejected, 1);
+			// it should not actually check the files (since it's paused)
+			// if the files were checked, the state would change to downloading
+			// immediately, and state_changed would be 2. This asserts that's not
+			// the case.
 			TEST_EQUAL(state_changed, 1);
+			TEST_EQUAL(checking_files, 1);
 		});
 }
 
@@ -763,7 +756,7 @@ TORRENT_TEST(no_resume_when_paused)
 
 			for (alert* a : alerts)
 			{
-				fprintf(stderr, "%-3d %-25s %s\n", int(duration_cast<lt::seconds>(a->timestamp()
+				std::printf("%-3d %-25s %s\n", int(duration_cast<lt::seconds>(a->timestamp()
 						- start_time).count())
 					, a->what()
 					, a->message().c_str());
@@ -825,7 +818,7 @@ TORRENT_TEST(no_resume_when_started)
 
 			for (alert* a : alerts)
 			{
-				fprintf(stderr, "%-3d %-25s %s\n", int(duration_cast<lt::seconds>(a->timestamp()
+				std::printf("%-3d %-25s %s\n", int(duration_cast<lt::seconds>(a->timestamp()
 						- start_time).count())
 					, a->what()
 					, a->message().c_str());
@@ -881,7 +874,7 @@ TORRENT_TEST(pause_completed_torrents)
 			lt::time_point paused;
 			for (alert* a : alerts)
 			{
-				printf("%-3d %s\n", int(duration_cast<lt::seconds>(a->timestamp()
+				std::printf("%-3d %s\n", int(duration_cast<lt::seconds>(a->timestamp()
 						- start_time).count()), a->message().c_str());
 				if (alert_cast<torrent_resumed_alert>(a))
 					++num_started;

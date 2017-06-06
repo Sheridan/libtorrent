@@ -35,6 +35,7 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #include <vector>
 #include <set>
+#include <memory>
 
 #include <libtorrent/kademlia/node_id.hpp>
 #include <libtorrent/kademlia/routing_table.hpp>
@@ -42,25 +43,19 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <libtorrent/address.hpp>
 
 #include "libtorrent/aux_/disable_warnings_push.hpp"
-
 #include <boost/noncopyable.hpp>
-#include <boost/intrusive_ptr.hpp>
-#include <boost/bind.hpp>
-#include <boost/pool/pool.hpp>
-
 #include "libtorrent/aux_/disable_warnings_pop.hpp"
 
 namespace libtorrent { struct dht_lookup; }
-namespace libtorrent { namespace dht
-{
+namespace libtorrent { namespace dht {
 
-class rpc_manager;
 class node;
 
 // this class may not be instantiated as a stack object
 struct TORRENT_EXTRA_EXPORT traversal_algorithm : boost::noncopyable
+	, std::enable_shared_from_this<traversal_algorithm>
 {
-	void traverse(node_id const& id, udp::endpoint addr);
+	void traverse(node_id const& id, udp::endpoint const& addr);
 	void finished(observer_ptr o);
 
 	enum flags_t { prevent_request = 1, short_timeout = 2 };
@@ -68,24 +63,28 @@ struct TORRENT_EXTRA_EXPORT traversal_algorithm : boost::noncopyable
 	virtual ~traversal_algorithm();
 	void status(dht_lookup& l);
 
-	void* allocate_observer();
-	void free_observer(void* ptr);
-
 	virtual char const* name() const;
 	virtual void start();
 
 	node_id const& target() const { return m_target; }
 
 	void resort_results();
-	void add_entry(node_id const& id, udp::endpoint addr, unsigned char flags);
+	void add_entry(node_id const& id, udp::endpoint const& addr, unsigned char flags);
 
-	traversal_algorithm(node & node, node_id target);
-	int invoke_count() const { return m_invoke_count; }
-	int branch_factor() const { return m_branch_factor; }
+	traversal_algorithm(node& dht_node, node_id const& target);
+	int invoke_count() const { TORRENT_ASSERT(m_invoke_count >= 0); return m_invoke_count; }
+	int branch_factor() const { TORRENT_ASSERT(m_branch_factor >= 0); return m_branch_factor; }
 
 	node& get_node() const { return m_node; }
 
+#ifndef TORRENT_DISABLE_LOGGING
+	std::uint32_t id() const { return m_id; }
+#endif
+
 protected:
+
+	std::shared_ptr<traversal_algorithm> self()
+	{ return shared_from_this(); }
 
 	// returns true if we're done
 	bool add_requests();
@@ -96,42 +95,44 @@ protected:
 	virtual void done();
 	// should construct an algorithm dependent
 	// observer in ptr.
-	virtual observer_ptr new_observer(void* ptr
-		, udp::endpoint const& ep, node_id const& id);
+	virtual observer_ptr new_observer(udp::endpoint const& ep
+		, node_id const& id);
 
 	virtual bool invoke(observer_ptr) { return false; }
 
-	friend void intrusive_ptr_add_ref(traversal_algorithm* p)
-	{
-		TORRENT_ASSERT(p->m_ref_count < 0xffff);
-		p->m_ref_count++;
-	}
+	int num_responses() const { return m_responses; }
+	int num_timeouts() const { return m_timeouts; }
 
-	friend void intrusive_ptr_release(traversal_algorithm* p)
-	{
-		if (--p->m_ref_count == 0)
-			delete p;
-	}
-
-	node & m_node;
+	node& m_node;
 	std::vector<observer_ptr> m_results;
+
+private:
+
 	node_id const m_target;
-	boost::uint16_t m_ref_count;
-	boost::int16_t m_invoke_count;
-	boost::int16_t m_branch_factor;
-	boost::int16_t m_responses;
-	boost::int16_t m_timeouts;
+	std::int16_t m_invoke_count = 0;
+	std::int16_t m_branch_factor = 3;
+	std::int16_t m_responses = 0;
+	std::int16_t m_timeouts = 0;
+#ifndef TORRENT_DISABLE_LOGGING
+	// this is a unique ID for this specific traversal_algorithm instance,
+	// just used for logging
+	std::uint32_t m_id;
+#endif
 
 	// the IP addresses of the nodes in m_results
-	std::set<boost::uint32_t> m_peer4_prefixes;
-// no IPv6 support yet anyway
-//	std::set<boost::uint64_t> m_peer6_prefixes;
+	std::set<std::uint32_t> m_peer4_prefixes;
+#if TORRENT_USE_IPV6
+	std::set<std::uint64_t> m_peer6_prefixes;
+#endif
+#ifndef TORRENT_DISABLE_LOGGING
+	void log_timeout(observer_ptr const& o, char const* prefix) const;
+#endif
 };
 
 struct traversal_observer : observer
 {
 	traversal_observer(
-		boost::intrusive_ptr<traversal_algorithm> const& algorithm
+		std::shared_ptr<traversal_algorithm> const& algorithm
 		, udp::endpoint const& ep, node_id const& id)
 		: observer(algorithm, ep, id)
 	{}
@@ -143,4 +144,3 @@ struct traversal_observer : observer
 } } // namespace libtorrent::dht
 
 #endif // TRAVERSAL_ALGORITHM_050324_HPP
-

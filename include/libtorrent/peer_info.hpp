@@ -39,9 +39,10 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/config.hpp"
 #include "libtorrent/bitfield.hpp"
 #include "libtorrent/time.hpp"
+#include "libtorrent/units.hpp"
 
-namespace libtorrent
-{
+namespace libtorrent {
+
 	// holds information and statistics about one peer
 	// that libtorrent is connected to
 	struct TORRENT_EXPORT peer_info
@@ -56,13 +57,13 @@ namespace libtorrent
 		// a bitfield, with one bit per piece in the torrent. Each bit tells you
 		// if the peer has that piece (if it's set to 1) or if the peer miss that
 		// piece (set to 0).
-		bitfield pieces;
+		typed_bitfield<piece_index_t> pieces;
 
 		// the total number of bytes downloaded from and uploaded to this peer.
 		// These numbers do not include the protocol chatter, but only the
 		// payload data.
-		boost::int64_t total_download;
-		boost::int64_t total_upload;
+		std::int64_t total_download;
+		std::int64_t total_upload;
 
 		// the time since we last sent a request to this peer and since any
 		// transfer occurred with this peer
@@ -91,7 +92,7 @@ namespace libtorrent
 
 			// means that this peer supports the
 			// `extension protocol`__.
-			// 
+			//
 			// __ extension_protocol.html
 			supports_extensions = 0x10,
 
@@ -162,7 +163,7 @@ namespace libtorrent
 			// connect via the NAT holepunch mechanism.
 			holepunched = 0x8000,
 
-			// indicates that this socket is runnin on top of the
+			// indicates that this socket is running on top of the
 			// I2P transport.
 			i2p_socket = 0x10000,
 
@@ -183,7 +184,7 @@ namespace libtorrent
 
 		// tells you in which state the peer is in. It is set to
 		// any combination of the peer_flags_t enum.
-		boost::uint32_t flags;
+		std::uint32_t flags;
 
 		// the flags indicating which sources a peer can
 		// have come from. A peer may have been seen from
@@ -213,7 +214,7 @@ namespace libtorrent
 
 		// a combination of flags describing from which sources this peer
 		// was received. See peer_source_flags.
-		boost::uint32_t source;
+		std::uint32_t source;
 
 		// the current upload and download speed we have to and from this peer
 		// (including any protocol messages). updated about once per second
@@ -246,6 +247,7 @@ namespace libtorrent
 		// allocated and used as receive buffer, respectively.
 		int receive_buffer_size;
 		int used_receive_buffer;
+		int receive_buffer_watermark;
 
 		// the number of pieces this peer has participated in sending us that
 		// turned out to fail the hash check.
@@ -290,7 +292,7 @@ namespace libtorrent
 		// ``downloading_progress`` is the number of bytes of this block we have
 		// received from the peer, and ``downloading_total`` is the total number
 		// of bytes in this block.
-		int downloading_piece_index;
+		piece_index_t downloading_piece_index;
 		int downloading_block_index;
 		int downloading_progress;
 		int downloading_total;
@@ -311,9 +313,13 @@ namespace libtorrent
 		// the kind of connection this peer uses. See connection_type_t.
 		int connection_type;
 
+#ifndef TORRENT_NO_DEPRECATE
 		// an estimate of the rate this peer is downloading at, in
 		// bytes per second.
 		int remote_dl_rate;
+#else
+		int deprecated_remote_dl_rate;
+#endif
 
 		// the number of bytes this peer has pending in the disk-io thread.
 		// Downloaded and waiting to be written to disk. This is what is capped
@@ -399,19 +405,6 @@ namespace libtorrent
 		char write_state;
 
 #ifndef TORRENT_NO_DEPRECATE
-		// country code deprecated in 1.1
-
-		// the two letter `ISO 3166 country code`__ for the country the peer is
-		// connected from. If the country hasn't been resolved yet, both chars
-		// are set to 0. If the resolution failed for some reason, the field is
-		// set to "--". If the resolution service returns an invalid country
-		// code, it is set to "!!". The ``countries.nerd.dk`` service is used to
-		// look up countries. This field will remain set to 0 unless the torrent
-		// is set to resolve countries, see `resolve_countries()`_.
-		// 
-		// __ http://www.iso.org/iso/en/prods-services/iso3166ma/02iso-3166-code-lists/list-en1.html
-		char country[2];
-
 		// the number of bytes per second we are allowed to send to or receive
 		// from this peer. It may be -1 if there's no local limit on the peer.
 		// The global limit and the torrent limit may also be enforced.
@@ -423,13 +416,13 @@ namespace libtorrent
 		// but this member says how much *extra* free upload this peer has got.
 		// If it is a negative number it means that this was a peer from which we
 		// have got this amount of free download.
-		boost::int64_t load_balancing;
+		std::int64_t load_balancing;
 #endif
 
 	};
 
 	// internal
-	struct TORRENT_EXPORT peer_list_entry
+	struct TORRENT_EXTRA_EXPORT peer_list_entry
 	{
 		// internal
 		enum flags_t
@@ -442,9 +435,9 @@ namespace libtorrent
 		// internal
 		int flags;
 		// internal
-		boost::uint8_t failcount;
+		std::uint8_t failcount;
 		// internal
-		boost::uint8_t source;
+		std::uint8_t source;
 	};
 
 }

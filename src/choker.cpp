@@ -36,10 +36,11 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/aux_/time.hpp"
 #include "libtorrent/torrent.hpp"
 
-#include <boost/bind.hpp>
+#include <functional>
 
-namespace libtorrent
-{
+using namespace std::placeholders;
+
+namespace libtorrent {
 
 	namespace {
 
@@ -49,9 +50,9 @@ namespace libtorrent
 	{
 		// if one peer belongs to a higher priority torrent than the other one
 		// that one should be unchoked.
-		boost::shared_ptr<torrent> t1 = lhs->associated_torrent().lock();
+		std::shared_ptr<torrent> t1 = lhs->associated_torrent().lock();
 		TORRENT_ASSERT(t1);
-		boost::shared_ptr<torrent> t2 = rhs->associated_torrent().lock();
+		std::shared_ptr<torrent> t2 = rhs->associated_torrent().lock();
 		TORRENT_ASSERT(t2);
 
 		int prio1 = lhs->get_priority(peer_connection::upload_channel);
@@ -61,8 +62,8 @@ namespace libtorrent
 			return prio1 > prio2;
 
 		// compare how many bytes they've sent us
-		boost::int64_t c1;
-		boost::int64_t c2;
+		std::int64_t c1;
+		std::int64_t c2;
 		c1 = lhs->downloaded_in_last_round();
 		c2 = rhs->downloaded_in_last_round();
 
@@ -121,9 +122,9 @@ namespace libtorrent
 	{
 		// if one peer belongs to a higher priority torrent than the other one
 		// that one should be unchoked.
-		boost::shared_ptr<torrent> t1 = lhs->associated_torrent().lock();
+		std::shared_ptr<torrent> t1 = lhs->associated_torrent().lock();
 		TORRENT_ASSERT(t1);
-		boost::shared_ptr<torrent> t2 = rhs->associated_torrent().lock();
+		std::shared_ptr<torrent> t2 = rhs->associated_torrent().lock();
 		TORRENT_ASSERT(t2);
 
 		int prio1 = lhs->get_priority(peer_connection::upload_channel);
@@ -133,8 +134,8 @@ namespace libtorrent
 			return prio1 > prio2;
 
 		// compare how many bytes they've sent us
-		boost::int64_t c1;
-		boost::int64_t c2;
+		std::int64_t c1;
+		std::int64_t c2;
 		c1 = lhs->downloaded_in_last_round();
 		c2 = rhs->downloaded_in_last_round();
 
@@ -159,9 +160,9 @@ namespace libtorrent
 	{
 		// if one peer belongs to a higher priority torrent than the other one
 		// that one should be unchoked.
-		boost::shared_ptr<torrent> t1 = lhs->associated_torrent().lock();
+		std::shared_ptr<torrent> t1 = lhs->associated_torrent().lock();
 		TORRENT_ASSERT(t1);
-		boost::shared_ptr<torrent> t2 = rhs->associated_torrent().lock();
+		std::shared_ptr<torrent> t2 = rhs->associated_torrent().lock();
 		TORRENT_ASSERT(t2);
 
 		int prio1 = lhs->get_priority(peer_connection::upload_channel);
@@ -171,8 +172,8 @@ namespace libtorrent
 			return prio1 > prio2;
 
 		// compare how many bytes they've sent us
-		boost::int64_t c1;
-		boost::int64_t c2;
+		std::int64_t c1;
+		std::int64_t c2;
 		c1 = lhs->downloaded_in_last_round();
 		c2 = rhs->downloaded_in_last_round();
 
@@ -216,8 +217,8 @@ namespace libtorrent
 	bool upload_rate_compare(peer_connection const* lhs
 		, peer_connection const* rhs)
 	{
-		boost::int64_t c1;
-		boost::int64_t c2;
+		std::int64_t c1;
+		std::int64_t c2;
 
 		c1 = lhs->uploaded_in_last_round();
 		c2 = rhs->uploaded_in_last_round();
@@ -232,7 +233,7 @@ namespace libtorrent
 	bool bittyrant_unchoke_compare(peer_connection const* lhs
 		, peer_connection const* rhs)
 	{
-		boost::int64_t d1, d2, u1, u2;
+		std::int64_t d1, d2, u1, u2;
 
 		// first compare how many bytes they've sent us
 		d1 = lhs->downloaded_in_last_round();
@@ -245,8 +246,8 @@ namespace libtorrent
 		d1 *= lhs->get_priority(peer_connection::upload_channel);
 		d2 *= rhs->get_priority(peer_connection::upload_channel);
 
-		d1 = d1 * 1000 / (std::max)(boost::int64_t(1), u1);
-		d2 = d2 * 1000 / (std::max)(boost::int64_t(1), u2);
+		d1 = d1 * 1000 / (std::max)(std::int64_t(1), u1);
+		d2 = d2 * 1000 / (std::max)(std::int64_t(1), u2);
 		if (d1 > d2) return true;
 		if (d1 < d2) return false;
 
@@ -263,11 +264,10 @@ namespace libtorrent
 		, aux::session_settings const& sett)
 	{
 #if TORRENT_USE_ASSERTS
-		for (std::vector<peer_connection*>::iterator i = peers.begin()
-			, end(peers.end()); i != end; ++i)
+		for (auto p : peers)
 		{
-			TORRENT_ASSERT((*i)->self());
-			TORRENT_ASSERT((*i)->associated_torrent().lock());
+			TORRENT_ASSERT(p->self());
+			TORRENT_ASSERT(p->associated_torrent().lock());
 		}
 #endif
 
@@ -286,10 +286,8 @@ namespace libtorrent
 		if (sett.get_int(settings_pack::choking_algorithm)
 			== settings_pack::bittyrant_choker)
 		{
-			for (std::vector<peer_connection*>::const_iterator i = peers.begin()
-				, end(peers.end()); i != end; ++i)
+			for (auto const p : peers)
 			{
-				peer_connection* p = *i;
 				if (p->is_choked() || !p->is_interesting()) continue;
 
 				if (!p->has_peer_choked())
@@ -309,7 +307,7 @@ namespace libtorrent
 			// if we're using the bittyrant choker, sort peers by their return
 			// on investment. i.e. download rate / upload rate
 			std::sort(peers.begin(), peers.end()
-				, boost::bind(&bittyrant_unchoke_compare, _1, _2));
+				, std::bind(&bittyrant_unchoke_compare, _1, _2));
 
 			int upload_capacity_left = max_upload_rate;
 
@@ -318,11 +316,9 @@ namespace libtorrent
 			// until there none left
 			upload_slots = 0;
 
-			for (std::vector<peer_connection*>::iterator i = peers.begin()
-				, end(peers.end()); i != end; ++i)
+			for (auto const p : peers)
 			{
-				peer_connection* p = *i;
-				TORRENT_ASSERT(p);
+				TORRENT_ASSERT(p != nullptr);
 
 				if (p->est_reciprocation_rate() > upload_capacity_left) break;
 
@@ -356,16 +352,14 @@ namespace libtorrent
 			// TODO: make the comparison function a free function and move it
 			// into this cpp file
 			std::sort(peers.begin(), peers.end()
-				, boost::bind(&upload_rate_compare, _1, _2));
+				, std::bind(&upload_rate_compare, _1, _2));
 
 			// TODO: make configurable
 			int rate_threshold = 1024;
 
-			for (std::vector<peer_connection*>::const_iterator i = peers.begin()
-				, end(peers.end()); i != end; ++i)
+			for (auto const p : peers)
 			{
-				peer_connection const& p = **i;
-				int const rate = int(p.uploaded_in_last_round()
+				int const rate = int(p->uploaded_in_last_round()
 					* 1000 / total_milliseconds(unchoke_interval));
 
 				if (rate < rate_threshold) break;
@@ -393,30 +387,30 @@ namespace libtorrent
 
 			std::partial_sort(peers.begin(), peers.begin()
 				+ (std::min)(upload_slots, int(peers.size())), peers.end()
-				, boost::bind(&unchoke_compare_rr, _1, _2, pieces));
+				, std::bind(&unchoke_compare_rr, _1, _2, pieces));
 		}
 		else if (sett.get_int(settings_pack::seed_choking_algorithm)
 			== settings_pack::fastest_upload)
 		{
 			std::partial_sort(peers.begin(), peers.begin()
 				+ (std::min)(upload_slots, int(peers.size())), peers.end()
-				, boost::bind(&unchoke_compare_fastest_upload, _1, _2));
+				, std::bind(&unchoke_compare_fastest_upload, _1, _2));
 		}
 		else if (sett.get_int(settings_pack::seed_choking_algorithm)
 			== settings_pack::anti_leech)
 		{
 			std::partial_sort(peers.begin(), peers.begin()
 				+ (std::min)(upload_slots, int(peers.size())), peers.end()
-				, boost::bind(&unchoke_compare_anti_leech, _1, _2));
+				, std::bind(&unchoke_compare_anti_leech, _1, _2));
 		}
 		else
 		{
 			int const pieces = sett.get_int(settings_pack::seeding_piece_quota);
 			std::partial_sort(peers.begin(), peers.begin()
 				+ (std::min)(upload_slots, int(peers.size())), peers.end()
-				, boost::bind(&unchoke_compare_rr, _1, _2, pieces));
+				, std::bind(&unchoke_compare_rr, _1, _2, pieces));
 
-			TORRENT_ASSERT(false);
+			TORRENT_ASSERT_FAIL();
 		}
 
 		return upload_slots;

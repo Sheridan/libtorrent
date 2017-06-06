@@ -35,12 +35,7 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #include <string>
 #include <vector>
-
-#include "libtorrent/aux_/disable_warnings_push.hpp"
-
-#include <boost/shared_ptr.hpp>
-
-#include "libtorrent/aux_/disable_warnings_pop.hpp"
+#include <memory>
 
 #include "libtorrent/config.hpp"
 #include "libtorrent/lazy_entry.hpp"
@@ -49,9 +44,8 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/i2p_stream.hpp"
 #include "libtorrent/error_code.hpp"
 
-namespace libtorrent
-{
-	
+namespace libtorrent {
+
 	struct http_connection;
 	class entry;
 	class http_parser;
@@ -70,16 +64,16 @@ namespace libtorrent
 			io_service& ios
 			, tracker_manager& man
 			, tracker_request const& req
-			, boost::weak_ptr<request_callback> c);
+			, std::weak_ptr<request_callback> c);
 
 		void start();
 		void close();
 
 	private:
 
-		boost::shared_ptr<http_tracker_connection> shared_from_this()
+		std::shared_ptr<http_tracker_connection> shared_from_this()
 		{
-			return boost::static_pointer_cast<http_tracker_connection>(
+			return std::static_pointer_cast<http_tracker_connection>(
 				tracker_connection::shared_from_this());
 		}
 
@@ -91,7 +85,7 @@ namespace libtorrent
 		virtual void on_timeout(error_code const&) {}
 
 		tracker_manager& m_man;
-		boost::shared_ptr<http_connection> m_tracker_connection;
+		std::shared_ptr<http_connection> m_tracker_connection;
 		address m_tracker_ip;
 #if TORRENT_USE_I2P
 		i2p_connection* m_i2p_conn;
@@ -100,11 +94,10 @@ namespace libtorrent
 
 	TORRENT_EXTRA_EXPORT tracker_response parse_tracker_response(
 		char const* data, int size, error_code& ec
-		, int flags, sha1_hash scrape_ih);
+		, int flags, sha1_hash const& scrape_ih);
 
 	TORRENT_EXTRA_EXPORT bool extract_peer_info(bdecode_node const& info
 		, peer_entry& ret, error_code& ec);
 }
 
 #endif // TORRENT_HTTP_TRACKER_CONNECTION_HPP_INCLUDED
-

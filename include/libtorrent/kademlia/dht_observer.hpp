@@ -37,10 +37,11 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/address.hpp"
 #include "libtorrent/kademlia/msg.hpp"
 
-namespace libtorrent { namespace dht
-{
+namespace libtorrent { namespace dht {
+
 	struct TORRENT_EXTRA_EXPORT dht_logger
 	{
+#ifndef TORRENT_DISABLE_LOGGING
 		enum module_t
 		{
 			tracker,
@@ -56,9 +57,11 @@ namespace libtorrent { namespace dht
 			outgoing_message
 		};
 
+		virtual bool should_log(module_t m) const = 0;
 		virtual void log(module_t m, char const* fmt, ...) TORRENT_FORMAT(3,4) = 0;
-		virtual void log_packet(message_direction_t dir, char const* pkt, int len
-			, udp::endpoint node) = 0;
+		virtual void log_packet(message_direction_t dir, span<char const> pkt
+			, udp::endpoint const& node) = 0;
+#endif
 
 	protected:
 		~dht_logger() {}
@@ -68,12 +71,12 @@ namespace libtorrent { namespace dht
 	{
 		virtual void set_external_address(address const& addr
 			, address const& source) = 0;
-		virtual address external_address() = 0;
+		virtual address external_address(udp proto) = 0;
 		virtual void get_peers(sha1_hash const& ih) = 0;
 		virtual void outgoing_get_peers(sha1_hash const& target
 			, sha1_hash const& sent_target, udp::endpoint const& ep) = 0;
 		virtual void announce(sha1_hash const& ih, address const& addr, int port) = 0;
-		virtual bool on_dht_request(char const* query, int query_len
+		virtual bool on_dht_request(string_view query
 			, dht::msg const& request, entry& response) = 0;
 
 	protected:
@@ -82,4 +85,3 @@ namespace libtorrent { namespace dht
 }}
 
 #endif
-

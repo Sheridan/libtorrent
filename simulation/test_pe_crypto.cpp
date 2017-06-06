@@ -46,7 +46,7 @@ POSSIBILITY OF SUCH DAMAGE.
 using namespace libtorrent;
 namespace lt = libtorrent;
 
-char const* pe_policy(boost::uint8_t policy)
+char const* pe_policy(std::uint8_t policy)
 {
 	if (policy == settings_pack::pe_disabled) return "disabled";
 	else if (policy == settings_pack::pe_enabled) return "enabled";
@@ -56,11 +56,11 @@ char const* pe_policy(boost::uint8_t policy)
 
 void display_pe_settings(libtorrent::settings_pack const& s)
 {
-	fprintf(stderr, "out_enc_policy - %s\tin_enc_policy - %s\n"
+	std::printf("out_enc_policy - %s\tin_enc_policy - %s\n"
 		, pe_policy(s.get_int(settings_pack::out_enc_policy))
 		, pe_policy(s.get_int(settings_pack::in_enc_policy)));
 
-	fprintf(stderr, "enc_level - %s\t\tprefer_rc4 - %s\n"
+	std::printf("enc_level - %s\t\tprefer_rc4 - %s\n"
 		, s.get_int(settings_pack::allowed_enc_level) == settings_pack::pe_plaintext ? "plaintext"
 		: s.get_int(settings_pack::allowed_enc_level) == settings_pack::pe_rc4 ? "rc4"
 		: s.get_int(settings_pack::allowed_enc_level) == settings_pack::pe_both ? "both" : "unknown"
@@ -191,7 +191,7 @@ TORRENT_TEST(disabled_failing)
 #else
 TORRENT_TEST(disabled)
 {
-	fprintf(stderr, "PE test not run because it's disabled\n");
+	std::printf("PE test not run because it's disabled\n");
 }
 #endif
 

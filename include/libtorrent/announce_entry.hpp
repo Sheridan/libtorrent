@@ -34,34 +34,25 @@ POSSIBILITY OF SUCH DAMAGE.
 #define TORRENT_ANNOUNCE_ENTRY_HPP_INCLUDED
 
 #include "libtorrent/config.hpp"
-#include "libtorrent/time.hpp" // for time_point
+#include "libtorrent/time.hpp"
 #include "libtorrent/error_code.hpp"
-
-#include "libtorrent/aux_/disable_warnings_push.hpp"
+#include "libtorrent/string_view.hpp"
 
 #include <string>
-#include <boost/cstdint.hpp>
+#include <cstdint>
 
-#include "libtorrent/aux_/disable_warnings_pop.hpp"
-
-namespace libtorrent
-{
-	namespace aux {
-		struct session_settings;
-	}
+namespace libtorrent {
 
 	// this class holds information about one bittorrent tracker, as it
 	// relates to a specific torrent.
 	struct TORRENT_EXPORT announce_entry
 	{
 		// constructs a tracker announce entry with ``u`` as the URL.
-		announce_entry(std::string const& u);
+		explicit announce_entry(string_view u);
 		announce_entry();
 		~announce_entry();
-#if __cplusplus >= 201103L
-		announce_entry(announce_entry const&) = default;
-		announce_entry& operator=(announce_entry const&) = default;
-#endif
+		announce_entry(announce_entry const&);
+		announce_entry& operator=(announce_entry const&);
 
 		// tracker URL as it appeared in the torrent file
 		std::string url;
@@ -79,20 +70,24 @@ namespace libtorrent
 		// this error code specifies what error occurred
 		error_code last_error;
 
+#ifndef TORRENT_NO_DEPRECATE
 		// returns the number of seconds to the next announce on this tracker.
 		// ``min_announce_in()`` returns the number of seconds until we are
 		// allowed to force another tracker update with this tracker.
-		// 
+		//
 		// If the last time this tracker was contacted failed, ``last_error`` is
 		// the error code describing what error occurred.
+		TORRENT_DEPRECATED
 		int next_announce_in() const;
+		TORRENT_DEPRECATED
 		int min_announce_in() const;
+#endif
 
 		// the time of next tracker announce
-		time_point next_announce;
+		time_point32 next_announce = time_point32::min();
 
 		// no announces before this time
-		time_point min_announce;
+		time_point32 min_announce = time_point32::min();
 
 		// TODO: include the number of peers received from this tracker, at last
 		// announce
@@ -107,20 +102,21 @@ namespace libtorrent
 		// if this tracker has returned scrape data, these fields are filled in
 		// with valid numbers. Otherwise they are set to -1. the number of
 		// current downloaders
-		int scrape_incomplete;
-		int scrape_complete;
-		int scrape_downloaded;
+		int scrape_incomplete = -1;
+		int scrape_complete = -1;
+
+		int scrape_downloaded = -1;
 
 		// the tier this tracker belongs to
-		boost::uint8_t tier;
+		std::uint8_t tier = 0;
 
 		// the max number of failures to announce to this tracker in
 		// a row, before this tracker is not used anymore. 0 means unlimited
-		boost::uint8_t fail_limit;
+		std::uint8_t fail_limit = 0;
 
 		// the number of times in a row we have failed to announce to this
 		// tracker.
-		boost::uint8_t fails:7;
+		std::uint8_t fails:7;
 
 		// true while we're waiting for a response from the tracker.
 		bool updating:1;
@@ -140,7 +136,7 @@ namespace libtorrent
 		};
 
 		// a bitmask specifying which sources we got this tracker from.
-		boost::uint8_t source:4;
+		std::uint8_t source:4;
 
 		// set to true the first time we receive a valid response
 		// from this tracker.
@@ -154,8 +150,14 @@ namespace libtorrent
 		// set to true when we send a event=completed.
 		bool complete_sent:1;
 
+#ifndef TORRENT_NO_DEPRECATE
+		// deprecated in 1.2
 		// this is false the stats sent to this tracker will be 0
 		bool send_stats:1;
+#else
+		// hidden
+		bool deprecated_send_stats:1;
+#endif
 
 		// internal
 		bool triggered_manually:1;
@@ -167,7 +169,7 @@ namespace libtorrent
 
 		// updates the failure counter and time-outs for re-trying.
 		// This is called when the tracker announce fails.
-		void failed(aux::session_settings const& sett, int retry_interval = 0);
+		void failed(int backoff_ratio, seconds32 retry_interval = seconds32(0));
 
 #ifndef TORRENT_NO_DEPRECATE
 		// deprecated in 1.0
@@ -199,4 +201,3 @@ namespace libtorrent
 }
 
 #endif
-

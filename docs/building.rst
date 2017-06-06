@@ -3,7 +3,7 @@ libtorrent manual
 =================
 
 :Author: Arvid Norberg, arvid@libtorrent.org
-:Version: 1.1.3
+:Version: 1.2.0
 
 .. contents:: Table of contents
   :depth: 2
@@ -277,11 +277,18 @@ Build features:
 |                          | * ``off`` - mutable torrents are not supported.    |
 +--------------------------+----------------------------------------------------+
 | ``crypto``               | * ``built-in`` - (default) uses built-in SHA-1     |
-|                          |   implementation.                                  |
-|                          | * ``openssl`` - links against openssl and          |
-|                          |   libcrypto to use for SHA-1 hashing.              |
-|                          | * ``gcrypt`` - links against libgcrypt to use for  |
-|                          |   SHA-1 hashing.                                   |
+|                          |   implementation. In macOS/iOS it uses             |
+|                          |   CommonCrypto SHA-1 implementation.               |
+|                          | * ``libcrypto`` - links against libcrypto          |
+|                          |   to use the SHA-1 implementation.                 |
+|                          | * ``libgcrypt`` - links against libgcrypt          |
+|                          |   to use the SHA-1 implementation.                 |
++--------------------------+----------------------------------------------------+
+| ``ssl``                  | * ``off`` - (default) disable torrents over ssl    |
+|                          |   feature.                                         |
+|                          | * ``openssl`` - links against openssl to enable    |
+|                          |   torrents over ssl feature. Requires              |
+|                          |   the option crypto=libcrypto.                     |
 +--------------------------+----------------------------------------------------+
 | ``allocator``            | * ``pool`` - default, uses pool allocators for     |
 |                          |   send buffers.                                    |
@@ -527,10 +534,6 @@ defines you can use to control the build.
 |                                        | checks in the storage, including logging of     |
 |                                        | piece sorting.                                  |
 +----------------------------------------+-------------------------------------------------+
-| ``TORRENT_DISK_STATS``                 | This will create a log of all disk activity     |
-|                                        | which later can parsed and graphed using        |
-|                                        | ``parse_disk_log.py``.                          |
-+----------------------------------------+-------------------------------------------------+
 | ``UNICODE``                            | If building on windows this will make sure the  |
 |                                        | UTF-8 strings in pathnames are converted into   |
 |                                        | UTF-16 before they are passed to the file       |
@@ -566,8 +569,8 @@ defines you can use to control the build.
 |                                        | encrypted supported by clients such as          |
 |                                        | uTorrent, Azureus and KTorrent.                 |
 |                                        | If this is not defined, either                  |
-|                                        | ``TORRENT_USE_OPENSSL`` or                      |
-|                                        | ``TORRENT_USE_GCRYPT`` must be defined.         |
+|                                        | ``TORRENT_USE_LIBCRYPTO`` or                    |
+|                                        | ``TORRENT_USE_LIBGCRYPT`` must be defined.      |
 +----------------------------------------+-------------------------------------------------+
 | ``TORRENT_DISABLE_EXTENSIONS``         | When defined, libtorrent plugin support is      |
 |                                        | disabled along with support for the extension   |
@@ -577,15 +580,11 @@ defines you can use to control the build.
 |                                        | use wide character API, to properly support     |
 |                                        | non-ansi characters.                            |
 +----------------------------------------+-------------------------------------------------+
-| ``TORRENT_DISABLE_RESOLVE_COUNTRIES``  | Defining this will disable the ability to       |
-|                                        | resolve countries of origin for peer IPs.       |
-+----------------------------------------+-------------------------------------------------+
-| ``TORRENT_DISABLE_INVARIANT_CHECKS``   | This will disable internal invariant checks in  |
-|                                        | libtorrent. The invariant checks can sometime   |
+| ``TORRENT_USE_INVARIANT_CHECKS``       | If defined to non-zero, this will enable        |
+|                                        | internal invariant checks in libtorrent.        |
+|                                        | The invariant checks can sometimes              |
 |                                        | be quite expensive, they typically don't scale  |
-|                                        | very well. This option can be used to still     |
-|                                        | build in debug mode, with asserts enabled, but  |
-|                                        | make the resulting executable faster.           |
+|                                        | very well.                                      |
 +----------------------------------------+-------------------------------------------------+
 | ``TORRENT_EXPENSIVE_INVARIANT_CHECKS`` | This will enable extra expensive invariant      |
 |                                        | checks. Useful for finding particular bugs      |

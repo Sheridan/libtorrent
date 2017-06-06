@@ -36,6 +36,8 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/create_torrent.hpp"
 #include "libtorrent/alert_types.hpp"
 #include "libtorrent/torrent_info.hpp"
+#include "libtorrent/hex.hpp" // to_hex
+#include "libtorrent/aux_/path.hpp"
 
 enum flags_t
 {
@@ -48,20 +50,20 @@ void test_read_piece(int flags)
 	using namespace libtorrent;
 	namespace lt = libtorrent;
 
-	fprintf(stderr, "==== TEST READ PIECE =====\n");
+	std::printf("==== TEST READ PIECE =====\n");
 
 	// in case the previous run was terminated
 	error_code ec;
 	remove_all("tmp1_read_piece", ec);
-	if (ec) fprintf(stderr, "ERROR: removing tmp1_read_piece: (%d) %s\n"
+	if (ec) std::printf("ERROR: removing tmp1_read_piece: (%d) %s\n"
 		, ec.value(), ec.message().c_str());
 
 	create_directory("tmp1_read_piece", ec);
-	if (ec) fprintf(stderr, "ERROR: creating directory tmp1_read_piece: (%d) %s\n"
+	if (ec) std::printf("ERROR: creating directory tmp1_read_piece: (%d) %s\n"
 		, ec.value(), ec.message().c_str());
 
 	create_directory(combine_path("tmp1_read_piece", "test_torrent"), ec);
-	if (ec) fprintf(stderr, "ERROR: creating directory test_torrent: (%d) %s\n"
+	if (ec) std::printf("ERROR: creating directory test_torrent: (%d) %s\n"
 		, ec.value(), ec.message().c_str());
 
 	file_storage fs;
@@ -78,15 +80,15 @@ void test_read_piece(int flags)
 
 	// calculate the hash for all pieces
 	set_piece_hashes(t, "tmp1_read_piece", ec);
-	if (ec) fprintf(stderr, "ERROR: set_piece_hashes: (%d) %s\n"
+	if (ec) std::printf("ERROR: set_piece_hashes: (%d) %s\n"
 		, ec.value(), ec.message().c_str());
 
 	std::vector<char> buf;
 	bencode(std::back_inserter(buf), t.generate());
-	boost::shared_ptr<torrent_info> ti(new torrent_info(&buf[0], buf.size(), ec));
+	auto ti = std::make_shared<torrent_info>(&buf[0], int(buf.size()), ec);
 
-	fprintf(stderr, "generated torrent: %s tmp1_read_piece/test_torrent\n"
-		, to_hex(ti->info_hash().to_string()).c_str());
+	std::printf("generated torrent: %s tmp1_read_piece/test_torrent\n"
+		, aux::to_hex(ti->info_hash()).c_str());
 
 	const int mask = alert::all_categories
 		& ~(alert::progress_notification
@@ -111,6 +113,8 @@ void test_read_piece(int flags)
 	if (flags & seed_mode)
 		p.flags |= add_torrent_params::flag_seed_mode;
 	torrent_handle tor1 = ses.add_torrent(p, ec);
+	if (ec) std::printf("ERROR: add_torrent: (%d) %s\n"
+		, ec.value(), ec.message().c_str());
 	TEST_CHECK(!ec);
 	TEST_CHECK(tor1.is_valid());
 
@@ -121,11 +125,11 @@ void test_read_piece(int flags)
 
 	if (flags & time_critical)
 	{
-		tor1.set_piece_deadline(1, 0, torrent_handle::alert_when_available);
+		tor1.set_piece_deadline(piece_index_t(1), 0, torrent_handle::alert_when_available);
 	}
 	else
 	{
-		tor1.read_piece(1);
+		tor1.read_piece(piece_index_t(1));
 	}
 
 	a = wait_for_alert(ses, read_piece_alert::alert_type, "ses");
@@ -137,12 +141,12 @@ void test_read_piece(int flags)
 		TEST_CHECK(rp);
 		if (rp)
 		{
-			TEST_EQUAL(rp->piece, 1);
+			TEST_EQUAL(rp->piece, piece_index_t(1));
 		}
 	}
 
 	remove_all("tmp1_read_piece", ec);
-	if (ec) fprintf(stderr, "ERROR: removing tmp1_read_piece: (%d) %s\n"
+	if (ec) std::printf("ERROR: removing tmp1_read_piece: (%d) %s\n"
 		, ec.value(), ec.message().c_str());
 }
 

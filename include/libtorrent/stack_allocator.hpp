@@ -31,63 +31,117 @@ POSSIBILITY OF SUCH DAMAGE.
 */
 
 #ifndef TORRENT_STACK_ALLOCATOR
+#define TORRENT_STACK_ALLOCATOR
 
 #include "libtorrent/assert.hpp"
-#include "libtorrent/buffer.hpp"
+#include "libtorrent/span.hpp"
+#include "libtorrent/string_view.hpp"
+#include "libtorrent/aux_/vector.hpp"
+#include "libtorrent/aux_/numeric_cast.hpp"
 
-namespace libtorrent { namespace aux
-{
+#include <cstdio> // for vsnprintf
+#include <cstring>
+
+namespace libtorrent { namespace aux {
+
+	struct allocation_slot
+	{
+		allocation_slot() : m_idx(-1) {}
+		allocation_slot(allocation_slot const&) = default;
+		allocation_slot(allocation_slot&&) = default;
+		allocation_slot& operator=(allocation_slot const&) = default;
+		allocation_slot& operator=(allocation_slot&&) = default;
+		bool operator==(allocation_slot const& s) const { return m_idx == s.m_idx; }
+		bool operator!=(allocation_slot const& s) const { return m_idx != s.m_idx; }
+		friend struct stack_allocator;
+	private:
+		explicit allocation_slot(int idx) : m_idx(idx) {}
+		int val() const { return m_idx; }
+		int m_idx;
+	};
 
 	struct stack_allocator
 	{
 		stack_allocator() {}
 
-		int copy_string(std::string const& str)
+		// non-copyable
+		stack_allocator(stack_allocator const&) = delete;
+		stack_allocator& operator=(stack_allocator const&) = delete;
+
+		allocation_slot copy_string(string_view str)
 		{
-			int ret = int(m_storage.size());
-			m_storage.resize(ret + str.length() + 1);
-			strcpy(&m_storage[ret], str.c_str());
-			return ret;
+			int const ret = int(m_storage.size());
+			m_storage.resize(ret + numeric_cast<int>(str.size()) + 1);
+			std::memcpy(&m_storage[ret], str.data(), str.size());
+			m_storage[ret + int(str.length())] = '\0';
+			return allocation_slot(ret);
 		}
 
-		int copy_string(char const* str)
+		allocation_slot copy_string(char const* str)
 		{
-			int ret = int(m_storage.size());
-			int len = strlen(str);
+			int const ret = int(m_storage.size());
+			int const len = int(std::strlen(str));
 			m_storage.resize(ret + len + 1);
-			strcpy(&m_storage[ret], str);
-			return ret;
+			std::memcpy(&m_storage[ret], str, numeric_cast<std::size_t>(len));
+			m_storage[ret + len] = '\0';
+			return allocation_slot(ret);
 		}
 
-		int copy_buffer(char const* buf, int size)
+		allocation_slot format_string(char const* fmt, va_list v)
 		{
-			int ret = int(m_storage.size());
-			if (size < 1) return -1;
+			int const ret = int(m_storage.size());
+			m_storage.resize(ret + 512);
+
+#ifdef __clang__
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wformat-nonliteral"
+#endif
+			int const len = std::vsnprintf(m_storage.data() + ret, 512, fmt, v);
+#ifdef __clang__
+#pragma clang diagnostic pop
+#endif
+
+			if (len < 0)
+			{
+				m_storage.resize(ret);
+				return copy_string("(format error)");
+			}
+
+			// +1 is to include the 0-terminator
+			m_storage.resize(ret + (len > 512 ? 512 : len) + 1);
+			return allocation_slot(ret);
+		}
+
+		allocation_slot copy_buffer(span<char const> buf)
+		{
+			int const ret = int(m_storage.size());
+			int const size = int(buf.size());
+			if (size < 1) return allocation_slot();
 			m_storage.resize(ret + size);
-			memcpy(&m_storage[ret], buf, size);
-			return ret;
+			std::memcpy(&m_storage[ret], buf.data(), numeric_cast<std::size_t>(size));
+			return allocation_slot(ret);
 		}
 
-		int allocate(int bytes)
+		allocation_slot allocate(int const bytes)
 		{
-			if (bytes < 1) return -1;
-			int ret = int(m_storage.size());
+			if (bytes < 1) return allocation_slot();
+			int const ret = m_storage.end_index();
 			m_storage.resize(ret + bytes);
-			return ret;
+			return allocation_slot(ret);
 		}
 
-		char* ptr(int idx)
+		char* ptr(allocation_slot const idx)
 		{
-			if(idx < 0) return NULL;
-			TORRENT_ASSERT(idx < int(m_storage.size()));
-			return &m_storage[idx];
+			if(idx.val() < 0) return nullptr;
+			TORRENT_ASSERT(idx.val() < int(m_storage.size()));
+			return &m_storage[idx.val()];
 		}
 
-		char const* ptr(int idx) const
+		char const* ptr(allocation_slot const idx) const
 		{
-			if(idx < 0) return NULL;
-			TORRENT_ASSERT(idx < int(m_storage.size()));
-			return &m_storage[idx];
+			if(idx.val() < 0) return nullptr;
+			TORRENT_ASSERT(idx.val() < int(m_storage.size()));
+			return &m_storage[idx.val()];
 		}
 
 		void swap(stack_allocator& rhs)
@@ -102,14 +156,9 @@ namespace libtorrent { namespace aux
 
 	private:
 
-		// non-copyable
-		stack_allocator(stack_allocator const&);
-		stack_allocator& operator=(stack_allocator const&);
-
-		buffer m_storage;
+		vector<char> m_storage;
 	};
 
 } }
 
 #endif
-

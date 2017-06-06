@@ -35,13 +35,12 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/torrent_handle.hpp"
 #include "libtorrent/alert_types.hpp"
 #include "libtorrent/extensions.hpp"
-#include "libtorrent/thread.hpp"
 #include "setup_transfer.hpp"
 
-#include <boost/bind.hpp>
-#include <boost/make_shared.hpp>
-#include <boost/shared_ptr.hpp>
+#include <functional>
+#include <thread>
 
+namespace lt = libtorrent;
 using namespace libtorrent;
 
 TORRENT_TEST(limit)
@@ -59,8 +58,7 @@ TORRENT_TEST(limit)
 	TEST_EQUAL(mgr.pending(), true);
 
 	std::vector<alert*> alerts;
-	int num_resume;
-	mgr.get_all(alerts, num_resume);
+	mgr.get_all(alerts);
 
 	// even though we posted 600, the limit was 500
 	TEST_EQUAL(alerts.size(), 500);
@@ -75,7 +73,7 @@ TORRENT_TEST(limit)
 
 	TEST_EQUAL(mgr.pending(), true);
 
-	mgr.get_all(alerts, num_resume);
+	mgr.get_all(alerts);
 
 	// even though we posted 600, the limit was 200
 	TEST_EQUAL(alerts.size(), 200);
@@ -92,49 +90,15 @@ TORRENT_TEST(priority_limit)
 		mgr.emplace_alert<add_torrent_alert>(torrent_handle(), add_torrent_params(), error_code());
 
 	// the limit is twice as high for priority alerts
-	for (int i = 0; i < 200; ++i)
+	for (file_index_t i(0); i < file_index_t(200); ++i)
 		mgr.emplace_alert<file_rename_failed_alert>(torrent_handle(), i, error_code());
 
 	std::vector<alert*> alerts;
-	int num_resume;
-	mgr.get_all(alerts, num_resume);
+	mgr.get_all(alerts);
 
 	// even though we posted 400, the limit was 100 for half of them and
 	// 200 for the other half, meaning we should have 200 alerts now
 	TEST_EQUAL(alerts.size(), 200);
-}
-
-void test_dispatch_fun(int& cnt, std::auto_ptr<alert> const& a)
-{
-	++cnt;
-}
-
-TORRENT_TEST(dispatch_function)
-{
-#ifndef TORRENT_NO_DEPRECATE
-	int cnt = 0;
-	alert_manager mgr(100, 0xffffffff);
-
-	TEST_EQUAL(mgr.alert_queue_size_limit(), 100);
-	TEST_EQUAL(mgr.pending(), false);
-
-	for (int i = 0; i < 20; ++i)
-		mgr.emplace_alert<add_torrent_alert>(torrent_handle(), add_torrent_params(), error_code());
-
-	TEST_EQUAL(mgr.pending(), true);
-
-	mgr.set_dispatch_function(boost::bind(&test_dispatch_fun, boost::ref(cnt), _1));
-
-	TEST_EQUAL(mgr.pending(), false);
-
-	TEST_EQUAL(cnt, 20);
-
-	for (int i = 0; i < 200; ++i)
-		mgr.emplace_alert<add_torrent_alert>(torrent_handle(), add_torrent_params(), error_code());
-
-	TEST_EQUAL(mgr.pending(), false);
-	TEST_EQUAL(cnt, 220);
-#endif
 }
 
 void test_notify_fun(int& cnt)
@@ -157,7 +121,7 @@ TORRENT_TEST(notify_function)
 
 	// if there are queued alerts when we set the notify function,
 	// that counts as an edge and it's called
-	mgr.set_notify_function(boost::bind(&test_notify_fun, boost::ref(cnt)));
+	mgr.set_notify_function(std::bind(&test_notify_fun, std::ref(cnt)));
 
 	TEST_EQUAL(mgr.pending(), true);
 	TEST_EQUAL(cnt, 1);
@@ -173,8 +137,7 @@ TORRENT_TEST(notify_function)
 	// however, if we pop all the alerts and post new ones, there will be
 	// and edge triggering the notify call
 	std::vector<alert*> alerts;
-	int num_resume;
-	mgr.get_all(alerts, num_resume);
+	mgr.get_all(alerts);
 
 	TEST_EQUAL(mgr.pending(), false);
 
@@ -190,8 +153,8 @@ int plugin_alerts[3] = { 0, 0, 0 };
 
 struct test_plugin : libtorrent::plugin
 {
-	test_plugin(int index) : m_index(index) {}
-	virtual void on_alert(alert const* a)
+	explicit test_plugin(int index) : m_index(index) {}
+	void on_alert(alert const* a) override
 	{
 		++plugin_alerts[m_index];
 	}
@@ -206,9 +169,9 @@ TORRENT_TEST(extensions)
 	memset(plugin_alerts, 0, sizeof(plugin_alerts));
 	alert_manager mgr(100, 0xffffffff);
 
-	mgr.add_extension(boost::make_shared<test_plugin>(0));
-	mgr.add_extension(boost::make_shared<test_plugin>(1));
-	mgr.add_extension(boost::make_shared<test_plugin>(2));
+	mgr.add_extension(std::make_shared<test_plugin>(0));
+	mgr.add_extension(std::make_shared<test_plugin>(1));
+	mgr.add_extension(std::make_shared<test_plugin>(2));
 
 	for (int i = 0; i < 53; ++i)
 		mgr.emplace_alert<add_torrent_alert>(torrent_handle(), add_torrent_params(), error_code());
@@ -228,7 +191,7 @@ TORRENT_TEST(extensions)
 
 void post_torrent_added(alert_manager* mgr)
 {
-	test_sleep(10);
+	std::this_thread::sleep_for(lt::milliseconds(10));
 	mgr->emplace_alert<add_torrent_alert>(torrent_handle(), add_torrent_params(), error_code());
 }
 
@@ -241,8 +204,8 @@ TORRENT_TEST(wait_for_alert)
 	alert* a = mgr.wait_for_alert(seconds(1));
 
 	time_point end = clock_type::now();
-	TEST_EQUAL(a, static_cast<alert*>(0));
-	fprintf(stderr, "delay: %d ms (expected 1 second)\n"
+	TEST_EQUAL(a, static_cast<alert*>(nullptr));
+	std::printf("delay: %d ms (expected 1 second)\n"
 		, int(total_milliseconds(end - start)));
 	TEST_CHECK(end - start > milliseconds(900));
 	TEST_CHECK(end - start < milliseconds(1100));
@@ -253,59 +216,24 @@ TORRENT_TEST(wait_for_alert)
 	a = mgr.wait_for_alert(seconds(1));
 	end = clock_type::now();
 
-	fprintf(stderr, "delay: %d ms\n", int(total_milliseconds(end - start)));
+	std::printf("delay: %d ms\n", int(total_milliseconds(end - start)));
 	TEST_CHECK(end - start < milliseconds(1));
 	TEST_CHECK(a->type() == add_torrent_alert::alert_type);
 
 	std::vector<alert*> alerts;
-	int num_resume = 0;
-	mgr.get_all(alerts, num_resume);
+	mgr.get_all(alerts);
 
 	start = clock_type::now();
-	libtorrent::thread posting_thread(boost::bind(&post_torrent_added, &mgr));
+	std::thread posting_thread(&post_torrent_added, &mgr);
 
 	a = mgr.wait_for_alert(seconds(10));
 	end = clock_type::now();
 
-	fprintf(stderr, "delay: %d ms\n", int(total_milliseconds(end - start)));
+	std::printf("delay: %d ms\n", int(total_milliseconds(end - start)));
 	TEST_CHECK(end - start < milliseconds(500));
 	TEST_CHECK(a->type() == add_torrent_alert::alert_type);
 
 	posting_thread.join();
-}
-
-TORRENT_TEST(queued_resume)
-{
-	alert_manager mgr(100, 0xffffffff);
-
-	TEST_EQUAL(mgr.num_queued_resume(), 0);
-
-	for (int i = 0; i < 17; ++i)
-		mgr.emplace_alert<add_torrent_alert>(torrent_handle(), add_torrent_params(), error_code());
-
-	TEST_EQUAL(mgr.num_queued_resume(), 0);
-
-	std::vector<alert*> alerts;
-	int num_resume = 0;
-	mgr.get_all(alerts, num_resume);
-	TEST_EQUAL(num_resume, 0);
-	TEST_EQUAL(alerts.size(), 17);
-
-	TEST_EQUAL(mgr.num_queued_resume(), 0);
-
-	error_code ec(boost::system::errc::no_such_file_or_directory
-		, generic_category());
-
-	for (int i = 0; i < 2; ++i)
-		mgr.emplace_alert<save_resume_data_failed_alert>(torrent_handle(), ec);
-
-	TEST_EQUAL(mgr.num_queued_resume(), 2);
-
-	mgr.get_all(alerts, num_resume);
-	TEST_EQUAL(num_resume, 2);
-	TEST_EQUAL(alerts.size(), 2);
-
-	TEST_EQUAL(mgr.num_queued_resume(), 0);
 }
 
 TORRENT_TEST(alert_mask)

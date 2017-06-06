@@ -31,29 +31,32 @@ POSSIBILITY OF SUCH DAMAGE.
 */
 
 #include <string>
+#include <cstdio> // for snprintf
+#include <cinttypes> // for PRId64 et.al.
 
 #include "libtorrent/config.hpp"
 #include "libtorrent/alert.hpp"
 #include "libtorrent/alert_types.hpp"
-#include "libtorrent/io_service.hpp"
 #include "libtorrent/socket_io.hpp"
-#include "libtorrent/time.hpp"
 #include "libtorrent/error_code.hpp"
-#include "libtorrent/extensions.hpp"
 #include "libtorrent/torrent.hpp"
-#include "libtorrent/aux_/time.hpp"
 #include "libtorrent/performance_counters.hpp"
 #include "libtorrent/stack_allocator.hpp"
-#include "libtorrent/piece_picker.hpp" // for piece_block
+#include "libtorrent/piece_block.hpp"
+#include "libtorrent/hex.hpp" // to_hex
+#include "libtorrent/session_stats.hpp"
+
+#ifndef TORRENT_NO_DEPRECATE
+#include "libtorrent/write_resume_data.hpp"
+#endif
 
 #include "libtorrent/aux_/escape_string.hpp" // for convert_from_native
-
-#include <boost/bind.hpp>
+#include "libtorrent/aux_/max_path.hpp" // for TORRENT_MAX_PATH
 
 namespace libtorrent {
 
 	alert::alert() : m_timestamp(clock_type::now()) {}
-	alert::~alert() {}
+	alert::~alert() = default;
 	time_point alert::timestamp() const { return m_timestamp; }
 
 	torrent_alert::torrent_alert(aux::stack_allocator& alloc
@@ -61,18 +64,17 @@ namespace libtorrent {
 		: handle(h)
 		, m_alloc(alloc)
 	{
-		boost::shared_ptr<torrent> t = h.native_handle();
+		std::shared_ptr<torrent> t = h.native_handle();
 		if (t)
 		{
 			std::string name_str = t->name();
-			if (!name_str.empty()) {
+			if (!name_str.empty())
+			{
 				m_name_idx = alloc.copy_string(name_str);
 			}
 			else
 			{
-				char msg[41];
-				to_hex(t->info_hash().data(), 20, msg);
-				m_name_idx = alloc.copy_string(msg);
+				m_name_idx = alloc.copy_string(aux::to_hex(t->info_hash()));
 			}
 		}
 		else
@@ -81,13 +83,13 @@ namespace libtorrent {
 		}
 
 #ifndef TORRENT_NO_DEPRECATE
-		name = m_alloc.ptr(m_name_idx);
+		name = m_alloc.get().ptr(m_name_idx);
 #endif
 	}
 
 	char const* torrent_alert::torrent_name() const
 	{
-		return m_alloc.ptr(m_name_idx);
+		return m_alloc.get().ptr(m_name_idx);
 	}
 
 	std::string torrent_alert::message() const
@@ -101,20 +103,21 @@ namespace libtorrent {
 		, tcp::endpoint const& i
 		, peer_id const& pi)
 		: torrent_alert(alloc, h)
-		, ip(i)
+		, endpoint(i)
 		, pid(pi)
+#ifndef TORRENT_NO_DEPRECATE
+		, ip(i)
+#endif
 	{}
 
 	std::string peer_alert::message() const
 	{
-		error_code ec;
-		return torrent_alert::message() + " peer (" + print_endpoint(ip)
+		return torrent_alert::message() + " peer (" + print_endpoint(endpoint)
 			+ ", " + identify_client(pid) + ")";
 	}
 
 	tracker_alert::tracker_alert(aux::stack_allocator& alloc
-		, torrent_handle const& h
-		, std::string const& u)
+		, torrent_handle const& h, string_view u)
 		: torrent_alert(alloc, h)
 #ifndef TORRENT_NO_DEPRECATE
 		, url(u)
@@ -124,7 +127,7 @@ namespace libtorrent {
 
 	char const* tracker_alert::tracker_url() const
 	{
-		return m_alloc.ptr(m_url_idx);
+		return m_alloc.get().ptr(m_url_idx);
 	}
 
 	std::string tracker_alert::message() const
@@ -134,57 +137,60 @@ namespace libtorrent {
 
 	read_piece_alert::read_piece_alert(aux::stack_allocator& alloc
 		, torrent_handle const& h
-		, int p, boost::shared_array<char> d, int s)
+		, piece_index_t p, boost::shared_array<char> d, int s)
 		: torrent_alert(alloc, h)
-		, buffer(d)
+		, buffer(std::move(d))
 		, piece(p)
 		, size(s)
 	{}
 
 	read_piece_alert::read_piece_alert(aux::stack_allocator& alloc
-		, torrent_handle h, int p, error_code e)
+		, torrent_handle h, piece_index_t p, error_code e)
 		: torrent_alert(alloc, h)
-		, ec(e)
+		, error(e)
 		, piece(p)
 		, size(0)
+#ifndef TORRENT_NO_DEPRECATE
+		, ec(e)
+#endif
 	{}
 
 	std::string read_piece_alert::message() const
 	{
 		char msg[200];
-		if (ec)
+		if (error)
 		{
-			snprintf(msg, sizeof(msg), "%s: read_piece %u failed: %s"
-				, torrent_alert::message().c_str() , piece
-				, convert_from_native(ec.message()).c_str());
+			std::snprintf(msg, sizeof(msg), "%s: read_piece %u failed: %s"
+				, torrent_alert::message().c_str() , static_cast<int>(piece)
+				, convert_from_native(error.message()).c_str());
 		}
 		else
 		{
-			snprintf(msg, sizeof(msg), "%s: read_piece %u successful"
-				, torrent_alert::message().c_str() , piece);
+			std::snprintf(msg, sizeof(msg), "%s: read_piece %u successful"
+				, torrent_alert::message().c_str() , static_cast<int>(piece));
 		}
 		return msg;
 	}
 
 	file_completed_alert::file_completed_alert(aux::stack_allocator& alloc
 		, torrent_handle const& h
-		, int idx)
+		, file_index_t idx)
 		: torrent_alert(alloc, h)
 		, index(idx)
 	{}
 
 	std::string file_completed_alert::message() const
 	{
-		char msg[200 + TORRENT_MAX_PATH];
-		snprintf(msg, sizeof(msg), "%s: file %d finished downloading"
-			, torrent_alert::message().c_str(), index);
-		return msg;
+		std::string ret { torrent_alert::message() };
+		char msg[200];
+		std::snprintf(msg, sizeof(msg), ": file %d finished downloading"
+			, static_cast<int>(index));
+		ret.append(msg);
+		return ret;
 	}
 
 	file_renamed_alert::file_renamed_alert(aux::stack_allocator& alloc
-		, torrent_handle const& h
-		, std::string const& n
-		, int idx)
+		, torrent_handle const& h, string_view n, file_index_t const idx)
 		: torrent_alert(alloc, h)
 #ifndef TORRENT_NO_DEPRECATE
 		, name(n)
@@ -195,20 +201,23 @@ namespace libtorrent {
 
 	char const* file_renamed_alert::new_name() const
 	{
-		return m_alloc.ptr(m_name_idx);
+		return m_alloc.get().ptr(m_name_idx);
 	}
 
 	std::string file_renamed_alert::message() const
 	{
-		char msg[200 + TORRENT_MAX_PATH * 2];
-		snprintf(msg, sizeof(msg), "%s: file %d renamed to %s"
-			, torrent_alert::message().c_str(), index, new_name());
-		return msg;
+		std::string ret { torrent_alert::message() };
+		char msg[200];
+		std::snprintf(msg, sizeof(msg), ": file %d renamed to "
+			, static_cast<int>(index));
+		ret.append(msg);
+		ret.append(new_name());
+		return ret;
 	}
 
 	file_rename_failed_alert::file_rename_failed_alert(aux::stack_allocator& alloc
 		, torrent_handle const& h
-		, int idx
+		, file_index_t const idx
 		, error_code ec)
 		: torrent_alert(alloc, h)
 		, index(idx)
@@ -217,9 +226,12 @@ namespace libtorrent {
 
 	std::string file_rename_failed_alert::message() const
 	{
-		char ret[200 + TORRENT_MAX_PATH * 2];
-		snprintf(ret, sizeof(ret), "%s: failed to rename file %d: %s"
-			, torrent_alert::message().c_str(), index, convert_from_native(error.message()).c_str());
+		std::string ret { torrent_alert::message() };
+		char msg[200];
+		std::snprintf(msg, sizeof(msg), ": failed to rename file %d: "
+			, static_cast<int>(index));
+		ret.append(msg);
+		ret.append(convert_from_native(error.message()));
 		return ret;
 	}
 
@@ -272,12 +284,8 @@ namespace libtorrent {
 	}
 
 	tracker_error_alert::tracker_error_alert(aux::stack_allocator& alloc
-		, torrent_handle const& h
-		, int times
-		, int status
-		, std::string const& u
-		, error_code const& e
-		, std::string const& m)
+		, torrent_handle const& h, int times, int status, string_view u
+		, error_code const& e, string_view m)
 		: tracker_alert(alloc, h, u)
 		, times_in_row(times)
 		, status_code(status)
@@ -292,13 +300,13 @@ namespace libtorrent {
 
 	char const* tracker_error_alert::error_message() const
 	{
-		return m_alloc.ptr(m_msg_idx);
+		return m_alloc.get().ptr(m_msg_idx);
 	}
 
 	std::string tracker_error_alert::message() const
 	{
 		char ret[400];
-		snprintf(ret, sizeof(ret), "%s (%d) %s \"%s\" (%d)"
+		std::snprintf(ret, sizeof(ret), "%s (%d) %s \"%s\" (%d)"
 			, tracker_alert::message().c_str(), status_code
 			, convert_from_native(error.message()).c_str(), error_message()
 			, times_in_row);
@@ -306,9 +314,7 @@ namespace libtorrent {
 	}
 
 	tracker_warning_alert::tracker_warning_alert(aux::stack_allocator& alloc
-		, torrent_handle const& h
-		, std::string const& u
-		, std::string const& m)
+		, torrent_handle const& h, string_view u, string_view m)
 		: tracker_alert(alloc, h, u)
 #ifndef TORRENT_NO_DEPRECATE
 		, msg(m)
@@ -320,7 +326,7 @@ namespace libtorrent {
 
 	char const* tracker_warning_alert::warning_message() const
 	{
-		return m_alloc.ptr(m_msg_idx);
+		return m_alloc.get().ptr(m_msg_idx);
 	}
 
 	std::string tracker_warning_alert::message() const
@@ -329,10 +335,7 @@ namespace libtorrent {
 	}
 
 	scrape_reply_alert::scrape_reply_alert(aux::stack_allocator& alloc
-		, torrent_handle const& h
-		, int incomp
-		, int comp
-		, std::string const& u)
+		, torrent_handle const& h, int incomp, int comp, string_view u)
 		: tracker_alert(alloc, h, u)
 		, incomplete(incomp)
 		, complete(comp)
@@ -343,29 +346,25 @@ namespace libtorrent {
 	std::string scrape_reply_alert::message() const
 	{
 		char ret[400];
-		snprintf(ret, sizeof(ret), "%s scrape reply: %u %u"
+		std::snprintf(ret, sizeof(ret), "%s scrape reply: %u %u"
 			, tracker_alert::message().c_str(), incomplete, complete);
 		return ret;
 	}
 
 	scrape_failed_alert::scrape_failed_alert(aux::stack_allocator& alloc
-		, torrent_handle const& h
-		, std::string const& u
-		, error_code const& e)
+		, torrent_handle const& h, string_view u, error_code const& e)
 		: tracker_alert(alloc, h, u)
 #ifndef TORRENT_NO_DEPRECATE
 		, msg(convert_from_native(e.message()))
 #endif
 		, error(e)
-		, m_msg_idx(-1)
+		, m_msg_idx()
 	{
 		TORRENT_ASSERT(!u.empty());
 	}
 
 	scrape_failed_alert::scrape_failed_alert(aux::stack_allocator& alloc
-		, torrent_handle const& h
-		, std::string const& u
-		, std::string const& m)
+		, torrent_handle const& h, string_view u, string_view m)
 		: tracker_alert(alloc, h, u)
 #ifndef TORRENT_NO_DEPRECATE
 		, msg(m)
@@ -378,8 +377,8 @@ namespace libtorrent {
 
 	char const* scrape_failed_alert::error_message() const
 	{
-		if (m_msg_idx == -1) return "";
-		else return m_alloc.ptr(m_msg_idx);
+		if (m_msg_idx == aux::allocation_slot()) return "";
+		else return m_alloc.get().ptr(m_msg_idx);
 	}
 
 	std::string scrape_failed_alert::message() const
@@ -388,9 +387,7 @@ namespace libtorrent {
 	}
 
 	tracker_reply_alert::tracker_reply_alert(aux::stack_allocator& alloc
-		, torrent_handle const& h
-		, int np
-		, std::string const& u)
+		, torrent_handle const& h, int np, string_view u)
 		: tracker_alert(alloc, h, u)
 		, num_peers(np)
 	{
@@ -400,7 +397,7 @@ namespace libtorrent {
 	std::string tracker_reply_alert::message() const
 	{
 		char ret[400];
-		snprintf(ret, sizeof(ret), "%s received peers: %u"
+		std::snprintf(ret, sizeof(ret), "%s received peers: %u"
 			, tracker_alert::message().c_str(), num_peers);
 		return ret;
 	}
@@ -415,14 +412,13 @@ namespace libtorrent {
 	std::string dht_reply_alert::message() const
 	{
 		char ret[400];
-		snprintf(ret, sizeof(ret), "%s received DHT peers: %u"
+		std::snprintf(ret, sizeof(ret), "%s received DHT peers: %u"
 			, tracker_alert::message().c_str(), num_peers);
 		return ret;
 	}
 
 	tracker_announce_alert::tracker_announce_alert(aux::stack_allocator& alloc
-		, torrent_handle const& h
-		, std::string const& u, int e)
+		, torrent_handle const& h, string_view u, int e)
 		: tracker_alert(alloc, h, u)
 		, event(e)
 	{
@@ -439,19 +435,18 @@ namespace libtorrent {
 	hash_failed_alert::hash_failed_alert(
 		aux::stack_allocator& alloc
 		, torrent_handle const& h
-		, int index)
+		, piece_index_t index)
 		: torrent_alert(alloc, h)
 		, piece_index(index)
-
 	{
-		TORRENT_ASSERT(index >= 0);
+		TORRENT_ASSERT(index >= piece_index_t(0));
 	}
 
 	std::string hash_failed_alert::message() const
 	{
 		char ret[400];
-		snprintf(ret, sizeof(ret), "%s hash for piece %u failed"
-			, torrent_alert::message().c_str(), piece_index);
+		std::snprintf(ret, sizeof(ret), "%s hash for piece %u failed"
+			, torrent_alert::message().c_str(), static_cast<int>(piece_index));
 		return ret;
 	}
 
@@ -502,9 +497,11 @@ namespace libtorrent {
 	std::string invalid_request_alert::message() const
 	{
 		char ret[200];
-		snprintf(ret, sizeof(ret), "%s peer sent an invalid piece request "
+		std::snprintf(ret, sizeof(ret), "%s peer sent an invalid piece request "
 			"(piece: %u start: %u len: %u)%s"
-			, peer_alert::message().c_str(), request.piece, request.start
+			, peer_alert::message().c_str()
+			, static_cast<int>(request.piece)
+			, request.start
 			, request.length
 			, withheld ? ": super seeding withheld piece"
 			: !we_have ? ": we don't have piece"
@@ -524,78 +521,76 @@ namespace libtorrent {
 	}
 
 	piece_finished_alert::piece_finished_alert(aux::stack_allocator& alloc
-		, torrent_handle const& h, int piece_num)
+		, torrent_handle const& h, piece_index_t piece_num)
 		: torrent_alert(alloc, h)
 		, piece_index(piece_num)
-	{
-		TORRENT_ASSERT(piece_index >= 0);
-	}
+	{}
 
 	std::string piece_finished_alert::message() const
 	{
 		char ret[200];
-		snprintf(ret, sizeof(ret), "%s piece: %u finished downloading"
-			, torrent_alert::message().c_str(), piece_index);
+		std::snprintf(ret, sizeof(ret), "%s piece: %u finished downloading"
+			, torrent_alert::message().c_str(), static_cast<int>(piece_index));
 		return ret;
 	}
 
 	request_dropped_alert::request_dropped_alert(aux::stack_allocator& alloc, torrent_handle h
 		, tcp::endpoint const& ep, peer_id const& peer_id, int block_num
-		, int piece_num)
+		, piece_index_t piece_num)
 		: peer_alert(alloc, h, ep, peer_id)
 		, block_index(block_num)
 		, piece_index(piece_num)
 	{
-		TORRENT_ASSERT(block_index >= 0 && piece_index >= 0);
+		TORRENT_ASSERT(block_index >= 0 && piece_index >= piece_index_t(0));
 	}
 
 	std::string request_dropped_alert::message() const
 	{
 		char ret[200];
-		snprintf(ret, sizeof(ret), "%s peer dropped block ( piece: %u block: %u)"
-			, torrent_alert::message().c_str(), piece_index, block_index);
+		std::snprintf(ret, sizeof(ret), "%s peer dropped block ( piece: %u block: %u)"
+			, torrent_alert::message().c_str(), static_cast<int>(piece_index), block_index);
 		return ret;
 	}
 
 	block_timeout_alert::block_timeout_alert(aux::stack_allocator& alloc, torrent_handle h
 		, tcp::endpoint const& ep, peer_id const& peer_id, int block_num
-		, int piece_num)
+		, piece_index_t piece_num)
 		: peer_alert(alloc, h, ep, peer_id)
 		, block_index(block_num)
 		, piece_index(piece_num)
 	{
-		TORRENT_ASSERT(block_index >= 0 && piece_index >= 0);
+		TORRENT_ASSERT(block_index >= 0 && piece_index >= piece_index_t(0));
 	}
 
 	std::string block_timeout_alert::message() const
 	{
 		char ret[200];
-		snprintf(ret, sizeof(ret), "%s peer timed out request ( piece: %u block: %u)"
-			, torrent_alert::message().c_str(), piece_index, block_index);
+		std::snprintf(ret, sizeof(ret), "%s peer timed out request ( piece: %u block: %u)"
+			, torrent_alert::message().c_str(), static_cast<int>(piece_index), block_index);
 		return ret;
 	}
 
 	block_finished_alert::block_finished_alert(aux::stack_allocator& alloc, torrent_handle h
 		, tcp::endpoint const& ep, peer_id const& peer_id, int block_num
-		, int piece_num)
+		, piece_index_t piece_num)
 		: peer_alert(alloc, h, ep, peer_id)
 		, block_index(block_num)
 		, piece_index(piece_num)
 	{
-		TORRENT_ASSERT(block_index >= 0 && piece_index >= 0);
+		TORRENT_ASSERT(block_index >= 0 && piece_index >= piece_index_t(0));
 	}
 
 	std::string block_finished_alert::message() const
 	{
 		char ret[200];
-		snprintf(ret, sizeof(ret), "%s block finished downloading (piece: %u block: %u)"
-			, torrent_alert::message().c_str(), piece_index, block_index);
+		std::snprintf(ret, sizeof(ret), "%s block finished downloading (piece: %u block: %u)"
+			, torrent_alert::message().c_str(), static_cast<int>(piece_index), block_index);
 		return ret;
 	}
 
 	block_downloading_alert::block_downloading_alert(aux::stack_allocator& alloc, torrent_handle h
 		, tcp::endpoint const& ep
-		, peer_id const& peer_id, int block_num, int piece_num)
+		, peer_id const& peer_id, int block_num, piece_index_t piece_num)
 		: peer_alert(alloc, h, ep, peer_id)
 #ifndef TORRENT_NO_DEPRECATE
 		, peer_speedmsg("")
@@ -603,37 +598,37 @@ namespace libtorrent {
 		, block_index(block_num)
 		, piece_index(piece_num)
 	{
-		TORRENT_ASSERT(block_index >= 0 && piece_index >= 0);
+		TORRENT_ASSERT(block_index >= 0 && piece_index >= piece_index_t(0));
 	}
 
 	std::string block_downloading_alert::message() const
 	{
 		char ret[200];
-		snprintf(ret, sizeof(ret), "%s requested block (piece: %u block: %u)"
-			, torrent_alert::message().c_str(), piece_index, block_index);
+		std::snprintf(ret, sizeof(ret), "%s requested block (piece: %u block: %u)"
+			, torrent_alert::message().c_str(), static_cast<int>(piece_index), block_index);
 		return ret;
 	}
 
 	unwanted_block_alert::unwanted_block_alert(aux::stack_allocator& alloc, torrent_handle h
 		, tcp::endpoint const& ep
-		, peer_id const& peer_id, int block_num, int piece_num)
+		, peer_id const& peer_id, int block_num, piece_index_t piece_num)
 		: peer_alert(alloc, h, ep, peer_id)
 		, block_index(block_num)
 		, piece_index(piece_num)
 	{
-		TORRENT_ASSERT(block_index >= 0 && piece_index >= 0);
+		TORRENT_ASSERT(block_index >= 0 && piece_index >= piece_index_t(0));
 	}
 
 	std::string unwanted_block_alert::message() const
 	{
 		char ret[200];
-		snprintf(ret, sizeof(ret), "%s received block not in download queue (piece: %u block: %u)"
-			, torrent_alert::message().c_str(), piece_index, block_index);
+		std::snprintf(ret, sizeof(ret), "%s received block not in download queue (piece: %u block: %u)"
+			, torrent_alert::message().c_str(), static_cast<int>(piece_index), block_index);
 		return ret;
 	}
 
 	storage_moved_alert::storage_moved_alert(aux::stack_allocator& alloc
-		, torrent_handle const& h, std::string const& p)
+		, torrent_handle const& h, string_view p)
 		: torrent_alert(alloc, h)
 #ifndef TORRENT_NO_DEPRECATE
 		, path(p)
@@ -649,15 +644,12 @@ namespace libtorrent {
 
 	char const* storage_moved_alert::storage_path() const
 	{
-		return m_alloc.ptr(m_path_idx);
+		return m_alloc.get().ptr(m_path_idx);
 	}
 
 	storage_moved_failed_alert::storage_moved_failed_alert(
-		aux::stack_allocator& alloc
-		, torrent_handle const& h
-		, error_code const& e
-		, std::string const& f
-		, char const* op)
+		aux::stack_allocator& alloc, torrent_handle const& h, error_code const& e
+		, string_view f, char const* op)
 		: torrent_alert(alloc, h)
 		, error(e)
 #ifndef TORRENT_NO_DEPRECATE
@@ -669,7 +661,7 @@ namespace libtorrent {
 
 	char const* storage_moved_failed_alert::file_path() const
 	{
-		return m_alloc.ptr(m_file_idx);
+		return m_alloc.get().ptr(m_file_idx);
 	}
 
 	std::string storage_moved_failed_alert::message() const
@@ -704,15 +696,19 @@ namespace libtorrent {
 	std::string torrent_delete_failed_alert::message() const
 	{
 		return torrent_alert::message() + " torrent deletion failed: "
-			+convert_from_native(error.message());
+			+ convert_from_native(error.message());
 	}
 
 	save_resume_data_alert::save_resume_data_alert(aux::stack_allocator& alloc
-		, boost::shared_ptr<entry> const& rd
+		, add_torrent_params p
 		, torrent_handle const& h)
 		: torrent_alert(alloc, h)
-		, resume_data(rd)
-	{}
+		, params(std::move(p))
+	{
+#ifndef TORRENT_NO_DEPRECATE
+		resume_data = std::make_shared<entry>(write_resume_data(params));
+#endif
+	}
 
 	std::string save_resume_data_alert::message() const
 	{
@@ -765,12 +761,23 @@ namespace libtorrent {
 		return torrent_alert::message() + " checked";
 	}
 
-	namespace
-	{
-		static char const* const sock_type_str[] =
+namespace {
+
+		int sock_type_idx(socket_type_t type)
 		{
-			"TCP", "TCP/SSL", "UDP", "I2P", "Socks5", "uTP/SSL"
-		};
+			int idx =
+				static_cast<std::underlying_type<socket_type_t>::type>(type);
+			TORRENT_ASSERT(0 <= idx && idx < 6);
+			return idx;
+		}
+
+		char const* sock_type_str(socket_type_t type)
+		{
+			static char const* type_str[] =
+				{ "TCP", "TCP/SSL", "UDP", "I2P", "Socks5", "uTP/SSL" };
+
+			return type_str[sock_type_idx(type)];
+		}
 
 		static char const* const nat_type_str[] = {"NAT-PMP", "UPnP"};
 
@@ -788,33 +795,79 @@ namespace libtorrent {
 			"HTTPS",
 			"SSL/uTP"
 		};
-
-		tcp::endpoint parse_interface(std::string const& iface, int port)
-		{
-			// ignore errors
-			error_code ec;
-			return tcp::endpoint(address::from_string(iface, ec), port);
-		}
 	}
 
 	listen_failed_alert::listen_failed_alert(
 		aux::stack_allocator& alloc
-		, std::string const& iface
-		, int prt
+		, string_view iface
+		, libtorrent::address const& listen_addr
+		, int listen_port
 		, int op
 		, error_code const& ec
-		, socket_type_t t)
+		, libtorrent::socket_type_t t)
 		: error(ec)
 		, operation(op)
-		, sock_type(t)
-		, endpoint(parse_interface(iface, prt))
+		, socket_type(t)
+		, address(listen_addr)
+		, port(listen_port)
+#ifndef TORRENT_NO_DEPRECATE
+		, endpoint(listen_addr, std::uint16_t(listen_port))
+		, sock_type(static_cast<socket_type_t>(sock_type_idx(t)))
+#endif
 		, m_alloc(alloc)
 		, m_interface_idx(alloc.copy_string(iface))
 	{}
 
+	listen_failed_alert::listen_failed_alert(
+		aux::stack_allocator& alloc
+		, string_view iface
+		, tcp::endpoint const& ep
+		, int op
+		, error_code const& ec
+		, libtorrent::socket_type_t t)
+		: listen_failed_alert(alloc
+			, iface
+			, ep.address()
+			, ep.port()
+			, op
+			, ec
+			, t)
+	{}
+
+	listen_failed_alert::listen_failed_alert(
+		aux::stack_allocator& alloc
+		, string_view iface
+		, udp::endpoint const& ep
+		, int op
+		, error_code const& ec
+		, libtorrent::socket_type_t t)
+		: listen_failed_alert(alloc
+			, iface
+			, ep.address()
+			, ep.port()
+			, op
+			, ec
+			, t)
+	{}
+
+	listen_failed_alert::listen_failed_alert(
+		aux::stack_allocator& alloc
+		, string_view iface
+		, int op
+		, error_code const& ec
+		, libtorrent::socket_type_t t)
+		: listen_failed_alert(alloc
+			, iface
+			, libtorrent::address()
+			, 0
+			, op
+			, ec
+			, t)
+	{}
+
 	char const* listen_failed_alert::listen_interface() const
 	{
-		return m_alloc.ptr(m_interface_idx);
+		return m_alloc.get().ptr(m_interface_idx);
 	}
 
 	std::string listen_failed_alert::message() const
@@ -825,15 +878,17 @@ namespace libtorrent {
 			"open",
 			"bind",
 			"listen",
-			"get_peer_name",
-			"accept"
+			"get_socket_name",
+			"accept",
+			"enum_if",
+			"bind_to_device"
 		};
 		char ret[300];
-		snprintf(ret, sizeof(ret), "listening on %s : %s failed: [%s] [%s] %s"
+		std::snprintf(ret, sizeof(ret), "listening on %s (device: %s) failed: [%s] [%s] %s"
+			, print_endpoint(address, port).c_str()
 			, listen_interface()
-			, print_endpoint(endpoint).c_str()
 			, op_str[operation]
-			, sock_type_str[sock_type]
+			, sock_type_str(socket_type)
 			, convert_from_native(error.message()).c_str());
 		return ret;
 	}
@@ -885,17 +940,41 @@ namespace libtorrent {
 	}
 
 	listen_succeeded_alert::listen_succeeded_alert(aux::stack_allocator&
-		, tcp::endpoint const& ep, socket_type_t t)
-		: endpoint(ep)
-		, sock_type(t)
+		, libtorrent::address const& listen_addr
+		, int listen_port
+		, libtorrent::socket_type_t t)
+		: address(listen_addr)
+		, port(listen_port)
+		, socket_type(t)
+#ifndef TORRENT_NO_DEPRECATE
+		, endpoint(listen_addr, std::uint16_t(listen_port))
+		, sock_type(static_cast<socket_type_t>(sock_type_idx(t)))
+#endif
+	{}
+
+	listen_succeeded_alert::listen_succeeded_alert(aux::stack_allocator& alloc
+		, tcp::endpoint const& ep
+		, libtorrent::socket_type_t t)
+		: listen_succeeded_alert(alloc
+			, ep.address()
+			, ep.port()
+			, t)
+	{}
+
+	listen_succeeded_alert::listen_succeeded_alert(aux::stack_allocator& alloc
+		, udp::endpoint const& ep
+		, libtorrent::socket_type_t t)
+		: listen_succeeded_alert(alloc
+			, ep.address()
+			, ep.port()
+			, t)
 	{}
 
 	std::string listen_succeeded_alert::message() const
 	{
-		char const* type_str[] = { "TCP", "SSL/TCP", "UDP", "i2p", "socks5", "SSL/uTP" };
 		char ret[200];
-		snprintf(ret, sizeof(ret), "successfully listening on [%s] %s"
-			, type_str[sock_type], print_endpoint(endpoint).c_str());
+		std::snprintf(ret, sizeof(ret), "successfully listening on [%s] %s"
+			, sock_type_str(socket_type), print_endpoint(address, port).c_str());
 		return ret;
 	}
 
@@ -922,12 +1001,10 @@ namespace libtorrent {
 	std::string portmap_alert::message() const
 	{
 		char ret[200];
-		snprintf(ret, sizeof(ret), "successfully mapped port using %s. external port: %s/%u"
+		std::snprintf(ret, sizeof(ret), "successfully mapped port using %s. external port: %s/%u"
 			, nat_type_str[map_type], protocol_str[protocol], external_port);
 		return ret;
 	}
-
-#ifndef TORRENT_DISABLE_LOGGING
 
 	portmap_log_alert::portmap_log_alert(aux::stack_allocator& alloc, int t, const char* m)
 		: map_type(t)
@@ -940,24 +1017,22 @@ namespace libtorrent {
 
 	char const* portmap_log_alert::log_message() const
 	{
-		return m_alloc.ptr(m_log_idx);
+		return m_alloc.get().ptr(m_log_idx);
 	}
 
 	std::string portmap_log_alert::message() const
 	{
 		char ret[600];
-		snprintf(ret, sizeof(ret), "%s: %s", nat_type_str[map_type]
+		std::snprintf(ret, sizeof(ret), "%s: %s", nat_type_str[map_type]
 			, log_message());
 		return ret;
 	}
-
-#endif
 
 	fastresume_rejected_alert::fastresume_rejected_alert(
 		aux::stack_allocator& alloc
 		, torrent_handle const& h
 		, error_code const& ec
-		, std::string const& f
+		, string_view f
 		, char const* op)
 		: torrent_alert(alloc, h)
 		, error(ec)
@@ -981,22 +1056,19 @@ namespace libtorrent {
 
 	char const* fastresume_rejected_alert::file_path() const
 	{
-		return m_alloc.ptr(m_path_idx);
+		return m_alloc.get().ptr(m_path_idx);
 	}
 
 	peer_blocked_alert::peer_blocked_alert(aux::stack_allocator& alloc
-		, torrent_handle const& h, address const& i
-		, int r)
-		: torrent_alert(alloc, h)
-		, ip(i)
+		, torrent_handle const& h, tcp::endpoint const& ep, int r)
+		: peer_alert(alloc, h, ep, peer_id(nullptr))
 		, reason(r)
 	{}
 
 	std::string peer_blocked_alert::message() const
 	{
-		error_code ec;
 		char ret[600];
-		char const* reason_str[] =
+		static char const* reason_str[] =
 		{
 			"ip_filter",
 			"port_filter",
@@ -1007,9 +1079,8 @@ namespace libtorrent {
 			"invalid_local_interface"
 		};
 
-		snprintf(ret, sizeof(ret), "%s: blocked peer: %s [%s]"
-			, torrent_alert::message().c_str(), ip.to_string(ec).c_str()
-			, reason_str[reason]);
+		std::snprintf(ret, sizeof(ret), "%s: blocked peer [%s]"
+			, peer_alert::message().c_str(), reason_str[reason]);
 		return ret;
 	}
 
@@ -1024,11 +1095,9 @@ namespace libtorrent {
 	std::string dht_announce_alert::message() const
 	{
 		error_code ec;
-		char ih_hex[41];
-		to_hex(info_hash.data(), 20, ih_hex);
 		char msg[200];
-		snprintf(msg, sizeof(msg), "incoming dht announce: %s:%u (%s)"
-			, ip.to_string(ec).c_str(), port, ih_hex);
+		std::snprintf(msg, sizeof(msg), "incoming dht announce: %s:%u (%s)"
+			, ip.to_string(ec).c_str(), port, aux::to_hex(info_hash).c_str());
 		return msg;
 	}
 
@@ -1039,42 +1108,50 @@ namespace libtorrent {
 
 	std::string dht_get_peers_alert::message() const
 	{
-		char ih_hex[41];
-		to_hex(info_hash.data(), 20, ih_hex);
 		char msg[200];
-		snprintf(msg, sizeof(msg), "incoming dht get_peers: %s", ih_hex);
+		std::snprintf(msg, sizeof(msg), "incoming dht get_peers: %s", aux::to_hex(info_hash).c_str());
 		return msg;
+	}
+
+namespace {
+
+		std::array<int, stats_alert::num_channels> stat_to_array(stat const& s)
+		{
+			std::array<int, stats_alert::num_channels> arr;
+
+			arr[stats_alert::upload_payload] = s[stat::upload_payload].counter();
+			arr[stats_alert::upload_protocol] = s[stat::upload_protocol].counter();
+			arr[stats_alert::download_payload] = s[stat::download_payload].counter();
+			arr[stats_alert::download_protocol] = s[stat::download_protocol].counter();
+			arr[stats_alert::upload_ip_protocol] = s[stat::upload_ip_protocol].counter();
+			arr[stats_alert::download_ip_protocol] = s[stat::download_ip_protocol].counter();
+
+#ifndef TORRENT_NO_DEPRECATE
+			arr[stats_alert::upload_dht_protocol] = 0;
+			arr[stats_alert::upload_tracker_protocol] = 0;
+			arr[stats_alert::download_dht_protocol] = 0;
+			arr[stats_alert::download_tracker_protocol] = 0;
+#else
+			arr[stats_alert::deprecated1] = 0;
+			arr[stats_alert::deprecated2] = 0;
+			arr[stats_alert::deprecated3] = 0;
+			arr[stats_alert::deprecated4] = 0;
+#endif
+			return arr;
+		}
 	}
 
 	stats_alert::stats_alert(aux::stack_allocator& alloc
 		, torrent_handle const& h, int in, stat const& s)
 		: torrent_alert(alloc, h)
+		, transferred(stat_to_array(s))
 		, interval(in)
-	{
-		transferred[upload_payload] = s[stat::upload_payload].counter();
-		transferred[upload_protocol] = s[stat::upload_protocol].counter();
-		transferred[download_payload] = s[stat::download_payload].counter();
-		transferred[download_protocol] = s[stat::download_protocol].counter();
-		transferred[upload_ip_protocol] = s[stat::upload_ip_protocol].counter();
-		transferred[download_ip_protocol] = s[stat::download_ip_protocol].counter();
-
-#ifndef TORRENT_NO_DEPRECATE
-		transferred[upload_dht_protocol] = 0;
-		transferred[upload_tracker_protocol] = 0;
-		transferred[download_dht_protocol] = 0;
-		transferred[download_tracker_protocol] = 0;
-#else
-		transferred[deprecated1] = 0;
-		transferred[deprecated2] = 0;
-		transferred[deprecated3] = 0;
-		transferred[deprecated4] = 0;
-#endif
-	}
+	{}
 
 	std::string stats_alert::message() const
 	{
 		char msg[200];
-		snprintf(msg, sizeof(msg), "%s: [%d] %d %d %d %d %d %d"
+		std::snprintf(msg, sizeof(msg), "%s: [%d] %d %d %d %d %d %d"
 #ifndef TORRENT_NO_DEPRECATE
 			" %d %d %d %d"
 #endif
@@ -1101,7 +1178,7 @@ namespace libtorrent {
 		: torrent_alert(alloc, h) {}
 
 	anonymous_mode_alert::anonymous_mode_alert(aux::stack_allocator& alloc
-		, torrent_handle const& h, int k, std::string const& s)
+		, torrent_handle const& h, int k, string_view s)
 		: torrent_alert(alloc, h)
 		, kind(k)
 		, str(s)
@@ -1113,7 +1190,7 @@ namespace libtorrent {
 		static char const* msgs[] = {
 			"tracker is not anonymous, set a proxy"
 		};
-		snprintf(msg, sizeof(msg), "%s: %s: %s"
+		std::snprintf(msg, sizeof(msg), "%s: %s: %s"
 			, torrent_alert::message().c_str()
 			, msgs[kind], str.c_str());
 		return msg;
@@ -1121,13 +1198,13 @@ namespace libtorrent {
 
 	lsd_peer_alert::lsd_peer_alert(aux::stack_allocator& alloc, torrent_handle const& h
 		, tcp::endpoint const& i)
-		: peer_alert(alloc, h, i, peer_id(0))
+		: peer_alert(alloc, h, i, peer_id(nullptr))
 	{}
 
 	std::string lsd_peer_alert::message() const
 	{
 		char msg[200];
-		snprintf(msg, sizeof(msg), "%s: received peer from local service discovery"
+		std::snprintf(msg, sizeof(msg), "%s: received peer from local service discovery"
 			, peer_alert::message().c_str());
 		return msg;
 	}
@@ -1135,7 +1212,7 @@ namespace libtorrent {
 	trackerid_alert::trackerid_alert(
 		aux::stack_allocator& alloc
 		, torrent_handle const& h
-		, std::string const& u
+		, string_view u
 		, const std::string& id)
 		: tracker_alert(alloc, h, u)
 #ifndef TORRENT_NO_DEPRECATE
@@ -1146,7 +1223,7 @@ namespace libtorrent {
 
 	char const* trackerid_alert::tracker_id() const
 	{
-		return m_alloc.ptr(m_tracker_idx);
+		return m_alloc.get().ptr(m_tracker_idx);
 	}
 
 	std::string trackerid_alert::message() const
@@ -1162,26 +1239,10 @@ namespace libtorrent {
 		return "DHT bootstrap complete";
 	}
 
-#ifndef TORRENT_NO_DEPRECATE
-	rss_alert::rss_alert(aux::stack_allocator&, feed_handle h
-		, std::string const& u, int s, error_code const& ec)
-		: handle(h), url(u), state(s), error(ec)
-	{}
-
-	std::string rss_alert::message() const
-	{
-		char msg[600];
-		char const* state_msg[] = {"updating", "updated", "error"};
-		snprintf(msg, sizeof(msg), "RSS feed %s: %s (%s)"
-			, url.c_str(), state_msg[state], convert_from_native(error.message()).c_str());
-		return msg;
-	}
-#endif
-
 	torrent_error_alert::torrent_error_alert(
 		aux::stack_allocator& alloc
 		, torrent_handle const& h
-		, error_code const& e, std::string const& f)
+		, error_code const& e, string_view f)
 		: torrent_alert(alloc, h)
 		, error(e)
 #ifndef TORRENT_NO_DEPRECATE
@@ -1192,14 +1253,23 @@ namespace libtorrent {
 
 	std::string torrent_error_alert::message() const
 	{
-		char msg[200];
-		snprintf(msg, sizeof(msg), " ERROR: %s", convert_from_native(error.message()).c_str());
+		char msg[400];
+		if (error)
+		{
+			std::snprintf(msg, sizeof(msg), " ERROR: (%d %s) %s"
+				, error.value(), convert_from_native(error.message()).c_str()
+				, filename());
+		}
+		else
+		{
+			std::snprintf(msg, sizeof(msg), " ERROR: %s", filename());
+		}
 		return torrent_alert::message() + msg;
 	}
 
 	char const* torrent_error_alert::filename() const
 	{
-		return m_alloc.ptr(m_file_idx);
+		return m_alloc.get().ptr(m_file_idx);
 	}
 
 #ifndef TORRENT_NO_DEPRECATE
@@ -1238,15 +1308,17 @@ namespace libtorrent {
 	incoming_connection_alert::incoming_connection_alert(aux::stack_allocator&, int t
 		, tcp::endpoint const& i)
 		: socket_type(t)
+		, endpoint(i)
+#ifndef TORRENT_NO_DEPRECATE
 		, ip(i)
+#endif
 	{}
 
 	std::string incoming_connection_alert::message() const
 	{
 		char msg[600];
-		error_code ec;
-		snprintf(msg, sizeof(msg), "incoming connection from %s (%s)"
-			, print_endpoint(ip).c_str(), socket_type_str[socket_type]);
+		std::snprintf(msg, sizeof(msg), "incoming connection from %s (%s)"
+			, print_endpoint(endpoint).c_str(), socket_type_str[socket_type]);
 		return msg;
 	}
 
@@ -1259,14 +1331,13 @@ namespace libtorrent {
 	std::string peer_connect_alert::message() const
 	{
 		char msg[600];
-		error_code ec;
-		snprintf(msg, sizeof(msg), "%s connecting to peer (%s)"
+		std::snprintf(msg, sizeof(msg), "%s connecting to peer (%s)"
 			, peer_alert::message().c_str(), socket_type_str[socket_type]);
 		return msg;
 	}
 
-	add_torrent_alert::add_torrent_alert(aux::stack_allocator& alloc, torrent_handle h
-		, add_torrent_params const& p, error_code ec)
+	add_torrent_alert::add_torrent_alert(aux::stack_allocator& alloc, torrent_handle const& h
+		, add_torrent_params const& p, error_code const& ec)
 		: torrent_alert(alloc, h)
 		, params(p)
 		, error(ec)
@@ -1279,31 +1350,33 @@ namespace libtorrent {
 		char const* torrent_name = info_hash;
 		if (params.ti) torrent_name = params.ti->name().c_str();
 		else if (!params.name.empty()) torrent_name = params.name.c_str();
+#ifndef TORRENT_NO_DEPRECATE
 		else if (!params.url.empty()) torrent_name = params.url.c_str();
-		else to_hex(params.info_hash.data(), 20, info_hash);
+#endif
+		else aux::to_hex(params.info_hash, info_hash);
 
 		if (error)
 		{
-			snprintf(msg, sizeof(msg), "failed to add torrent \"%s\": [%s] %s"
+			std::snprintf(msg, sizeof(msg), "failed to add torrent \"%s\": [%s] %s"
 				, torrent_name, error.category().name()
 				, convert_from_native(error.message()).c_str());
 		}
 		else
 		{
-			snprintf(msg, sizeof(msg), "added torrent: %s", torrent_name);
+			std::snprintf(msg, sizeof(msg), "added torrent: %s", torrent_name);
 		}
 		return msg;
 	}
 
 	state_update_alert::state_update_alert(aux::stack_allocator&
 		, std::vector<torrent_status> st)
-		: status(st)
+		: status(std::move(st))
 	{}
 
 	std::string state_update_alert::message() const
 	{
 		char msg[600];
-		snprintf(msg, sizeof(msg), "state updates for %d torrents", int(status.size()));
+		std::snprintf(msg, sizeof(msg), "state updates for %d torrents", int(status.size()));
 		return msg;
 	}
 
@@ -1315,7 +1388,7 @@ namespace libtorrent {
 	std::string mmap_cache_alert::message() const
 	{
 		char msg[600];
-		snprintf(msg, sizeof(msg), "mmap cache failed: (%d) %s", error.value()
+		std::snprintf(msg, sizeof(msg), "mmap cache failed: (%d) %s", error.value()
 			, convert_from_native(error.message()).c_str());
 		return msg;
 	}
@@ -1336,7 +1409,7 @@ namespace libtorrent {
 	std::string peer_error_alert::message() const
 	{
 		char buf[200];
-		snprintf(buf, sizeof(buf), "%s peer error [%s] [%s]: %s"
+		std::snprintf(buf, sizeof(buf), "%s peer error [%s] [%s]: %s"
 			, peer_alert::message().c_str()
 			, operation_name(operation), error.category().name()
 			, convert_from_native(error.message()).c_str());
@@ -1364,6 +1437,7 @@ namespace libtorrent {
 			"connect",
 			"ssl_handshake",
 			"get_interface",
+			"unknown",
 		};
 
 		if (op < 0 || op >= int(sizeof(names)/sizeof(names[0])))
@@ -1372,6 +1446,7 @@ namespace libtorrent {
 		return names[op];
 	}
 
+#ifndef TORRENT_NO_DEPRECATE
 	torrent_update_alert::torrent_update_alert(aux::stack_allocator& alloc, torrent_handle h
 		, sha1_hash const& old_hash, sha1_hash const& new_hash)
 		: torrent_alert(alloc, h)
@@ -1382,26 +1457,10 @@ namespace libtorrent {
 	std::string torrent_update_alert::message() const
 	{
 		char msg[200];
-		snprintf(msg, sizeof(msg), " torrent changed info-hash from: %s to %s"
-			, to_hex(old_ih.to_string()).c_str()
-			, to_hex(new_ih.to_string()).c_str());
+		std::snprintf(msg, sizeof(msg), " torrent changed info-hash from: %s to %s"
+			, aux::to_hex(old_ih).c_str()
+			, aux::to_hex(new_ih).c_str());
 		return torrent_alert::message() + msg;
-	}
-
-#ifndef TORRENT_NO_DEPRECATE
-	rss_item_alert::rss_item_alert(aux::stack_allocator&, feed_handle h
-		, feed_item const& i)
-		: handle(h)
-		, item(i)
-	{}
-
-	std::string rss_item_alert::message() const
-	{
-		char msg[500];
-		snprintf(msg, sizeof(msg), "feed [%s] has new RSS item %s"
-			, handle.get_feed_status().title.c_str()
-			, item.title.empty() ? item.url.c_str() : item.title.c_str());
-		return msg;
 	}
 #endif
 
@@ -1423,7 +1482,7 @@ namespace libtorrent {
 	std::string peer_disconnected_alert::message() const
 	{
 		char buf[600];
-		snprintf(buf, sizeof(buf), "%s disconnecting (%s) [%s] [%s]: %s (reason: %d)"
+		std::snprintf(buf, sizeof(buf), "%s disconnecting (%s) [%s] [%s]: %s (reason: %d)"
 			, peer_alert::message().c_str()
 			, socket_type_str[socket_type]
 			, operation_name(operation), error.category().name()
@@ -1450,7 +1509,7 @@ namespace libtorrent {
 			op = 0;
 
 		char msg[600];
-		snprintf(msg, sizeof(msg), "DHT error [%s] (%d) %s"
+		std::snprintf(msg, sizeof(msg), "DHT error [%s] (%d) %s"
 			, operation_names[op]
 			, error.value()
 			, convert_from_native(error.message()).c_str());
@@ -1465,8 +1524,8 @@ namespace libtorrent {
 	std::string dht_immutable_item_alert::message() const
 	{
 		char msg[1050];
-		snprintf(msg, sizeof(msg), "DHT immutable item %s [ %s ]"
-			, to_hex(target.to_string()).c_str()
+		std::snprintf(msg, sizeof(msg), "DHT immutable item %s [ %s ]"
+			, aux::to_hex(target).c_str()
 			, item.to_string().c_str());
 		return msg;
 	}
@@ -1474,10 +1533,10 @@ namespace libtorrent {
 	// TODO: 2 the salt here is allocated on the heap. It would be nice to
 	// allocate in in the stack_allocator
 	dht_mutable_item_alert::dht_mutable_item_alert(aux::stack_allocator&
-		, boost::array<char, 32> k
-		, boost::array<char, 64> sig
-		, boost::uint64_t sequence
-		, std::string const& s
+		, std::array<char, 32> k
+		, std::array<char, 64> sig
+		, std::int64_t sequence
+		, string_view s
 		, entry const& i
 		, bool a)
 		: key(k), signature(sig), seq(sequence), salt(s), item(i), authoritative(a)
@@ -1486,8 +1545,8 @@ namespace libtorrent {
 	std::string dht_mutable_item_alert::message() const
 	{
 		char msg[1050];
-		snprintf(msg, sizeof(msg), "DHT mutable item (key=%s salt=%s seq=%" PRId64 " %s) [ %s ]"
-			, to_hex(std::string(&key[0], 32)).c_str()
+		std::snprintf(msg, sizeof(msg), "DHT mutable item (key=%s salt=%s seq=%" PRId64 " %s) [ %s ]"
+			, aux::to_hex(key).c_str()
 			, salt.c_str()
 			, seq
 			, authoritative ? "auth" : "non-auth"
@@ -1497,20 +1556,23 @@ namespace libtorrent {
 
 	dht_put_alert::dht_put_alert(aux::stack_allocator&, sha1_hash const& t, int n)
 		: target(t)
+		, public_key()
+		, signature()
+		, salt()
 		, seq(0)
 		, num_success(n)
 	{}
 
 	dht_put_alert::dht_put_alert(aux::stack_allocator&
-		, boost::array<char, 32> key
-		, boost::array<char, 64> sig
+		, std::array<char, 32> key
+		, std::array<char, 64> sig
 		, std::string s
-		, boost::uint64_t sequence_number
+		, std::int64_t sequence_number
 		, int n)
-		: target(0)
+		: target(nullptr)
 		, public_key(key)
 		, signature(sig)
-		, salt(s)
+		, salt(std::move(s))
 		, seq(sequence_number)
 		, num_success(n)
 	{}
@@ -1520,18 +1582,18 @@ namespace libtorrent {
 		char msg[1050];
 		if (target.is_all_zeros())
 		{
-			snprintf(msg, sizeof(msg), "DHT put complete (success=%d key=%s sig=%s salt=%s seq=%" PRId64 ")"
+			std::snprintf(msg, sizeof(msg), "DHT put complete (success=%d key=%s sig=%s salt=%s seq=%" PRId64 ")"
 				, num_success
-				, to_hex(std::string(&public_key[0], 32)).c_str()
-				, to_hex(std::string(&signature[0], 64)).c_str()
+				, aux::to_hex(public_key).c_str()
+				, aux::to_hex(signature).c_str()
 				, salt.c_str()
 				, seq);
 			return msg;
 		}
 
-		snprintf(msg, sizeof(msg), "DHT put commplete (success=%d hash=%s)"
+		std::snprintf(msg, sizeof(msg), "DHT put commplete (success=%d hash=%s)"
 			, num_success
-			, to_hex(target.to_string()).c_str());
+			, aux::to_hex(target).c_str());
 		return msg;
 	}
 
@@ -1542,7 +1604,7 @@ namespace libtorrent {
 	std::string i2p_alert::message() const
 	{
 		char msg[600];
-		snprintf(msg, sizeof(msg), "i2p_error: [%s] %s"
+		std::snprintf(msg, sizeof(msg), "i2p_error: [%s] %s"
 			, error.category().name(), convert_from_native(error.message()).c_str());
 		return msg;
 	}
@@ -1552,7 +1614,10 @@ namespace libtorrent {
 		, udp::endpoint ep)
 		: info_hash(ih)
 		, obfuscated_info_hash(obfih)
-		, ip(ep)
+		, endpoint(std::move(ep))
+#ifndef TORRENT_NO_DEPRECATE
+		, ip(endpoint)
+#endif
 	{}
 
 	std::string dht_outgoing_get_peers_alert::message() const
@@ -1562,76 +1627,95 @@ namespace libtorrent {
 		obf[0] = '\0';
 		if (obfuscated_info_hash != info_hash)
 		{
-			snprintf(obf, sizeof(obf), " [obfuscated: %s]"
-			, to_hex(obfuscated_info_hash.to_string()).c_str());
+			std::snprintf(obf, sizeof(obf), " [obfuscated: %s]"
+			, aux::to_hex(obfuscated_info_hash).c_str());
 		}
-		snprintf(msg, sizeof(msg), "outgoing dht get_peers : %s%s -> %s"
-			, to_hex(info_hash.to_string()).c_str()
+		std::snprintf(msg, sizeof(msg), "outgoing dht get_peers : %s%s -> %s"
+			, aux::to_hex(info_hash).c_str()
 			, obf
-			, print_endpoint(ip).c_str());
+			, print_endpoint(endpoint).c_str());
 		return msg;
 	}
-
-#ifndef TORRENT_DISABLE_LOGGING
 
 	log_alert::log_alert(aux::stack_allocator& alloc, char const* log)
 		: m_alloc(alloc)
 		, m_str_idx(alloc.copy_string(log))
 	{}
+	log_alert::log_alert(aux::stack_allocator& alloc, char const* fmt, va_list v)
+		: m_alloc(alloc)
+		, m_str_idx(alloc.format_string(fmt, v))
+	{}
 
+	char const* log_alert::log_message() const
+	{
+		return m_alloc.get().ptr(m_str_idx);
+	}
+
+#ifndef TORRENT_NO_DEPRECATE
 	char const* log_alert::msg() const
 	{
-		return m_alloc.ptr(m_str_idx);
+		return log_message();
 	}
+#endif
 
 	std::string log_alert::message() const
 	{
-		return msg();
+		return log_message();
 	}
 
 	torrent_log_alert::torrent_log_alert(aux::stack_allocator& alloc, torrent_handle const& h
-		, char const* log)
+		, char const* fmt, va_list v)
 		: torrent_alert(alloc, h)
-		, m_str_idx(alloc.copy_string(log))
+		, m_str_idx(alloc.format_string(fmt, v))
 	{}
 
+	char const* torrent_log_alert::log_message() const
+	{
+		return m_alloc.get().ptr(m_str_idx);
+	}
+
+#ifndef TORRENT_NO_DEPRECATE
 	char const* torrent_log_alert::msg() const
 	{
-		return m_alloc.ptr(m_str_idx);
+		return log_message();
 	}
+#endif
 
 	std::string torrent_log_alert::message() const
 	{
-		return torrent_alert::message() + ": " + msg();
+		return torrent_alert::message() + ": " + log_message();
 	}
 
 	peer_log_alert::peer_log_alert(aux::stack_allocator& alloc
 		, torrent_handle const& h
-		, tcp::endpoint const& i
-		, peer_id const& pi
-		, direction_t dir
-		, char const* event
-		, char const* log)
+		, tcp::endpoint const& i, peer_id const& pi
+		, peer_log_alert::direction_t dir
+		, char const* event, char const* fmt, va_list v)
 		: peer_alert(alloc, h, i, pi)
 		, event_type(event)
 		, direction(dir)
-		, m_str_idx(alloc.copy_string(log))
+		, m_str_idx(alloc.format_string(fmt, v))
 	{}
 
+	char const* peer_log_alert::log_message() const
+	{
+		return m_alloc.get().ptr(m_str_idx);
+	}
+
+#ifndef TORRENT_NO_DEPRECATE
 	char const* peer_log_alert::msg() const
 	{
-		return m_alloc.ptr(m_str_idx);
+		return log_message();
 	}
+#endif
 
 	std::string peer_log_alert::message() const
 	{
 		static char const* mode[] =
 		{ "<==", "==>", "<<<", ">>>", "***" };
-		return torrent_alert::message() + " [" + print_endpoint(ip) + "] "
-			+ mode[direction] + " " + event_type + " [ " + msg() + " ]";
+		return torrent_alert::message() + " [" + print_endpoint(endpoint) + "] "
+			+ mode[direction] + " " + event_type + " [ " + log_message() + " ]";
 	}
-
-#endif
 
 	lsd_error_alert::lsd_error_alert(aux::stack_allocator&, error_code const& ec)
 		: alert()
@@ -1640,27 +1724,35 @@ namespace libtorrent {
 
 	std::string lsd_error_alert::message() const
 	{
-		return "Local Service Discovery error: " + error.message();
+		return "Local Service Discovery error: " + convert_from_native(error.message());
+	}
+
+namespace {
+
+		aux::array<std::int64_t, counters::num_counters> counters_to_array(counters const& cnt)
+		{
+			aux::array<std::int64_t, counters::num_counters> arr;
+
+			for (int i = 0; i < counters::num_counters; ++i)
+				arr[i] = cnt[i];
+
+			return arr;
+		}
 	}
 
 	session_stats_alert::session_stats_alert(aux::stack_allocator&, counters const& cnt)
-	{
-		for (int i = 0; i < counters::num_counters; ++i)
-			values[i] = cnt[i];
-	}
+		: values(counters_to_array(cnt))
+	{}
 
 	std::string session_stats_alert::message() const
 	{
-		// this specific output is parsed by tools/parse_session_stats.py
-		// if this is changed, that parser should also be changed
-		char msg[100];
-		snprintf(msg, sizeof(msg), "session stats (%d values): "
-			, int(sizeof(values)/sizeof(values[0])));
+		char msg[50];
+		std::snprintf(msg, sizeof(msg), "session stats (%d values): " , int(values.size()));
 		std::string ret = msg;
 		bool first = true;
-		for (int i = 0; i < sizeof(values)/sizeof(values[0]); ++i)
+		for (auto v : values)
 		{
-			snprintf(msg, sizeof(msg), first ? "%" PRIu64 : ", %" PRIu64, values[i]);
+			std::snprintf(msg, sizeof(msg), first ? "%" PRId64 : ", %" PRId64, v);
 			first = false;
 			ret += msg;
 		}
@@ -1668,24 +1760,24 @@ namespace libtorrent {
 	}
 
 	dht_stats_alert::dht_stats_alert(aux::stack_allocator&
-		, std::vector<dht_routing_bucket> const& table
-		, std::vector<dht_lookup> const& requests)
+		, std::vector<dht_routing_bucket> table
+		, std::vector<dht_lookup> requests)
 		: alert()
-		, active_requests(requests)
-		, routing_table(table)
+		, active_requests(std::move(requests))
+		, routing_table(std::move(table))
 	{}
 
 	std::string dht_stats_alert::message() const
 	{
 		char buf[2048];
-		snprintf(buf, sizeof(buf), "DHT stats: reqs: %d buckets: %d"
+		std::snprintf(buf, sizeof(buf), "DHT stats: reqs: %d buckets: %d"
 			, int(active_requests.size())
 			, int(routing_table.size()));
 		return buf;
 	}
 
 	url_seed_alert::url_seed_alert(aux::stack_allocator& alloc, torrent_handle const& h
-		, std::string const& u, error_code const& e)
+		, string_view u, error_code const& e)
 		: torrent_alert(alloc, h)
 #ifndef TORRENT_NO_DEPRECATE
 		, url(u)
@@ -1693,11 +1785,11 @@ namespace libtorrent {
 #endif
 		, error(e)
 		, m_url_idx(alloc.copy_string(u))
-		, m_msg_idx(-1)
+		, m_msg_idx()
 	{}
 
 	url_seed_alert::url_seed_alert(aux::stack_allocator& alloc, torrent_handle const& h
-		, std::string const& u, std::string const& m)
+		, string_view u, string_view m)
 		: torrent_alert(alloc, h)
 #ifndef TORRENT_NO_DEPRECATE
 		, url(u)
@@ -1715,19 +1807,17 @@ namespace libtorrent {
 
 	char const* url_seed_alert::server_url() const
 	{
-		return m_alloc.ptr(m_url_idx);
+		return m_alloc.get().ptr(m_url_idx);
 	}
 
 	char const* url_seed_alert::error_message() const
 	{
-		if (m_msg_idx == -1) return "";
-		return m_alloc.ptr(m_msg_idx);
+		if (m_msg_idx == aux::allocation_slot()) return "";
+		return m_alloc.get().ptr(m_msg_idx);
 	}
 
 	file_error_alert::file_error_alert(aux::stack_allocator& alloc
-		, error_code const& ec
-		, std::string const& f
-		, char const* op
+		, error_code const& ec, string_view f, char const* op
 		, torrent_handle const& h)
 		: torrent_alert(alloc, h)
 #ifndef TORRENT_NO_DEPRECATE
@@ -1744,7 +1834,7 @@ namespace libtorrent {
 
 	char const* file_error_alert::filename() const
 	{
-		return m_alloc.ptr(m_file_idx);
+		return m_alloc.get().ptr(m_file_idx);
 	}
 
 	std::string file_error_alert::message() const
@@ -1764,21 +1854,22 @@ namespace libtorrent {
 	std::string incoming_request_alert::message() const
 	{
 		char msg[1024];
-		snprintf(msg, sizeof(msg), "%s: incoming request [ piece: %d start: %d length: %d ]"
-			, peer_alert::message().c_str(), req.piece, req.start, req.length);
+		std::snprintf(msg, sizeof(msg), "%s: incoming request [ piece: %d start: %d length: %d ]"
+			, peer_alert::message().c_str(), static_cast<int>(req.piece)
+			, req.start, req.length);
 		return msg;
 	}
 
 	dht_log_alert::dht_log_alert(aux::stack_allocator& alloc
-		, dht_log_alert::dht_module_t m, const char* msg)
+		, dht_log_alert::dht_module_t m, const char* fmt, va_list v)
 		: module(m)
 		, m_alloc(alloc)
-		, m_msg_idx(alloc.copy_string(msg))
+		, m_msg_idx(alloc.format_string(fmt, v))
 	{}
 
 	char const* dht_log_alert::log_message() const
 	{
-		return m_alloc.ptr(m_msg_idx);
+		return m_alloc.get().ptr(m_msg_idx);
 	}
 
 	std::string dht_log_alert::message() const
@@ -1793,28 +1884,27 @@ namespace libtorrent {
 		};
 
 		char ret[900];
-		snprintf(ret, sizeof(ret), "DHT %s: %s", dht_modules[module]
+		std::snprintf(ret, sizeof(ret), "DHT %s: %s", dht_modules[module]
 			, log_message());
 		return ret;
 	}
 
 	dht_pkt_alert::dht_pkt_alert(aux::stack_allocator& alloc
-		, char const* buf, int size, dht_pkt_alert::direction_t d, udp::endpoint ep)
-		: dir(d)
-		, node(ep)
+		, span<char const> buf, dht_pkt_alert::direction_t d
+		, udp::endpoint const& ep)
+		: direction(d)
+		, node(std::move(ep))
+#ifndef TORRENT_NO_DEPRECATE
+		, dir(d)
+#endif
 		, m_alloc(alloc)
-		, m_msg_idx(alloc.copy_buffer(buf, size))
-		, m_size(size)
+		, m_msg_idx(alloc.copy_buffer(buf))
+		, m_size(int(buf.size()))
 	{}
 
-	char const* dht_pkt_alert::pkt_buf() const
+	span<char const> dht_pkt_alert::pkt_buf() const
 	{
-		return m_alloc.ptr(m_msg_idx);
-	}
-
-	int dht_pkt_alert::pkt_size() const
-	{
-		return m_size;
+		return {m_alloc.get().ptr(m_msg_idx), std::size_t(m_size)};
 	}
 
 	std::string dht_pkt_alert::message() const
@@ -1824,13 +1914,14 @@ namespace libtorrent {
 
 		// ignore errors here. This is best-effort. It may be a broken encoding
 		// but at least we'll print the valid parts
-		bdecode(pkt_buf(), pkt_buf() + pkt_size(), print, ec, NULL, 100, 100);
+		span<char const> pkt = pkt_buf();
+		bdecode(pkt.data(), pkt.data() + int(pkt.size()), print, ec, nullptr, 100, 100);
 
 		std::string msg = print_entry(print, true);
 
 		char const* prefix[2] = { "<==", "==>"};
 		char buf[1024];
-		snprintf(buf, sizeof(buf), "%s [%s] %s", prefix[dir]
+		std::snprintf(buf, sizeof(buf), "%s [%s] %s", prefix[direction]
 			, print_endpoint(node).c_str(), msg.c_str());
 
 		return buf;
@@ -1841,56 +1932,69 @@ namespace libtorrent {
 		, std::vector<tcp::endpoint> const& peers)
 		: info_hash(ih)
 		, m_alloc(alloc)
-		, m_num_peers(peers.size())
 	{
-		std::size_t total_size = m_num_peers; // num bytes for sizes
-		for (int i = 0; i < m_num_peers; i++) {
-			total_size += peers[i].size();
+		for (auto const& endp : peers)
+		{
+			if (endp.protocol() == tcp::v4())
+				m_v4_num_peers++;
+#if TORRENT_USE_IPV6
+			else
+				m_v6_num_peers++;
+#endif
 		}
 
-		m_peers_idx = alloc.allocate(total_size);
+		m_v4_peers_idx = alloc.allocate(m_v4_num_peers * 6);
+		m_v6_peers_idx = alloc.allocate(m_v6_num_peers * 18);
 
-		char *ptr = alloc.ptr(m_peers_idx);
-		for (int i = 0; i < m_num_peers; i++) {
-			tcp::endpoint endp = peers[i];
-			std::size_t size = endp.size();
-
-			detail::write_uint8(size, ptr);
-			memcpy(ptr, endp.data(), size);
-			ptr += size;
+		char* v4_ptr = alloc.ptr(m_v4_peers_idx);
+#if TORRENT_USE_IPV6
+		char* v6_ptr = alloc.ptr(m_v6_peers_idx);
+#endif
+		for (auto const& endp : peers)
+		{
+			if (endp.protocol() == tcp::v4())
+				detail::write_endpoint(endp, v4_ptr);
+#if TORRENT_USE_IPV6
+			else
+				detail::write_endpoint(endp, v6_ptr);
+#endif
 		}
 	}
 
 	std::string dht_get_peers_reply_alert::message() const
 	{
-		char ih_hex[41];
-		to_hex(info_hash.data(), 20, ih_hex);
 		char msg[200];
-		snprintf(msg, sizeof(msg), "incoming dht get_peers reply: %s, peers %d", ih_hex, m_num_peers);
+		std::snprintf(msg, sizeof(msg), "incoming dht get_peers reply: %s, peers %d"
+			, aux::to_hex(info_hash).c_str(), num_peers());
 		return msg;
 	}
 
 	int dht_get_peers_reply_alert::num_peers() const
 	{
-		return m_num_peers;
+		return m_v4_num_peers + m_v6_num_peers;
 	}
 
 #ifndef TORRENT_NO_DEPRECATE
-	void dht_get_peers_reply_alert::peers(std::vector<tcp::endpoint> &v) const {
+	void dht_get_peers_reply_alert::peers(std::vector<tcp::endpoint> &v) const
+	{
 		std::vector<tcp::endpoint> p(peers());
 		v.reserve(p.size());
 		std::copy(p.begin(), p.end(), std::back_inserter(v));
-    }
+	}
 #endif
-	std::vector<tcp::endpoint> dht_get_peers_reply_alert::peers() const {
-		std::vector<tcp::endpoint> peers(m_num_peers);
+	std::vector<tcp::endpoint> dht_get_peers_reply_alert::peers() const
+	{
+		aux::vector<tcp::endpoint> peers;
+		peers.reserve(num_peers());
 
-		const char *ptr = m_alloc.ptr(m_peers_idx);
-		for (int i = 0; i < m_num_peers; i++) {
-			std::size_t size = detail::read_uint8(ptr);
-			memcpy(peers[i].data(), ptr, size);
-			ptr += size;
-		}
+		char const* v4_ptr = m_alloc.get().ptr(m_v4_peers_idx);
+		for (int i = 0; i < m_v4_num_peers; i++)
+			peers.push_back(detail::read_v4_endpoint<tcp::endpoint>(v4_ptr));
+#if TORRENT_USE_IPV6
+		char const* v6_ptr = m_alloc.get().ptr(m_v6_peers_idx);
+		for (int i = 0; i < m_v6_num_peers; i++)
+			peers.push_back(detail::read_v6_endpoint<tcp::endpoint>(v6_ptr));
+#endif
 
 		return peers;
 	}
@@ -1898,32 +2002,42 @@ namespace libtorrent {
 	dht_direct_response_alert::dht_direct_response_alert(
 		aux::stack_allocator& alloc, void* userdata_
 		, udp::endpoint const& addr_, bdecode_node const& response)
-		: userdata(userdata_), addr(addr_), m_alloc(alloc)
-		, m_response_idx(alloc.copy_buffer(response.data_section().first, response.data_section().second))
-		, m_response_size(response.data_section().second)
+		: userdata(userdata_), endpoint(addr_)
+#ifndef TORRENT_NO_DEPRECATE
+		, addr(addr_)
+#endif
+		, m_alloc(alloc)
+		, m_response_idx(alloc.copy_buffer(response.data_section()))
+		, m_response_size(int(response.data_section().size()))
 	{}
 
 	dht_direct_response_alert::dht_direct_response_alert(
 		aux::stack_allocator& alloc
 		, void* userdata_
 		, udp::endpoint const& addr_)
-		: userdata(userdata_), addr(addr_), m_alloc(alloc)
-		, m_response_idx(-1), m_response_size(0)
+		: userdata(userdata_), endpoint(addr_)
+#ifndef TORRENT_NO_DEPRECATE
+		, addr(addr_)
+#endif
+		, m_alloc(alloc)
+		, m_response_idx()
+		, m_response_size(0)
 	{}
 
 	std::string dht_direct_response_alert::message() const
 	{
 		char msg[1050];
-		snprintf(msg, sizeof(msg), "DHT direct response (address=%s) [ %s ]"
-			, addr.address().to_string().c_str()
-			, m_response_size ? std::string(m_alloc.ptr(m_response_idx), m_response_size).c_str() : "");
+		std::snprintf(msg, sizeof(msg), "DHT direct response (address=%s) [ %s ]"
+			, endpoint.address().to_string().c_str()
+			, m_response_size ? std::string(m_alloc.get().ptr(m_response_idx)
+				, aux::numeric_cast<std::size_t>(m_response_size)).c_str() : "");
 		return msg;
 	}
 
 	bdecode_node dht_direct_response_alert::response() const
 	{
 		if (m_response_size == 0) return bdecode_node();
-		char const* start = m_alloc.ptr(m_response_idx);
+		char const* start = m_alloc.get().ptr(m_response_idx);
 		char const* end = start + m_response_size;
 		error_code ec;
 		bdecode_node ret;
@@ -1932,27 +2046,25 @@ namespace libtorrent {
 		return ret;
 	}
 
-#ifndef TORRENT_DISABLE_LOGGING
-
 	picker_log_alert::picker_log_alert(aux::stack_allocator& alloc, torrent_handle const& h
-		, tcp::endpoint const& ep, peer_id const& peer_id, boost::uint32_t flags
+		, tcp::endpoint const& ep, peer_id const& peer_id, std::uint32_t flags
 		, piece_block const* blocks, int num_blocks)
 		: peer_alert(alloc, h, ep, peer_id)
 		, picker_flags(flags)
-		, m_array_idx(alloc.copy_buffer(reinterpret_cast<char const*>(blocks)
-			, num_blocks * sizeof(piece_block)))
+		, m_array_idx(alloc.copy_buffer({reinterpret_cast<char const*>(blocks)
+			, aux::numeric_cast<std::size_t>(num_blocks) * sizeof(piece_block)}))
 		, m_num_blocks(num_blocks)
 	{}
 
 	std::vector<piece_block> picker_log_alert::blocks() const
 	{
 		// we need to copy this array to make sure the structures are properly
-		// aigned, not just to have a nice API
-		std::vector<piece_block> ret;
-		ret.resize(m_num_blocks);
+		// aligned, not just to have a nice API
+		std::size_t const num_blocks = aux::numeric_cast<std::size_t>(m_num_blocks);
+		std::vector<piece_block> ret(num_blocks);
 
-		char const* start = m_alloc.ptr(m_array_idx);
-		memcpy(&ret[0], start, m_num_blocks * sizeof(piece_block));
+		char const* start = m_alloc.get().ptr(m_array_idx);
+		std::memcpy(ret.data(), start, num_blocks * sizeof(piece_block));
 
 		return ret;
 	}
@@ -1981,7 +2093,7 @@ namespace libtorrent {
 
 		std::string ret = peer_alert::message();
 
-		boost::uint32_t flags = picker_flags;
+		std::uint32_t flags = picker_flags;
 		int idx = 0;
 		ret += " picker_log [ ";
 		for (; flags != 0; flags >>= 1, ++idx)
@@ -1993,17 +2105,169 @@ namespace libtorrent {
 
 		std::vector<piece_block> b = blocks();
 
-		for (int i = 0; i < int(b.size()); ++i)
+		for (auto const& p : b)
 		{
 			char buf[50];
-			snprintf(buf, sizeof(buf), "(%d,%d) "
-				, b[i].piece_index, b[i].block_index);
+			std::snprintf(buf, sizeof(buf), "(%d,%d) "
+				, static_cast<int>(p.piece_index), p.block_index);
 			ret += buf;
 		}
 		return ret;
 	}
 
-#endif // TORRENT_DISABLE_LOGGING
+	session_error_alert::session_error_alert(aux::stack_allocator& alloc
+		, error_code e, string_view error_str)
+		: error(e)
+		, m_alloc(alloc)
+		, m_msg_idx(alloc.copy_buffer(error_str))
+	{}
+
+	std::string session_error_alert::message() const
+	{
+		char buf[400];
+		if (error)
+		{
+			std::snprintf(buf, sizeof(buf), "session error: (%d %s) %s"
+				, error.value(), convert_from_native(error.message()).c_str()
+				, m_alloc.get().ptr(m_msg_idx));
+		}
+		else
+		{
+			std::snprintf(buf, sizeof(buf), "session error: %s"
+				, m_alloc.get().ptr(m_msg_idx));
+		}
+		return buf;
+	}
+
+namespace {
+
+	using nodes_slot = std::tuple<int, aux::allocation_slot, int, aux::allocation_slot>;
+
+	nodes_slot write_nodes(aux::stack_allocator& alloc
+		, std::vector<std::pair<sha1_hash, udp::endpoint>> const& nodes)
+	{
+		int v4_num_nodes = 0;
+		int v6_num_nodes = 0;
+
+		for (auto const& n : nodes)
+		{
+			if (n.second.protocol() == udp::v4())
+				v4_num_nodes++;
+#if TORRENT_USE_IPV6
+			else
+				v6_num_nodes++;
+#endif
+		}
+
+		aux::allocation_slot const v4_nodes_idx = alloc.allocate(v4_num_nodes * (20 + 6));
+		aux::allocation_slot const v6_nodes_idx = alloc.allocate(v6_num_nodes * (20 + 18));
+
+		char* v4_ptr = alloc.ptr(v4_nodes_idx);
+#if TORRENT_USE_IPV6
+		char* v6_ptr = alloc.ptr(v6_nodes_idx);
+#endif
+		for (auto const& n : nodes)
+		{
+			udp::endpoint const& endp = n.second;
+			if (endp.protocol() == udp::v4())
+			{
+				detail::write_string(n.first.to_string(), v4_ptr);
+				detail::write_endpoint(endp, v4_ptr);
+			}
+#if TORRENT_USE_IPV6
+			else
+			{
+				detail::write_string(n.first.to_string(), v6_ptr);
+				detail::write_endpoint(endp, v6_ptr);
+			}
+#endif
+		}
+
+		return nodes_slot(v4_num_nodes, v4_nodes_idx, v6_num_nodes, v6_nodes_idx);
+	}
+
+	std::vector<std::pair<sha1_hash, udp::endpoint>> read_nodes(
+		aux::stack_allocator const& alloc
+		, int const v4_num_nodes, aux::allocation_slot const v4_nodes_idx
+		, int const v6_num_nodes, aux::allocation_slot const v6_nodes_idx)
+	{
+		aux::vector<std::pair<sha1_hash, udp::endpoint>> nodes;
+		nodes.reserve(v4_num_nodes + v6_num_nodes);
+
+		char const* v4_ptr = alloc.ptr(v4_nodes_idx);
+		for (int i = 0; i < v4_num_nodes; i++)
+		{
+			sha1_hash ih;
+			std::memcpy(ih.data(), v4_ptr, 20);
+			v4_ptr += 20;
+			nodes.emplace_back(ih, detail::read_v4_endpoint<udp::endpoint>(v4_ptr));
+		}
+#if TORRENT_USE_IPV6
+		char const* v6_ptr = alloc.ptr(v6_nodes_idx);
+		for (int i = 0; i < v6_num_nodes; i++)
+		{
+			sha1_hash ih;
+			std::memcpy(ih.data(), v6_ptr, 20);
+			v6_ptr += 20;
+			nodes.emplace_back(ih, detail::read_v6_endpoint<udp::endpoint>(v6_ptr));
+		}
+#else
+		TORRENT_UNUSED(v6_nodes_idx);
+#endif
+
+		return nodes;
+	}
+	}
+
+	dht_live_nodes_alert::dht_live_nodes_alert(aux::stack_allocator& alloc
+		, sha1_hash const& nid
+		, std::vector<std::pair<sha1_hash, udp::endpoint>> const& nodes)
+		: node_id(nid)
+		, m_alloc(alloc)
+	{
+		std::tie(m_v4_num_nodes, m_v4_nodes_idx, m_v6_num_nodes, m_v6_nodes_idx)
+			= write_nodes(alloc, nodes);
+	}
+
+	std::string dht_live_nodes_alert::message() const
+	{
+		char msg[200];
+		std::snprintf(msg, sizeof(msg), "dht live nodes for id: %s, nodes %d"
+			, aux::to_hex(node_id).c_str(), num_nodes());
+		return msg;
+	}
+
+	int dht_live_nodes_alert::num_nodes() const
+	{
+		return m_v4_num_nodes + m_v6_num_nodes;
+	}
+
+	std::vector<std::pair<sha1_hash, udp::endpoint>> dht_live_nodes_alert::nodes() const
+	{
+		return read_nodes(m_alloc.get()
+			, m_v4_num_nodes, m_v4_nodes_idx
+			, m_v6_num_nodes, m_v6_nodes_idx);
+	}
+
+	session_stats_header_alert::session_stats_header_alert(aux::stack_allocator&)
+	{}
+
+	std::string session_stats_header_alert::message() const
+	{
+		std::string stats_header = "session stats header: ";
+		std::vector<stats_metric> stats = session_stats_metrics();
+		std::sort(stats.begin(), stats.end()
+			, [] (stats_metric const& lhs, stats_metric const& rhs)
+			{ return lhs.value_index < rhs.value_index; });
+		bool first = true;
+		for (auto const& s : stats)
+		{
+			if (!first) stats_header += ", ";
+			stats_header += s.name;
+			first = false;
+		}
+
+		return stats_header;
+	}
 
 } // namespace libtorrent
-

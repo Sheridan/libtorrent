@@ -34,24 +34,21 @@ POSSIBILITY OF SUCH DAMAGE.
 #define TORRENT_STRING_UTIL_HPP_INCLUDED
 
 #include "libtorrent/config.hpp"
-
-#include "libtorrent/aux_/disable_warnings_push.hpp"
+#include "libtorrent/string_view.hpp"
 
 #include <vector>
 #include <string>
-#include <boost/cstdint.hpp>
-#include <boost/limits.hpp>
-#include <boost/array.hpp> // for boost::array
+#include <cstdint>
+#include <limits>
+#include <array> // for std::array
 
-#include "libtorrent/aux_/disable_warnings_pop.hpp"
+namespace libtorrent {
 
-namespace libtorrent
-{
 	TORRENT_EXTRA_EXPORT bool is_alpha(char c);
 
 	TORRENT_EXTRA_EXPORT
-		boost::array<char, 4+std::numeric_limits<boost::int64_t>::digits10>
-		to_string(boost::int64_t n);
+		std::array<char, 4+std::numeric_limits<std::int64_t>::digits10>
+		to_string(std::int64_t n);
 
 	// internal
 	inline bool is_digit(char c)
@@ -63,15 +60,33 @@ namespace libtorrent
 
 	TORRENT_EXTRA_EXPORT int split_string(char const** tags, int buf_size, char* in);
 	TORRENT_EXTRA_EXPORT bool string_begins_no_case(char const* s1, char const* s2);
-	TORRENT_EXTRA_EXPORT bool string_equal_no_case(char const* s1, char const* s2);
+	TORRENT_EXTRA_EXPORT bool string_equal_no_case(string_view s1, string_view s2);
 
 	TORRENT_EXTRA_EXPORT void url_random(char* begin, char* end);
 
-	// this parses the string that's used as the liste_interfaces setting.
+	TORRENT_EXTRA_EXPORT bool string_ends_with(string_view s1, string_view s2);
+
+	struct listen_interface_t
+	{
+		std::string device;
+		int port;
+		bool ssl;
+	};
+
+	// this parses the string that's used as the listen_interfaces setting.
+	// it is a comma-separated list of IP or device names with ports. For
+	// example: "eth0:6881,eth1:6881" or "127.0.0.1:6881"
+	TORRENT_EXTRA_EXPORT std::vector<listen_interface_t> parse_listen_interfaces(
+		std::string const& in);
+
+	TORRENT_EXTRA_EXPORT std::string print_listen_interfaces(
+		std::vector<listen_interface_t> const& in);
+
+	// this parses the string that's used as the listen_interfaces setting.
 	// it is a comma-separated list of IP or device names with ports. For
 	// example: "eth0:6881,eth1:6881" or "127.0.0.1:6881"
 	TORRENT_EXTRA_EXPORT void parse_comma_separated_string_port(
-		std::string const& in, std::vector<std::pair<std::string, int> >& out);
+		std::string const& in, std::vector<std::pair<std::string, int>>& out);
 
 	// this parses the string that's used as the outgoing_interfaces setting.
 	// it is a comma separated list of IPs and device names. For example:
@@ -84,26 +99,21 @@ namespace libtorrent
 	// in strict ansi mode
 	char* allocate_string_copy(char const* str);
 
-	// returns p + x such that the pointer is 8 bytes aligned
-	// x cannot be greater than 7
-	void* align_pointer(void* p);
-
 	// searches for separator in the string 'last'. the pointer last points to
 	// is set to point to the first character following the separator.
-	// returns a pointer to a null terminated string starting at last, ending
+	// returns a pointer to a 0-terminated string starting at last, ending
 	// at the separator (the string is mutated to replace the separator with
 	// a '\0' character). If there is no separator, but the end of the string,
-	// the pointer next points to is set to the last null terminator, which will
-	// make the following invocation return NULL, to indicate the end of the
+	// the pointer next points to is set to the last 0-terminator, which will
+	// make the following invocation return nullptr, to indicate the end of the
 	// string.
 	TORRENT_EXTRA_EXPORT char* string_tokenize(char* last, char sep, char** next);
 
 #if TORRENT_USE_I2P
 
-	bool is_i2p_url(std::string const& url);
+	TORRENT_EXTRA_EXPORT bool is_i2p_url(std::string const& url);
 
 #endif
 }
 
 #endif
-

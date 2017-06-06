@@ -38,8 +38,7 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #include <vector>
 
-namespace libtorrent
-{
+namespace libtorrent {
 
 	TORRENT_EXTRA_EXPORT void inflate_gzip(
 		char const* in, int size
@@ -51,8 +50,9 @@ namespace libtorrent
 	TORRENT_EXPORT boost::system::error_category& gzip_category();
 
 #ifndef TORRENT_NO_DEPRECATE
-	TORRENT_DEPRECATED TORRENT_EXPORT
-	boost::system::error_category& get_gzip_category();
+	TORRENT_DEPRECATED
+	inline boost::system::error_category& get_gzip_category()
+	{ return gzip_category(); }
 #endif
 
 	namespace gzip_errors

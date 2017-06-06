@@ -38,7 +38,11 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #include <iterator>
 #include "libtorrent/utf8.hpp"
+#include "libtorrent/assert.hpp"
+#include "libtorrent/error_code.hpp"
 #include "libtorrent/ConvertUTF.h"
+#include "libtorrent/aux_/throw.hpp"
+#include "libtorrent/aux_/numeric_cast.hpp"
 
 
 #ifdef __clang__
@@ -46,22 +50,22 @@ POSSIBILITY OF SUCH DAMAGE.
 #pragma clang diagnostic ignored "-Wunused-member-function"
 #endif
 
-namespace libtorrent
-{
-	namespace
-	{
+namespace libtorrent {
+
+namespace {
+
 		// ==== utf-8 -> wide ===
 		template<int width>
 		struct convert_to_wide
 		{
-			static utf8_conv_result_t convert(UTF8 const** src_start
+			static utf8_errors::error_code_enum convert(UTF8 const** src_start
 				, UTF8 const* src_end
 				, std::wstring& wide)
 			{
 				TORRENT_UNUSED(src_start);
 				TORRENT_UNUSED(src_end);
 				TORRENT_UNUSED(wide);
-				return source_illegal;
+				return utf8_errors::error_code_enum::source_illegal;
 			}
 		};
 
@@ -69,7 +73,7 @@ namespace libtorrent
 		template<>
 		struct convert_to_wide<4>
 		{
-			static utf8_conv_result_t convert(char const** src_start
+			static utf8_errors::error_code_enum convert(char const** src_start
 				, char const* src_end
 				, std::wstring& wide)
 			{
@@ -84,13 +88,13 @@ namespace libtorrent
 				{
 					// assume Latin-1
 					wide.clear();
-					std::copy(reinterpret_cast<boost::uint8_t const*>(*src_start)
-						,reinterpret_cast<boost::uint8_t const*>(src_end)
+					std::copy(reinterpret_cast<std::uint8_t const*>(*src_start)
+						,reinterpret_cast<std::uint8_t const*>(src_end)
 						, std::back_inserter(wide));
-					return static_cast<utf8_conv_result_t>(ret);
+					return static_cast<utf8_errors::error_code_enum>(ret);
 				}
-				wide.resize(dst_start - wide.c_str());
-				return static_cast<utf8_conv_result_t>(ret);
+				wide.resize(aux::numeric_cast<std::size_t>(dst_start - wide.c_str()));
+				return static_cast<utf8_errors::error_code_enum>(ret);
 			}
 		};
 
@@ -98,7 +102,7 @@ namespace libtorrent
 		template<>
 		struct convert_to_wide<2>
 		{
-			static utf8_conv_result_t convert(char const** src_start
+			static utf8_errors::error_code_enum convert(char const** src_start
 				, char const* src_end
 				, std::wstring& wide)
 			{
@@ -113,13 +117,13 @@ namespace libtorrent
 				{
 					// assume Latin-1
 					wide.clear();
-					std::copy(reinterpret_cast<boost::uint8_t const*>(*src_start)
-						, reinterpret_cast<boost::uint8_t const*>(src_end)
+					std::copy(reinterpret_cast<std::uint8_t const*>(*src_start)
+						, reinterpret_cast<std::uint8_t const*>(src_end)
 						, std::back_inserter(wide));
-					return static_cast<utf8_conv_result_t>(ret);
+					return static_cast<utf8_errors::error_code_enum>(ret);
 				}
-				wide.resize(dst_start - wide.c_str());
-				return static_cast<utf8_conv_result_t>(ret);
+				wide.resize(aux::numeric_cast<std::size_t>(dst_start - wide.c_str()));
+				return static_cast<utf8_errors::error_code_enum>(ret);
 			}
 		};
 
@@ -127,14 +131,14 @@ namespace libtorrent
 		template<int width>
 		struct convert_from_wide
 		{
-			static utf8_conv_result_t convert(wchar_t const** src_start
+			static utf8_errors::error_code_enum convert(wchar_t const** src_start
 				, wchar_t const* src_end
 				, std::string& utf8)
 			{
 				TORRENT_UNUSED(src_start);
 				TORRENT_UNUSED(src_end);
 				TORRENT_UNUSED(utf8);
-				return source_illegal;
+				return utf8_errors::error_code_enum::source_illegal;
 			}
 		};
 
@@ -142,7 +146,7 @@ namespace libtorrent
 		template<>
 		struct convert_from_wide<4>
 		{
-			static utf8_conv_result_t convert(wchar_t const** src_start
+			static utf8_errors::error_code_enum convert(wchar_t const** src_start
 				, wchar_t const* src_end
 				, std::string& utf8)
 			{
@@ -153,8 +157,8 @@ namespace libtorrent
 					, reinterpret_cast<UTF8**>(&dst_start)
 					, reinterpret_cast<UTF8*>(dst_start + utf8.size())
 					, lenientConversion);
-				utf8.resize(dst_start - &utf8[0]);
-				return static_cast<utf8_conv_result_t>(ret);
+				utf8.resize(aux::numeric_cast<std::size_t>(dst_start - &utf8[0]));
+				return static_cast<utf8_errors::error_code_enum>(ret);
 			}
 		};
 
@@ -162,7 +166,7 @@ namespace libtorrent
 		template<>
 		struct convert_from_wide<2>
 		{
-			static utf8_conv_result_t convert(wchar_t const** src_start
+			static utf8_errors::error_code_enum convert(wchar_t const** src_start
 				, wchar_t const* src_end
 				, std::string& utf8)
 			{
@@ -173,29 +177,96 @@ namespace libtorrent
 					, reinterpret_cast<UTF8**>(&dst_start)
 					, reinterpret_cast<UTF8*>(dst_start + utf8.size())
 					, lenientConversion);
-				utf8.resize(dst_start - &utf8[0]);
-				return static_cast<utf8_conv_result_t>(ret);
+				utf8.resize(aux::numeric_cast<std::size_t>(dst_start - &utf8[0]));
+				return static_cast<utf8_errors::error_code_enum>(ret);
+			}
+		};
+
+		struct utf8_error_category : boost::system::error_category
+		{
+			const char* name() const BOOST_SYSTEM_NOEXCEPT override
+			{
+				return "UTF error";
+			}
+
+			std::string message(int ev) const BOOST_SYSTEM_NOEXCEPT override
+			{
+				static char const* error_messages[] = {
+					"ok",
+					"source exhausted",
+					"target exhausted",
+					"source illegal"
+				};
+
+				TORRENT_ASSERT(ev >= 0);
+				TORRENT_ASSERT(ev < int(sizeof(error_messages)/sizeof(error_messages[0])));
+				return error_messages[ev];
+			}
+
+			boost::system::error_condition default_error_condition(
+				int ev) const BOOST_SYSTEM_NOEXCEPT override
+			{
+				return boost::system::error_condition(ev, *this);
 			}
 		};
 	} // anonymous namespace
 
-	utf8_conv_result_t utf8_wchar(std::string const& utf8, std::wstring &wide)
+	namespace utf8_errors
 	{
-		// allocate space for worst-case
-		wide.resize(utf8.size());
-		char const* src_start = utf8.c_str();
-		return convert_to_wide<sizeof(wchar_t)>::convert(
-			&src_start, src_start + utf8.size(), wide);
+		boost::system::error_code make_error_code(utf8_errors::error_code_enum e)
+		{
+			return error_code(e, utf8_category());
+		}
+	} // utf_errors namespace
+
+	boost::system::error_category const& utf8_category()
+	{
+		static utf8_error_category cat;
+		return cat;
 	}
 
-	utf8_conv_result_t wchar_utf8(std::wstring const& wide, std::string &utf8)
+	std::wstring utf8_wchar(string_view utf8, error_code& ec)
 	{
 		// allocate space for worst-case
+		std::wstring wide;
+		wide.resize(utf8.size());
+		char const* src_start = utf8.data();
+		utf8_errors::error_code_enum const ret = convert_to_wide<sizeof(wchar_t)>::convert(
+			&src_start, src_start + utf8.size(), wide);
+		if (ret != utf8_errors::error_code_enum::conversion_ok)
+			ec = make_error_code(ret);
+		return wide;
+	}
+
+	std::wstring utf8_wchar(string_view wide)
+	{
+		error_code ec;
+		std::wstring ret = utf8_wchar(wide, ec);
+		if (ec) aux::throw_ex<system_error>(ec);
+		return ret;
+	}
+
+	std::string wchar_utf8(wstring_view wide, error_code& ec)
+	{
+		// allocate space for worst-case
+		std::string utf8;
 		utf8.resize(wide.size() * 6);
-		if (wide.empty()) return conversion_ok;
-		wchar_t const* src_start = wide.c_str();
-		return convert_from_wide<sizeof(wchar_t)>::convert(
+		if (wide.empty()) return {};
+
+		wchar_t const* src_start = wide.data();
+		utf8_errors::error_code_enum const ret = convert_from_wide<sizeof(wchar_t)>::convert(
 			&src_start, src_start + wide.size(), utf8);
+		if (ret != utf8_errors::error_code_enum::conversion_ok)
+			ec = make_error_code(ret);
+		return utf8;
+	}
+
+	std::string wchar_utf8(wstring_view wide)
+	{
+		error_code ec;
+		std::string ret = wchar_utf8(wide, ec);
+		if (ec) aux::throw_ex<system_error>(ec);
+		return ret;
 	}
 }
 
@@ -204,4 +275,3 @@ namespace libtorrent
 #endif
 
 #endif
-

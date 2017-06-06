@@ -39,6 +39,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/alert_types.hpp"
 #include "libtorrent/session_stats.hpp"
 #include "libtorrent/alert.hpp"
+#include "libtorrent/io_service.hpp"
 #include "setup_swarm.hpp"
 
 using namespace libtorrent;
@@ -83,7 +84,7 @@ int get_cache_size(lt::session& ses)
 	ses.post_session_stats();
 	std::vector<alert*> alerts;
 	ses.pop_alerts(&alerts);
-	int cache_size = -1;
+	std::int64_t cache_size = -1;
 	for (auto const a : alerts)
 	{
 		if (auto const* st = alert_cast<session_stats_alert>(a))
@@ -93,7 +94,8 @@ int get_cache_size(lt::session& ses)
 			break;
 		}
 	}
-	return cache_size;
+	TEST_CHECK(cache_size < std::numeric_limits<int>::max());
+	return int(cache_size);
 }
 
 void set_proxy(lt::session& ses, int proxy_type, int flags, bool proxy_peer_connections)
@@ -117,11 +119,6 @@ void set_proxy(lt::session& ses, int proxy_type, int flags, bool proxy_peer_conn
 	ses.apply_settings(p);
 }
 
-lt::address addr(char const* str)
-{
-	return lt::address::from_string(str);
-}
-
 void print_alerts(lt::session& ses
 	, std::function<void(lt::session&, lt::alert const*)> on_alert)
 {
@@ -130,16 +127,30 @@ void print_alerts(lt::session& ses
 	ses.set_alert_notify([&ses,start_time,on_alert] {
 		ses.get_io_service().post([&ses,start_time,on_alert] {
 
-		std::vector<lt::alert*> alerts;
-		ses.pop_alerts(&alerts);
+		try {
+			std::vector<lt::alert*> alerts;
+			ses.pop_alerts(&alerts);
 
-		for (lt::alert const* a : alerts)
-		{
-			printf("%-3d [0] %s\n", int(lt::duration_cast<lt::seconds>(a->timestamp()
-				- start_time).count()), a->message().c_str());
-			// call the user handler
-			on_alert(ses, a);
+			for (lt::alert const* a : alerts)
+			{
+				std::printf("%-3d [0] %s\n", int(lt::duration_cast<lt::seconds>(a->timestamp()
+					- start_time).count()), a->message().c_str());
+				// call the user handler
+				on_alert(ses, a);
+			}
+		} catch (std::exception const& e) {
+			std::printf("print alerts: ERROR failed with exception: %s"
+				, e.what());
+		} catch (...) {
+			std::printf("print alerts: ERROR failed with (unknown) exception");
 		}
 	} ); } );
 }
 
+std::unique_ptr<sim::asio::io_service> make_io_service(sim::simulation& sim, int i)
+{
+	char ep[30];
+	std::snprintf(ep, sizeof(ep), "50.0.%d.%d", (i + 1) >> 8, (i + 1) & 0xff);
+	return std::unique_ptr<sim::asio::io_service>(new sim::asio::io_service(
+		sim, lt::address_v4::from_string(ep)));
+}

@@ -33,8 +33,8 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/bandwidth_limit.hpp"
 #include <algorithm>
 
-namespace libtorrent
-{
+namespace libtorrent {
+
 	bandwidth_channel::bandwidth_channel()
 		: tmp(0)
 		, distribute_quota(0)
@@ -47,7 +47,7 @@ namespace libtorrent
 	{
 		TORRENT_ASSERT(limit >= 0);
 		// if the throttle is more than this, we might overflow
-		TORRENT_ASSERT(limit < INT_MAX);
+		TORRENT_ASSERT(limit < inf);
 		m_limit = limit;
 	}
 
@@ -71,7 +71,7 @@ namespace libtorrent
 			m_quota_left += (m_limit * dt_milliseconds + 500) / 1000;
 			if (m_quota_left / 3 > m_limit) m_quota_left = m_limit * 3;
 		}
-		distribute_quota = int((std::max)(m_quota_left, boost::int64_t(0)));
+		distribute_quota = int(std::max(m_quota_left, std::int64_t(0)));
 	}
 
 	// this is used when connections disconnect with

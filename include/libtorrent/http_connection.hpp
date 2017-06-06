@@ -35,21 +35,17 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #include "libtorrent/aux_/disable_warnings_push.hpp"
 
-#include <boost/function/function1.hpp>
-#include <boost/function/function2.hpp>
-#include <boost/function/function5.hpp>
-#include <boost/bind.hpp>
-#include <boost/shared_ptr.hpp>
-#include <boost/enable_shared_from_this.hpp>
 #include <boost/noncopyable.hpp>
-#include <vector>
-#include <string>
 
 #ifdef TORRENT_USE_OPENSSL
 #include <boost/asio/ssl/context.hpp>
 #endif
 
 #include "libtorrent/aux_/disable_warnings_pop.hpp"
+
+#include <functional>
+#include <vector>
+#include <string>
 
 #include "libtorrent/socket.hpp"
 #include "libtorrent/error_code.hpp"
@@ -58,28 +54,27 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/assert.hpp"
 #include "libtorrent/socket_type.hpp"
 #include "libtorrent/session_settings.hpp"
-
 #include "libtorrent/i2p_stream.hpp"
+#include "libtorrent/aux_/vector.hpp"
 
-namespace libtorrent
-{
+namespace libtorrent {
 
 struct http_connection;
 struct resolver_interface;
 
-const int default_max_bottled_buffer_size = 2*1024*1024;
+const int default_max_bottled_buffer_size = 2 * 1024 * 1024;
 
-typedef boost::function<void(error_code const&
+typedef std::function<void(error_code const&
 	, http_parser const&, char const* data, int size, http_connection&)> http_handler;
 
-typedef boost::function<void(http_connection&)> http_connect_handler;
+typedef std::function<void(http_connection&)> http_connect_handler;
 
-typedef boost::function<void(http_connection&, std::vector<tcp::endpoint>&)> http_filter_handler;
+typedef std::function<void(http_connection&, std::vector<tcp::endpoint>&)> http_filter_handler;
 
 // when bottled, the last two arguments to the handler
 // will always be 0
 struct TORRENT_EXTRA_EXPORT http_connection
-	: boost::enable_shared_from_this<http_connection>
+	: std::enable_shared_from_this<http_connection>
 	, boost::noncopyable
 {
 	http_connection(io_service& ios
@@ -142,19 +137,19 @@ private:
 	void on_connect(error_code const& e);
 	void on_write(error_code const& e);
 	void on_read(error_code const& e, std::size_t bytes_transferred);
-	static void on_timeout(boost::weak_ptr<http_connection> p
+	static void on_timeout(std::weak_ptr<http_connection> p
 		, error_code const& e);
 	void on_assign_bandwidth(error_code const& e);
 
-	void callback(error_code e, char* data = NULL, int size = 0);
+	void callback(error_code e, char* data = nullptr, int size = 0);
 
-	std::vector<char> m_recvbuffer;
+	aux::vector<char> m_recvbuffer;
 
 	std::string m_hostname;
 	std::string m_url;
 	std::string m_user_agent;
 
-	std::vector<tcp::endpoint> m_endpoints;
+	aux::vector<tcp::endpoint> m_endpoints;
 
 	// if the current connection attempt fails, we'll connect to the
 	// endpoint with this index (in m_endpoints) next
@@ -222,7 +217,7 @@ private:
 	// used for DNS lookups
 	int m_resolve_flags;
 
-	boost::uint16_t m_port;
+	std::uint16_t m_port;
 
 	// bottled means that the handler is called once, when
 	// everything is received (and buffered in memory).

@@ -37,20 +37,18 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/error_code.hpp"
 #include "libtorrent/broadcast_socket.hpp"
 #include "libtorrent/http_connection.hpp"
-#include "libtorrent/thread.hpp"
 #include "libtorrent/deadline_timer.hpp"
 #include "libtorrent/enum_net.hpp"
 #include "libtorrent/resolver.hpp"
+#include "libtorrent/debug.hpp"
+#include "libtorrent/aux_/portmap.hpp"
+#include "libtorrent/aux_/vector.hpp"
 
-#include <boost/function/function1.hpp>
-#include <boost/function/function5.hpp>
-#include <boost/noncopyable.hpp>
-#include <boost/shared_ptr.hpp>
-#include <boost/enable_shared_from_this.hpp>
+#include <memory>
+#include <functional>
 #include <set>
 
-namespace libtorrent
-{
+namespace libtorrent {
 
 	namespace upnp_errors
 	{
@@ -96,79 +94,66 @@ namespace libtorrent
 	TORRENT_EXPORT boost::system::error_category& upnp_category();
 
 #ifndef TORRENT_NO_DEPRECATED
-	TORRENT_DEPRECATED TORRENT_EXPORT
-	boost::system::error_category& get_upnp_category();
+	TORRENT_DEPRECATED
+	inline boost::system::error_category& get_upnp_category()
+	{ return upnp_category(); }
 #endif
-
-// int: port-mapping index
-// address: external address as queried from router
-// int: external port
-// int: protocol (UDP, TCP)
-// std::string: error message
-// an empty string as error means success
-typedef boost::function<void(int, address, int, int, error_code const&)> portmap_callback_t;
-typedef boost::function<void(char const*)> log_callback_t;
 
 struct parse_state
 {
-	parse_state(): in_service(false) {}
-	bool in_service;
-	std::list<std::string> tag_stack;
+	bool in_service = false;
+	std::vector<string_view> tag_stack;
 	std::string control_url;
 	std::string service_type;
 	std::string model;
 	std::string url_base;
-	bool top_tags(const char* str1, const char* str2)
+	bool top_tags(string_view str1, string_view str2)
 	{
-		std::list<std::string>::reverse_iterator i = tag_stack.rbegin();
+		auto i = tag_stack.rbegin();
 		if (i == tag_stack.rend()) return false;
-		if (!string_equal_no_case(i->c_str(), str2)) return false;
+		if (!string_equal_no_case(*i, str2)) return false;
 		++i;
 		if (i == tag_stack.rend()) return false;
-		if (!string_equal_no_case(i->c_str(), str1)) return false;
+		if (!string_equal_no_case(*i, str1)) return false;
 		return true;
 	}
 };
 
 struct error_code_parse_state
 {
-	error_code_parse_state(): in_error_code(false), exit(false), error_code(-1) {}
-	bool in_error_code;
-	bool exit;
-	int error_code;
+	bool in_error_code = false;
+	bool exit = false;
+	int error_code = -1;
 };
 
 struct ip_address_parse_state: error_code_parse_state
 {
-	ip_address_parse_state(): in_ip_address(false) {}
-	bool in_ip_address;
+	bool in_ip_address = false;
 	std::string ip_address;
 };
 
-TORRENT_EXTRA_EXPORT void find_control_url(int type, char const* string
-	, int str_len, parse_state& state);
+TORRENT_EXTRA_EXPORT void find_control_url(int type, string_view, parse_state& state);
 
-TORRENT_EXTRA_EXPORT void find_error_code(int type, char const* string
-	, int str_len, error_code_parse_state& state);
+TORRENT_EXTRA_EXPORT void find_error_code(int type, string_view string
+	, error_code_parse_state& state);
 
-TORRENT_EXTRA_EXPORT void find_ip_address(int type, char const* string
-	, int str_len, ip_address_parse_state& state);
+TORRENT_EXTRA_EXPORT void find_ip_address(int type, string_view string
+	, ip_address_parse_state& state);
 
 // TODO: support using the windows API for UPnP operations as well
-class TORRENT_EXTRA_EXPORT upnp : public boost::enable_shared_from_this<upnp>
+struct TORRENT_EXTRA_EXPORT upnp final
+	: std::enable_shared_from_this<upnp>
+	, single_threaded
 {
-public:
 	upnp(io_service& ios
-		, address const& listen_interface, std::string const& user_agent
-		, portmap_callback_t const& cb, log_callback_t const& lcb
+		, std::string const& user_agent
+		, aux::portmap_callback& cb
 		, bool ignore_nonrouters);
 	~upnp();
 
 	void set_user_agent(std::string const& v) { m_user_agent = v; }
 
 	void start();
-
-	enum protocol_type { none = 0, udp = 1, tcp = 2 };
 
 	// Attempts to add a port mapping for the specified protocol. Valid protocols are
 	// ``upnp::tcp`` and ``upnp::udp`` for the UPnP class and ``natpmp::tcp`` and
@@ -187,13 +172,14 @@ public:
 	// portmap_alert_ respectively. If The mapping fails immediately, the return value
 	// is -1, which means failure. There will not be any error alert notification for
 	// mappings that fail with a -1 return value.
-	int add_mapping(protocol_type p, int external_port, int local_port);
+	int add_mapping(aux::portmap_protocol p, int external_port, int local_port);
 
 	// This function removes a port mapping. ``mapping_index`` is the index that refers
 	// to the mapping you want to remove, which was returned from add_mapping().
 	void delete_mapping(int mapping_index);
 
-	bool get_mapping(int mapping_index, int& local_port, int& external_port, int& protocol) const;
+	bool get_mapping(int mapping_index, int& local_port, int& external_port
+		, aux::portmap_protocol& protocol) const;
 
 	void discover_device();
 	void close();
@@ -202,17 +188,17 @@ public:
 	// the router, it can be queried through this function.
 	std::string router_model()
 	{
-		mutex::scoped_lock l(m_mutex);
+		TORRENT_ASSERT(is_single_thread());
 		return m_model;
 	}
 
 private:
 
-	boost::shared_ptr<upnp> self() { return shared_from_this(); }
+	std::shared_ptr<upnp> self() { return shared_from_this(); }
 
 	void map_timer(error_code const& ec);
-	void try_map_upnp(mutex::scoped_lock& l, bool timer = false);
-	void discover_device_impl(mutex::scoped_lock& l);
+	void try_map_upnp(bool timer = false);
+	void discover_device_impl();
 	static address_v4 upnp_multicast_address;
 	static udp::endpoint upnp_multicast_endpoint;
 
@@ -227,8 +213,8 @@ private:
 		, std::size_t bytes_transferred);
 
 	struct rootdevice;
-	void next(rootdevice& d, int i, mutex::scoped_lock& l);
-	void update_map(rootdevice& d, int i, mutex::scoped_lock& l);
+	void next(rootdevice& d, int i);
+	void update_map(rootdevice& d, int i);
 
 	void on_upnp_xml(error_code const& e
 		, libtorrent::http_parser const& p, rootdevice& d
@@ -244,85 +230,64 @@ private:
 		, int mapping, http_connection& c);
 	void on_expire(error_code const& e);
 
-	void disable(error_code const& ec, mutex::scoped_lock& l);
-	void return_error(int mapping, int code, mutex::scoped_lock& l);
-	void log(char const* msg, mutex::scoped_lock& l);
+	void disable(error_code const& ec);
+	void return_error(int mapping, int code);
+#ifndef TORRENT_DISABLE_LOGGING
+	bool should_log() const;
+	void log(char const* msg, ...) const TORRENT_FORMAT(2,3);
+#endif
 
 	void get_ip_address(rootdevice& d);
 	void delete_port_mapping(rootdevice& d, int i);
 	void create_port_mapping(http_connection& c, rootdevice& d, int i);
 	void post(upnp::rootdevice const& d, char const* soap
-		, char const* soap_action, mutex::scoped_lock& l);
+		, char const* soap_action);
 
 	int num_mappings() const { return int(m_mappings.size()); }
 
 	struct global_mapping_t
 	{
-		global_mapping_t()
-			: protocol(none)
-			, external_port(0)
-			, local_port(0)
-		{}
-		int protocol;
-		int external_port;
-		int local_port;
+		aux::portmap_protocol protocol = aux::portmap_protocol::none;
+		int external_port = 0;
+		int local_port = 0;
 	};
 
 	struct mapping_t
 	{
-		enum action_t { action_none, action_add, action_delete };
-		mapping_t()
-			: action(action_none)
-			, local_port(0)
-			, external_port(0)
-			, protocol(none)
-			, failcount(0)
-		{}
+		enum class action : std::uint8_t { none, add, del };
 
 		// the time the port mapping will expire
 		time_point expires;
 
-		int action;
+		action act = action::none;
 
 		// the local port for this mapping. If this is set
 		// to 0, the mapping is not in use
-		int local_port;
+		int local_port = 0;
 
 		// the external (on the NAT router) port
 		// for the mapping. This is the port we
 		// should announce to others
-		int external_port;
+		int external_port = 0;
 
 		// 2 = udp, 1 = tcp
-		int protocol;
+		aux::portmap_protocol protocol = aux::portmap_protocol::none;
 
 		// the number of times this mapping has failed
-		int failcount;
+		int failcount = 0;
 	};
 
 	struct rootdevice
 	{
-		rootdevice(): port(0)
-			, lease_duration(default_lease_time)
-			, supports_specific_external(true)
-			, disabled(false)
-			, non_router(false)
-		{
 #if TORRENT_USE_ASSERTS
-			magic = 1337;
-#endif
-		}
-
-#if TORRENT_USE_ASSERTS
+		rootdevice() {}
 		~rootdevice()
 		{
 			TORRENT_ASSERT(magic == 1337);
 			magic = 0;
 		}
-#if __cplusplus >= 201103L
 		rootdevice(rootdevice const&) = default;
 		rootdevice& operator=(rootdevice const&) = default;
-#endif
 #endif
 
 		// the interface url, through which the list of
@@ -334,34 +299,35 @@ private:
 		// either the WANIP namespace or the WANPPP namespace
 		std::string service_namespace;
 
-		std::vector<mapping_t> mapping;
+		aux::vector<mapping_t> mapping;
 
 		// this is the hostname, port and path
 		// component of the url or the control_url
 		// if it has been found
 		std::string hostname;
-		int port;
+		int port = 0;
 		std::string path;
 		address external_ip;
 
-		int lease_duration;
+		int lease_duration = default_lease_time;
+
 		// true if the device supports specifying a
 		// specific external port, false if it doesn't
-		bool supports_specific_external;
+		bool supports_specific_external = true;
 
-		bool disabled;
+		bool disabled = false;
 
 		// this is true if the IP of this device is not
 		// one of our default routes. i.e. it may be someone
 		// else's router, we just happen to have multicast
 		// enabled across networks
 		// this is only relevant if ignore_non_routers is set.
-		bool non_router;
+		bool non_router = false;
 
-		mutable boost::shared_ptr<http_connection> upnp_connection;
+		mutable std::shared_ptr<http_connection> upnp_connection;
 
 #if TORRENT_USE_ASSERTS
-		int magic;
+		int magic = 1337;
 #endif
 		void close() const
 		{
@@ -381,15 +347,14 @@ private:
 		std::set<rootdevice> devices;
 	};
 
-	std::vector<global_mapping_t> m_mappings;
+	aux::vector<global_mapping_t> m_mappings;
 
 	std::string m_user_agent;
 
 	// the set of devices we've found
 	std::set<rootdevice> m_devices;
 
-	portmap_callback_t m_callback;
-	log_callback_t m_log_callback;
+	aux::portmap_callback& m_callback;
 
 	// current retry count
 	int m_retry_count;
@@ -420,8 +385,6 @@ private:
 	bool m_closing;
 	bool m_ignore_non_routers;
 
-	mutex m_mutex;
-
 	std::string m_model;
 
 	// cache of interfaces
@@ -439,4 +402,3 @@ namespace boost { namespace system {
 } }
 
 #endif
-

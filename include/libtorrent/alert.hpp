@@ -33,38 +33,25 @@ POSSIBILITY OF SUCH DAMAGE.
 #ifndef TORRENT_ALERT_HPP_INCLUDED
 #define TORRENT_ALERT_HPP_INCLUDED
 
-#include <memory>
-#include <deque>
 #include <string>
-#include <vector>
-
-#include "libtorrent/aux_/disable_warnings_push.hpp"
-
-#include <boost/preprocessor/repetition/enum_params_with_a_default.hpp>
-#include <boost/preprocessor/repetition/enum.hpp>
-#include <boost/preprocessor/repetition/enum_params.hpp>
-#include <boost/preprocessor/repetition/enum_shifted_params.hpp>
-#include <boost/preprocessor/repetition/enum_shifted_binary_params.hpp>
-
-#include "libtorrent/aux_/disable_warnings_pop.hpp"
 
 // OVERVIEW
 //
 // The pop_alerts() function on session is the main interface for retrieving
 // alerts (warnings, messages and errors from libtorrent). If no alerts have
 // been posted by libtorrent pop_alerts() will return an empty list.
-// 
+//
 // By default, only errors are reported. settings_pack::alert_mask can be
 // used to specify which kinds of events should be reported. The alert mask is
 // comprised by bits from the category_t enum.
-// 
+//
 // Every alert belongs to one or more category. There is a cost associated with
 // posting alerts. Only alerts that belong to an enabled category are
 // posted. Setting the alert bitmask to 0 will disable all alerts (except those
 // that are non-discardable). Alerts that are responses to API calls such as
 // save_resume_data() and post_session_stats() are non-discardable and will be
 // posted even if their category is disabled.
-// 
+//
 // There are other alert base classes that some alerts derive from, all the
 // alerts that are generated for a specific torrent are derived from
 // torrent_alert, and tracker events derive from tracker_alert.
@@ -87,6 +74,10 @@ namespace libtorrent {
 	{
 	public:
 
+		alert(alert const& rhs) = delete;
+		alert& operator=(alert const&) = delete;
+		alert(alert&& rhs) = default;
+
 #ifndef TORRENT_NO_DEPRECATE
 		// only here for backwards compatibility
 		enum TORRENT_DEPRECATED severity_t { debug, info, warning, critical, fatal, none };
@@ -97,7 +88,7 @@ namespace libtorrent {
 		enum category_t
 		{
 			// Enables alerts that report an error. This includes:
-			// 
+			//
 			// * tracker errors
 			// * tracker warnings
 			// * file errors
@@ -152,7 +143,7 @@ namespace libtorrent {
 
 #ifndef TORRENT_NO_DEPRECATE
 			// Alerts on RSS related events, like feeds being updated, feed error
-			// conditions and successful RSS feed updates. Enabling this categoty
+			// conditions and successful RSS feed updates. Enabling this category
 			// will make you receive rss_alert alerts.
 			rss_notification TORRENT_DEPRECATED_ENUM = 0x1000,
 #endif
@@ -211,7 +202,7 @@ namespace libtorrent {
 		// compared against a specific alert by querying a static constant called ``alert_type``
 		// in the alert. It can be used to determine the run-time type of an alert* in
 		// order to cast to that alert type and access specific members.
-		// 
+		//
 		// e.g:
 		//
 		// .. code:: c++
@@ -220,7 +211,7 @@ namespace libtorrent {
 		//	ses.pop_alerts(&alerts);
 		//	for (alert* i : alerts) {
 		//		switch (a->type()) {
-		// 
+		//
 		//			case read_piece_alert::alert_type:
 		//			{
 		//				read_piece_alert* p = (read_piece_alert*)a;
@@ -266,54 +257,42 @@ namespace libtorrent {
 		TORRENT_DEPRECATED
 		severity_t severity() const { return warning; }
 
-		// returns a pointer to a copy of the alert.
-		TORRENT_DEPRECATED
-		std::auto_ptr<alert> clone() const { return clone_impl(); }
-
 	protected:
 
 		virtual bool discardable_impl() const { return true; }
-
-		virtual std::auto_ptr<alert> clone_impl() const = 0;
 
 #include "libtorrent/aux_/disable_warnings_pop.hpp"
 
 #endif // TORRENT_NO_DEPRECATE
 
-	protected:
-		// the alert is not copyable (but for backwards compatibility reasons it
-		// retains the ability to clone itself, for now).
-#if __cplusplus >= 201103L
-		alert(alert const& rhs) = default;
-#endif
-
 	private:
-		// explicitly disallow assignment and copyconstruction
-		alert& operator=(alert const&);
-
-		time_point m_timestamp;
+		time_point const m_timestamp;
 	};
 
 // When you get an alert, you can use ``alert_cast<>`` to attempt to cast the
 // pointer to a specific alert type, in order to query it for more
 // information.
-// 
+//
 // .. note::
 //   ``alert_cast<>`` can only cast to an exact alert type, not a base class
 template <class T> T* alert_cast(alert* a)
 {
-	if (a == 0) return 0;
+	static_assert(std::is_base_of<alert, T>::value
+		, "alert_cast<> can only be used with alert types (deriving from libtorrent::alert)");
+
+	if (a == nullptr) return nullptr;
 	if (a->type() == T::alert_type) return static_cast<T*>(a);
-	return 0;
+	return nullptr;
 }
 template <class T> T const* alert_cast(alert const* a)
 {
-	if (a == 0) return 0;
+	static_assert(std::is_base_of<alert, T>::value
+		, "alert_cast<> can only be used with alert types (deriving from libtorrent::alert)");
+	if (a == nullptr) return nullptr;
 	if (a->type() == T::alert_type) return static_cast<T const*>(a);
-	return 0;
+	return nullptr;
 }
 
 } // namespace libtorrent
 
 #endif // TORRENT_ALERT_HPP_INCLUDED
-

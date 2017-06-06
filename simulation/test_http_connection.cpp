@@ -42,9 +42,13 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/http_connection.hpp"
 #include "libtorrent/resolver.hpp"
 #include "libtorrent/io.hpp"
+
 #include "make_proxy_settings.hpp"
 
+#include <iostream>
+#include "libtorrent/aux_/disable_warnings_push.hpp"
 #include <boost/crc.hpp>
+#include "libtorrent/aux_/disable_warnings_pop.hpp"
 
 using namespace libtorrent;
 using namespace sim;
@@ -59,7 +63,7 @@ struct sim_config : sim::default_config
 		asio::ip::address const& requestor
 		, std::string hostname
 		, std::vector<asio::ip::address>& result
-		, boost::system::error_code& ec)
+		, boost::system::error_code& ec) override
 	{
 		if (hostname == "try-next.com")
 		{
@@ -96,7 +100,7 @@ std::string chunk_string(std::string s)
 	{
 		i = std::min(i, s.size());
 		char header[50];
-		snprintf(header, sizeof(header), "%x\r\n", int(i));
+		std::snprintf(header, sizeof(header), "%x\r\n", int(i));
 		ret += header;
 		ret += s.substr(0, i);
 		s.erase(s.begin(), s.begin() + i);
@@ -106,7 +110,7 @@ std::string chunk_string(std::string s)
 	return ret;
 }
 
-boost::shared_ptr<http_connection> test_request(io_service& ios
+std::shared_ptr<http_connection> test_request(io_service& ios
 	, resolver& res
 	, std::string const& url
 	, char const* expected_data
@@ -118,14 +122,14 @@ boost::shared_ptr<http_connection> test_request(io_service& ios
 	, int* handler_called
 	, std::string const& auth = std::string())
 {
-	fprintf(stdout, " ===== TESTING: %s =====\n", url.c_str());
+	std::printf(" ===== TESTING: %s =====\n", url.c_str());
 
-	auto h = boost::make_shared<http_connection>(ios
+	auto h = std::make_shared<http_connection>(ios
 		, res
 		, [=](error_code const& ec, http_parser const& parser
-			, char const* data, const int size, http_connection& c)
+			, char const* data, const int size, http_connection&)
 		{
-			printf("RESPONSE: %s\n", url.c_str());
+			std::printf("RESPONSE: %s\n", url.c_str());
 			++*handler_called;
 
 			// this is pretty gross. Since boost.asio is a header-only library, when this test is
@@ -138,7 +142,7 @@ boost::shared_ptr<http_connection> test_request(io_service& ios
 
 			if (!error_ok)
 			{
-				printf("ERROR: %s (expected: %s)\n"
+				std::printf("ERROR: %s (expected: %s)\n"
 					, ec.message().c_str()
 					, expected_error.message().c_str());
 			}
@@ -165,7 +169,7 @@ boost::shared_ptr<http_connection> test_request(io_service& ios
 		{
 			++*connect_handler_called;
 			TEST_CHECK(c.socket().is_open());
-			printf("CONNECTED: %s\n", url.c_str());
+			std::printf("CONNECTED: %s\n", url.c_str());
 		});
 
 	h->get(url, seconds(1), 0, &ps, 5, "test/user-agent", address_v4::any()
@@ -178,7 +182,7 @@ void print_http_header(std::map<std::string, std::string> const& headers)
 	for (std::map<std::string, std::string>::const_iterator i
 		= headers.begin(), end(headers.end()); i != end; ++i)
 	{
-		printf("%s: %s\n", i->first.c_str(), i->second.c_str());
+		std::printf("%s: %s\n", i->first.c_str(), i->second.c_str());
 	}
 }
 
@@ -341,7 +345,7 @@ void run_test(lt::aux::proxy_settings ps, std::string url, int expect_size, int 
 		unsigned char trailer[8] = { 0, 0, 0, 0, 0x39, 0x05, 0x00, 0x00 };
 		boost::crc_32_type crc;
 		crc.process_bytes(data_buffer, 1337);
-		boost::uint32_t checksum = crc.checksum();
+		std::uint32_t checksum = crc.checksum();
 		trailer[0] = checksum >> 24;
 		trailer[1] = (checksum >> 16) & 0xff;
 		trailer[2] = (checksum >> 8) & 0xff;
@@ -357,7 +361,7 @@ void run_test(lt::aux::proxy_settings ps, std::string url, int expect_size, int 
 
 	http.register_handler("/redirect"
 		, [&data_buffer,&counters](std::string method, std::string req
-		, std::map<std::string, std::string>& headers)
+		, std::map<std::string, std::string>&)
 	{
 		++counters[redirect_req];
 		TEST_EQUAL(method, "GET");
@@ -368,7 +372,7 @@ void run_test(lt::aux::proxy_settings ps, std::string url, int expect_size, int 
 
 	http.register_handler("/relative/redirect"
 		, [&data_buffer,&counters](std::string method, std::string req
-		, std::map<std::string, std::string>& headers)
+		, std::map<std::string, std::string>&)
 	{
 		++counters[rel_redirect_req];
 		TEST_EQUAL(method, "GET");
@@ -379,7 +383,7 @@ void run_test(lt::aux::proxy_settings ps, std::string url, int expect_size, int 
 
 	http.register_handler("/infinite/redirect"
 		, [&data_buffer,&counters](std::string method, std::string req
-		, std::map<std::string, std::string>& headers)
+		, std::map<std::string, std::string>&)
 	{
 		++counters[inf_redirect_req];
 		TEST_EQUAL(method, "GET");
@@ -401,7 +405,7 @@ void run_test(lt::aux::proxy_settings ps, std::string url, int expect_size, int 
 	TEST_EQUAL(counters.size(), expect_counters.size());
 	for (int i = 0; i < int(counters.size()); ++i)
 	{
-		if (counters[i] != expect_counters[i]) fprintf(stdout, "i=%d\n", i);
+		if (counters[i] != expect_counters[i]) std::printf("i=%d\n", i);
 		TEST_EQUAL(counters[i], expect_counters[i]);
 	}
 }
@@ -460,7 +464,8 @@ void test_proxy_failure(lt::settings_pack::proxy_type_t proxy_type)
 		, std::map<std::string, std::string>& headers)
 	{
 		print_http_header(headers);
-		TEST_CHECK(false && "we're not supposed to get here!");
+		// we're not supposed to get here
+		TEST_CHECK(false);
 		return sim::send_response(200, "OK", 1337).append(data_buffer, 1337);
 	});
 

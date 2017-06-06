@@ -10,6 +10,12 @@
 using namespace boost::python;
 using namespace libtorrent;
 
+#ifdef _MSC_VER
+#pragma warning(push)
+// warning C4996: X: was declared deprecated
+#pragma warning( disable : 4996 )
+#endif
+
 struct bytes_to_python
 {
     static PyObject* convert(bytes const& p)
@@ -36,7 +42,7 @@ struct bytes_from_python
 #if PY_MAJOR_VERSION >= 3
         return PyBytes_Check(x) ? x : NULL;
 #else
-        return PyString_Check(x) ? x : NULL;
+        return PyString_Check(x) ? x : nullptr;
 #endif
     }
 
@@ -91,4 +97,8 @@ void bind_utility()
     def("bdecode", &bdecode_);
     def("bencode", &bencode_);
 }
+
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
 

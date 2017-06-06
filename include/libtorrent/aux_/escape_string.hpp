@@ -36,9 +36,10 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <string>
 #include "libtorrent/config.hpp"
 #include "libtorrent/error_code.hpp"
+#include "libtorrent/string_view.hpp"
 
-namespace libtorrent
-{
+namespace libtorrent {
+
 	namespace string
 	{
 		enum flags_t
@@ -52,30 +53,39 @@ namespace libtorrent
 		};
 
 	}
-	TORRENT_EXTRA_EXPORT std::string unescape_string(std::string const& s, error_code& ec);
+
+	TORRENT_EXTRA_EXPORT std::string unescape_string(string_view s, error_code& ec);
 	// replaces all disallowed URL characters by their %-encoding
-	TORRENT_EXTRA_EXPORT std::string escape_string(const char* str, int len);
+	TORRENT_EXTRA_EXPORT std::string escape_string(string_view str);
 	// same as escape_string but does not encode '/'
-	TORRENT_EXTRA_EXPORT std::string escape_path(const char* str, int len);
+	TORRENT_EXTRA_EXPORT std::string escape_path(string_view str);
 	// if the url does not appear to be encoded, and it contains illegal url characters
 	// it will be encoded
 	TORRENT_EXTRA_EXPORT std::string maybe_url_encode(std::string const& url);
 
+	TORRENT_EXTRA_EXPORT string_view trim(string_view);
+	TORRENT_EXTRA_EXPORT string_view::size_type find(string_view haystack, string_view needle, string_view::size_type pos);
+
+#ifndef TORRENT_NO_DEPRECATE
+	// deprecated in 1.2
 	// convert a file://-URL to a proper path
 	TORRENT_EXTRA_EXPORT std::string resolve_file_url(std::string const& url);
+#endif
 
-	// returns true if the given string (not null terminated) contains
+	// returns true if the given string (not 0-terminated) contains
 	// characters that would need to be escaped if used in a URL
 	TORRENT_EXTRA_EXPORT bool need_encoding(char const* str, int len);
 
 	// encodes a string using the base64 scheme
 	TORRENT_EXTRA_EXPORT std::string base64encode(std::string const& s);
+#if TORRENT_USE_I2P
 	// encodes a string using the base32 scheme
-	TORRENT_EXTRA_EXPORT std::string base32encode(std::string const& s, int flags=0);
-	TORRENT_EXTRA_EXPORT std::string base32decode(std::string const& s);
+	TORRENT_EXTRA_EXPORT std::string base32encode(string_view s, int flags = 0);
+#endif
+	TORRENT_EXTRA_EXPORT std::string base32decode(string_view s);
 
-	TORRENT_EXTRA_EXPORT std::string url_has_argument(
-		std::string const& url, std::string argument, std::string::size_type* out_pos = 0);
+	TORRENT_EXTRA_EXPORT string_view url_has_argument(
+		string_view url, std::string argument, std::string::size_type* out_pos = 0);
 
 	// replaces \ with /
 	TORRENT_EXTRA_EXPORT void convert_path_to_posix(std::string& path);
@@ -90,7 +100,7 @@ namespace libtorrent
 	TORRENT_EXTRA_EXPORT std::wstring convert_to_wstring(std::string const& s);
 	TORRENT_EXTRA_EXPORT std::string convert_from_wstring(std::wstring const& s);
 #endif
-	
+
 #if TORRENT_USE_ICONV || TORRENT_USE_LOCALE || defined TORRENT_WINDOWS
 	TORRENT_EXTRA_EXPORT std::string convert_to_native(std::string const& s);
 	TORRENT_EXTRA_EXPORT std::string convert_from_native(std::string const& s);
@@ -99,8 +109,7 @@ namespace libtorrent
 	inline std::string const& convert_to_native(std::string const& s) { return s; }
 	// internal
 	inline std::string const& convert_from_native(std::string const& s) { return s; }
-#endif		
+#endif
 }
 
 #endif // TORRENT_ESCAPE_STRING_HPP_INCLUDED
-
