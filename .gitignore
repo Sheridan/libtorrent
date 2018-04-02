@@ -68,3 +68,4 @@ dist
 *.egg-info
 
 CMakeLists.txt.user
+.vscode
