@@ -37,21 +37,21 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/config.hpp"
 #include "libtorrent/error_code.hpp"
 #include "libtorrent/string_view.hpp"
+#include "libtorrent/flags.hpp"
 
 namespace libtorrent {
 
+	// hidden
+	using encode_string_flags_t = flags::bitfield_flag<std::uint8_t, struct encode_string_flags_tag>;
+
 	namespace string
 	{
-		enum flags_t
-		{
-			// use lower case alphabet used with i2p
-			lowercase = 0x1,
-			// don't insert padding
-			no_padding = 0x2,
-			// shortcut used for addresses as sha256 hashes
-			i2p = lowercase | no_padding
-		};
-
+		// use lower case alphabet used with i2p
+		constexpr encode_string_flags_t lowercase = 0_bit;
+		// don't insert padding
+		constexpr encode_string_flags_t no_padding = 1_bit;
+		// shortcut used for addresses as sha256 hashes
+		constexpr encode_string_flags_t i2p = lowercase | no_padding;
 	}
 
 	TORRENT_EXTRA_EXPORT std::string unescape_string(string_view s, error_code& ec);
@@ -80,12 +80,12 @@ namespace libtorrent {
 	TORRENT_EXTRA_EXPORT std::string base64encode(std::string const& s);
 #if TORRENT_USE_I2P
 	// encodes a string using the base32 scheme
-	TORRENT_EXTRA_EXPORT std::string base32encode(string_view s, int flags = 0);
+	TORRENT_EXTRA_EXPORT std::string base32encode(string_view s, encode_string_flags_t flags = {});
 #endif
 	TORRENT_EXTRA_EXPORT std::string base32decode(string_view s);
 
 	TORRENT_EXTRA_EXPORT string_view url_has_argument(
-		string_view url, std::string argument, std::string::size_type* out_pos = 0);
+		string_view url, std::string argument, std::string::size_type* out_pos = nullptr);
 
 	// replaces \ with /
 	TORRENT_EXTRA_EXPORT void convert_path_to_posix(std::string& path);
@@ -96,7 +96,7 @@ namespace libtorrent {
 	TORRENT_EXTRA_EXPORT std::string read_until(char const*& str, char delim
 		, char const* end);
 
-#if defined TORRENT_WINDOWS && TORRENT_USE_WSTRING
+#if defined TORRENT_WINDOWS
 	TORRENT_EXTRA_EXPORT std::wstring convert_to_wstring(std::string const& s);
 	TORRENT_EXTRA_EXPORT std::string convert_from_wstring(std::wstring const& s);
 #endif

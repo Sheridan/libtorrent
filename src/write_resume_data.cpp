@@ -68,10 +68,10 @@ namespace libtorrent {
 		ret["num_incomplete"] = atp.num_incomplete;
 		ret["num_downloaded"] = atp.num_downloaded;
 
-		ret["sequential_download"] = atp.flags & add_torrent_params::flag_sequential_download;
+		ret["sequential_download"] = bool(atp.flags & torrent_flags::sequential_download);
 
-		ret["seed_mode"] = atp.flags & add_torrent_params::flag_seed_mode;
-		ret["super_seeding"] = atp.flags & add_torrent_params::flag_super_seeding;
+		ret["seed_mode"] = bool(atp.flags & torrent_flags::seed_mode);
+		ret["super_seeding"] = bool(atp.flags & torrent_flags::super_seeding);
 
 		ret["added_time"] = atp.added_time;
 		ret["completed_time"] = atp.completed_time;
@@ -88,7 +88,7 @@ namespace libtorrent {
 
 		if (atp.ti)
 		{
-			boost::shared_array<char> const info = atp.ti->metadata();
+			auto const info = atp.ti->metadata();
 			int const size = atp.ti->metadata_size();
 			ret["info"].preformatted().assign(&info[0], &info[0] + size);
 		}
@@ -106,6 +106,7 @@ namespace libtorrent {
 		if (!atp.unfinished_pieces.empty())
 		{
 			entry::list_type& up = ret["unfinished"].list();
+			up.reserve(atp.unfinished_pieces.size());
 
 			// info for each unfinished piece
 			for (auto const& p : atp.unfinished_pieces)
@@ -115,7 +116,7 @@ namespace libtorrent {
 				// the unfinished piece's index
 				piece_struct["piece"] = static_cast<int>(p.first);
 				std::string& bitmask = piece_struct["bitmask"].string();
-				for (auto bit : p.second)
+				for (auto const bit : p.second)
 					bitmask.push_back(bit ? '1' : '0');
 				// push the struct onto the unfinished-piece list
 				up.push_back(std::move(piece_struct));
@@ -126,7 +127,7 @@ namespace libtorrent {
 		if (!atp.trackers.empty())
 		{
 			entry::list_type& tr_list = ret["trackers"].list();
-			tr_list.push_back(entry::list_type());
+			tr_list.emplace_back(entry::list_type());
 			std::size_t tier = 0;
 			auto tier_it = atp.tracker_tiers.begin();
 			for (std::string const& tr : atp.trackers)
@@ -137,7 +138,7 @@ namespace libtorrent {
 				if (tr_list.size() <= tier)
 					tr_list.resize(tier + 1);
 
-				tr_list[tier].list().push_back(tr);
+				tr_list[tier].list().emplace_back(tr);
 			}
 		}
 
@@ -195,7 +196,7 @@ namespace libtorrent {
 			for (auto const& p : atp.peers)
 			{
 #if TORRENT_USE_IPV6
-				if (p.address().is_v6())
+				if (is_v6(p))
 					write_endpoint(p, ptr6);
 				else
 #endif
@@ -212,7 +213,7 @@ namespace libtorrent {
 			for (auto const& p : atp.banned_peers)
 			{
 #if TORRENT_USE_IPV6
-				if (p.address().is_v6())
+				if (is_v6(p))
 					write_endpoint(p, ptr6);
 				else
 #endif
@@ -224,23 +225,25 @@ namespace libtorrent {
 		ret["download_rate_limit"] = atp.download_limit;
 		ret["max_connections"] = atp.max_connections;
 		ret["max_uploads"] = atp.upload_limit;
-		ret["paused"] = atp.flags & add_torrent_params::flag_paused;
-		ret["auto_managed"] = atp.flags & add_torrent_params::flag_auto_managed;
+		ret["paused"] = bool(atp.flags & torrent_flags::paused);
+		ret["auto_managed"] = bool(atp.flags & torrent_flags::auto_managed);
 
 		if (!atp.file_priorities.empty())
 		{
 			// write file priorities
 			entry::list_type& prio = ret["file_priority"].list();
+			prio.reserve(atp.file_priorities.size());
 			for (auto const p : atp.file_priorities)
-				prio.push_back(p);
+				prio.emplace_back(static_cast<std::uint8_t>(p));
 		}
 
 		if (!atp.piece_priorities.empty())
 		{
 			// write piece priorities
 			entry::string_type& prio = ret["piece_priority"].string();
+			prio.reserve(atp.piece_priorities.size());
 			for (auto const p : atp.piece_priorities)
-				prio.push_back(static_cast<char>(p));
+				prio.push_back(static_cast<char>(static_cast<std::uint8_t>(p)));
 		}
 
 		return ret;
@@ -254,4 +257,3 @@ namespace libtorrent {
 		return ret;
 	}
 }
-

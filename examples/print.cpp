@@ -128,13 +128,13 @@ std::string const& progress_bar(int progress, int width, color_code c
 	return bar;
 }
 
-int get_piece(libtorrent::bitfield const& p, int index)
+int get_piece(lt::bitfield const& p, int index)
 {
 	if (index < 0 || index >= p.size()) return 0;
 	return p.get_bit(index) ? 1 : 0;
 }
 
-std::string const& piece_bar(libtorrent::bitfield const& p, int width)
+std::string const& piece_bar(lt::bitfield const& p, int width)
 {
 #ifdef _WIN32
 	int const table_size = 5;
@@ -207,7 +207,7 @@ std::string const& piece_bar(libtorrent::bitfield const& p, int width)
 // this function uses the block characters that splits up the glyph in 4
 // segments and provide all combinations of a segment lit or not. This allows us
 // to print 4 pieces per character.
-std::string piece_matrix(libtorrent::bitfield const& p, int width, int* height)
+std::string piece_matrix(lt::bitfield const& p, int width, int* height)
 {
 	// print two rows of pieces at a time
 	int piece = 0;
@@ -248,7 +248,7 @@ std::string piece_matrix(libtorrent::bitfield const& p, int width, int* height)
 			ret += chars[c];
 			piece += 2;
 		}
-		ret += '\n';
+		ret += "\x1b[K\n";
 		++*height;
 		piece += width * 2; // skip another row, as we've already printed it
 	}
@@ -257,7 +257,7 @@ std::string piece_matrix(libtorrent::bitfield const& p, int width, int* height)
 #else
 // on MS-DOS terminals, we only have block characters for upper half and lower
 // half. This lets us print two pieces per character.
-std::string piece_matrix(libtorrent::bitfield const& p, int width, int* height)
+std::string piece_matrix(lt::bitfield const& p, int width, int* height)
 {
 	// print two rows of pieces at a time
 	int piece = 0;
@@ -340,42 +340,45 @@ void clear_rows(int y1, int y2)
 #endif
 }
 
-void terminal_size(int* terminal_width, int* terminal_height)
+std::pair<int, int> terminal_size()
 {
+	int width = 80;
+	int height = 50;
 #ifdef _WIN32
 	HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
 	CONSOLE_SCREEN_BUFFER_INFO coninfo;
 	if (GetConsoleScreenBufferInfo(out, &coninfo))
 	{
-		*terminal_width = coninfo.dwSize.X;
-		*terminal_height = coninfo.srWindow.Bottom - coninfo.srWindow.Top;
+		width = coninfo.dwSize.X;
+		height = coninfo.srWindow.Bottom - coninfo.srWindow.Top;
 #else
 	int tty = open("/dev/tty", O_RDONLY);
 	if (tty < 0)
 	{
-		*terminal_width = 190;
-		*terminal_height = 100;
-		return;
+		width = 190;
+		height = 100;
+		return {width, height};
 	}
 	winsize size;
 	int ret = ioctl(tty, TIOCGWINSZ, reinterpret_cast<char*>(&size));
 	close(tty);
 	if (ret == 0)
 	{
-		*terminal_width = size.ws_col;
-		*terminal_height = size.ws_row;
+		width = size.ws_col;
+		height = size.ws_row;
 #endif
 
-		if (*terminal_width < 64)
-			*terminal_width = 64;
-		if (*terminal_height < 25)
-			*terminal_height = 25;
+		if (width < 64)
+			width = 64;
+		if (height < 25)
+			height = 25;
 	}
 	else
 	{
-		*terminal_width = 190;
-		*terminal_height = 100;
+		width = 190;
+		height = 100;
 	}
+	return {width, height};
 }
 
 #ifdef _WIN32

@@ -89,6 +89,28 @@ AS_ECHO "Initializing Libtool:"
 LT_PREREQ([2.2.6])
 LT_INIT
 
+AS_IF([test "$SYS" = linux],[
+    AC_PREPROC_IFELSE([AC_LANG_PROGRAM(
+        [[#ifndef __ANDROID__
+         # error Not Android
+         #endif
+        ]],[[;]])
+    ],[
+      HAVE_ANDROID="1"
+      AC_MSG_RESULT([yes])
+    ],[
+      AC_MSG_RESULT([no])
+    ])
+])
+AM_CONDITIONAL(HAVE_ANDROID, test "${HAVE_ANDROID}" = "1")
+
+HAVE_WINDOWS=0
+case "${host_os}" in
+    *mingw32* | *cygwin*)
+        HAVE_WINDOWS=1
+        ;;
+esac
+AM_CONDITIONAL(HAVE_WINDOWS, test "${HAVE_WINDOWS}" = "1")
 
 ###############################################################################
 # Checking for needed base libraries
@@ -102,7 +124,7 @@ AX_PTHREAD()
 LIBS="$PTHREAD_LIBS $LIBS"
 CFLAGS="$PTHREAD_CFLAGS $CFLAGS"
 CC="$PTHREAD_CC"
-CXXFLAGS="$CXXFLAGS -ftemplate-depth=128 -Wno-format-zero-length"
+CXXFLAGS="$CXXFLAGS -ftemplate-depth=512 -Wno-format-zero-length"
 
 AS_ECHO "Checking for visibility support:"
 AC_CACHE_CHECK([for __attribute__((visibility("hidden")))],
@@ -123,8 +145,6 @@ AS_ECHO "Checking for boost libraries:"
 AX_BOOST_BASE([1.54])
 
 AX_CXX_COMPILE_STDCXX_11([noext], [mandatory])
-# Also put any flags added to CXX into CXXFLAGS
-CXXFLAGS="$CXXFLAGS $(echo "$CXX " | cut -d ' ' -f 2-)"
 
 AX_BOOST_SYSTEM()
 AS_IF([test -z "$BOOST_SYSTEM_LIB"],
@@ -171,7 +191,7 @@ AC_ARG_ENABLE(
   [logging],
   [AS_HELP_STRING(
     [--enable-logging],
-    [enable logging support, enabled by alert mask [default=yes]])],
+    [enable logging alerts [default=yes]])],
   [[ARG_ENABLE_LOGGING=$enableval]],
   [[ARG_ENABLE_LOGGING=yes]]
 )
@@ -216,15 +236,6 @@ AC_ARG_ENABLE(
     [export all symbols from libtorrent, including non-public ones [default=no]])],
   [[ARG_ENABLE_FULL_EXPORT=$enableval]],
   [[ARG_ENABLE_FULL_EXPORT=no]]
-)
-
-AC_ARG_ENABLE(
-  [pool-allocators],
-  [AS_HELP_STRING(
-    [--enable-pool-allocators],
-    [enable pool allocators for send buffers [default=yes]])],
-  [[ARG_ENABLE_POOL_ALLOC=$enableval]],
-  [[ARG_ENABLE_POOL_ALLOC=yes]]
 )
 
 AC_ARG_ENABLE(
@@ -350,7 +361,7 @@ AS_CASE(["$ARG_ENABLE_LOGGING"],
     ],
   ["no"|"none"], [
       AC_MSG_RESULT([no])
-      AC_DEFINE([TORRENT_DISABLE_LOGGING],[1],[Define to enable support for logging alerts])
+      AC_DEFINE([TORRENT_DISABLE_LOGGING],[1],[Define to disable support for logging alerts])
       COMPILETIME_OPTIONS="$COMPILETIME_OPTIONS -DTORRENT_DISABLE_LOGGING "
     ],
   [AC_MSG_RESULT([$ARG_ENABLE_LOGGING])
@@ -394,20 +405,7 @@ AS_CASE(["$ARG_ENABLE_DHT"],
       COMPILETIME_OPTIONS="$COMPILETIME_OPTIONS -DTORRENT_DISABLE_DHT "
     ],
   [AC_MSG_RESULT([$ARG_ENABLE_DHT])
-   AC_MSG_ERROR([Unknown option "$ARG_ENABLE_DHT". Use either "yes", "no" or "logging".])]
-)
-
-AC_MSG_CHECKING([whether pool allocators should be enabled])
-AS_CASE(["$ARG_ENABLE_POOL_ALLOC"],
-  ["yes"|"on"], [
-      AC_MSG_RESULT([yes])
-    ],
-  ["no"|"off"], [
-      AC_MSG_RESULT([no])
-      AC_DEFINE([TORRENT_DISABLE_POOL_ALLOCATOR],[1],[Define to disable use of boost::pool for pool allocators.])
-    ],
-  [AC_MSG_RESULT([$ARG_ENABLE_POOL_ALLOC])
-   AC_MSG_ERROR([Unknown option "$ARG_ENABLE_POOL_ALLOC". Use either "yes" or "no".])]
+   AC_MSG_ERROR([Unknown option "$ARG_ENABLE_DHT". Use either "yes" or "no".])]
 )
 
 AS_IF([test "x$ac_cv_hidden_visibility_attribute" = "xyes"], [
@@ -471,7 +469,7 @@ AS_CASE(["$ARG_WITH_LIBICONV"],
       AC_MSG_RESULT([yes])
       AM_ICONV()
       AS_IF([test "x$am_cv_func_iconv" = "xyes"], [
-           ICONV_LIBS=$LTLIBICONV
+           ICONV_LIBS=$LIBICONV
            AC_SUBST([ICONV_LIBS])
            LIBS="$ICONV_LIBS $LIBS"
       ], [
@@ -552,6 +550,7 @@ AC_CONFIG_FILES(
   [bindings/python/Makefile]
   [bindings/python/link_flags]
   [bindings/python/compile_flags]
+  [bindings/python/compile_cmd]
   [libtorrent-rasterbar.pc]
   [libtorrent-rasterbar-cmake.pc]
 )
@@ -593,12 +592,11 @@ Build options:
   deprecated functions: ${ARG_ENABLE_DEPRECATED:-yes}
   debug build:          ${ARG_ENABLE_DEBUG:-no}
   invariant checks:     ${ARG_ENABLE_INVARIANT:-no}
-  logging support:      ${ARG_ENABLE_LOGGING:-no}
+  logging support:      ${ARG_ENABLE_LOGGING:-yes}
 
 Features:
   encryption support:   ${ARG_ENABLE_ENCRYPTION:-yes}
   dht support:          ${ARG_ENABLE_DHT:-yes}
-  pool allocators:      ${ARG_ENABLE_POOL_ALLOC:-yes}
 
 Extra builds:
   examples:             ${ARG_ENABLE_EXAMPLES:-no}

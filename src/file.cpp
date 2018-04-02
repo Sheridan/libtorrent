@@ -30,6 +30,7 @@ POSSIBILITY OF SUCH DAMAGE.
 
 */
 
+#include "libtorrent/config.hpp"
 #include "libtorrent/aux_/disable_warnings_push.hpp"
 
 #ifdef __GNUC__
@@ -49,6 +50,18 @@ POSSIBILITY OF SUCH DAMAGE.
 #define _FILE_OFFSET_BITS 64
 #define _LARGE_FILES 1
 
+#ifndef TORRENT_WINDOWS
+#include <sys/uio.h> // for iovec
+#else
+namespace {
+struct iovec
+{
+	void* iov_base;
+	std::size_t iov_len;
+};
+} // anonymous namespace
+#endif
+
 // on mingw this is necessary to enable 64-bit time_t, specifically used for
 // the stat struct. Without this, modification times returned by stat may be
 // incorrect and consistently fail resume data
@@ -66,7 +79,6 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #include "libtorrent/aux_/disable_warnings_pop.hpp"
 
-#include "libtorrent/config.hpp"
 #include "libtorrent/aux_/alloca.hpp"
 #include "libtorrent/file.hpp"
 #include "libtorrent/aux_/path.hpp"
@@ -165,7 +177,7 @@ namespace {
 		return WAIT_FAILED;
 	}
 
-	int preadv(HANDLE fd, libtorrent::iovec_t const* bufs, int num_bufs, std::int64_t file_offset)
+	int preadv(HANDLE fd, ::iovec const* bufs, int num_bufs, std::int64_t file_offset)
 	{
 		TORRENT_ALLOCA(ol, OVERLAPPED, num_bufs);
 		std::memset(ol.data(), 0, sizeof(OVERLAPPED) * num_bufs);
@@ -235,7 +247,7 @@ done:
 		return ret;
 	}
 
-	int pwritev(HANDLE fd, libtorrent::iovec_t const* bufs, int num_bufs, std::int64_t file_offset)
+	int pwritev(HANDLE fd, ::iovec const* bufs, int num_bufs, std::int64_t file_offset)
 	{
 		TORRENT_ALLOCA(ol, OVERLAPPED, num_bufs);
 		std::memset(ol.data(), 0, sizeof(OVERLAPPED) * num_bufs);
@@ -314,27 +326,11 @@ done:
 # endif
 #endif
 
-static_assert((libtorrent::file::rw_mask & libtorrent::file::sparse) == 0, "internal flags error");
-static_assert((libtorrent::file::rw_mask & libtorrent::file::attribute_mask) == 0, "internal flags error");
-static_assert((libtorrent::file::sparse & libtorrent::file::attribute_mask) == 0, "internal flags error");
-
-#if defined TORRENT_WINDOWS && defined UNICODE && !TORRENT_USE_WSTRING
-
-#ifdef _MSC_VER
-#pragma message ( "wide character support not available. Files will be saved using narrow string names" )
-#else
-#warning "wide character support not available. Files will be saved using narrow string names"
-#endif
-
-#endif // TORRENT_WINDOWS
-
 namespace libtorrent {
 
-	template <typename T>
-	std::unique_ptr<T, decltype(&std::free)> make_free_holder(T* ptr)
-	{
-		return std::unique_ptr<T, decltype(&std::free)>(ptr, &std::free);
-	}
+static_assert(!(open_mode::rw_mask & open_mode::sparse), "internal flags error");
+static_assert(!(open_mode::rw_mask & open_mode::attribute_mask), "internal flags error");
+static_assert(!(open_mode::sparse & open_mode::attribute_mask), "internal flags error");
 
 	directory::directory(std::string const& path, error_code& ec)
 		: m_done(false)
@@ -358,23 +354,14 @@ namespace libtorrent {
 #ifdef TORRENT_WINDOWS
 		m_inode = 0;
 
-#if TORRENT_USE_WSTRING
-#define FindFirstFile_ FindFirstFileW
-#else
-#define FindFirstFile_ FindFirstFileA
-#endif
-		m_handle = FindFirstFile_(f.c_str(), &m_fd);
+		m_handle = FindFirstFileW(f.c_str(), &m_fd);
 		if (m_handle == INVALID_HANDLE_VALUE)
 		{
 			ec.assign(GetLastError(), system_category());
 			m_done = true;
 			return;
 		}
-#undef FindFirstFile_
 #else
-
-		std::memset(&m_dirent, 0, sizeof(dirent));
-		m_name[0] = 0;
 
 		m_handle = ::opendir(f.c_str());
 		if (m_handle == nullptr)
@@ -394,17 +381,13 @@ namespace libtorrent {
 		if (m_handle != INVALID_HANDLE_VALUE)
 			FindClose(m_handle);
 #else
-		if (m_handle) closedir(m_handle);
+		if (m_handle) ::closedir(m_handle);
 #endif
 	}
 
 	std::uint64_t directory::inode() const
 	{
-#ifdef TORRENT_WINDOWS
 		return m_inode;
-#else
-		return m_dirent.d_ino;
-#endif
 	}
 
 	std::string directory::file() const
@@ -412,7 +395,7 @@ namespace libtorrent {
 #ifdef TORRENT_WINDOWS
 		return convert_from_native_path(m_fd.cFileName);
 #else
-		return convert_from_native(m_dirent.d_name);
+		return convert_from_native(m_name);
 #endif
 	}
 
@@ -420,28 +403,27 @@ namespace libtorrent {
 	{
 		ec.clear();
 #ifdef TORRENT_WINDOWS
-#if TORRENT_USE_WSTRING
-#define FindNextFile_ FindNextFileW
-#else
-#define FindNextFile_ FindNextFileA
-#endif
-		if (FindNextFile_(m_handle, &m_fd) == 0)
+		if (FindNextFileW(m_handle, &m_fd) == 0)
 		{
 			m_done = true;
 			int err = GetLastError();
 			if (err != ERROR_NO_MORE_FILES)
 				ec.assign(err, system_category());
 		}
-#undef FindNextFile_
 		++m_inode;
 #else
-		dirent* dummy;
-		if (readdir_r(m_handle, &m_dirent, &dummy) != 0)
+		struct dirent* de;
+		errno = 0;
+		if ((de = ::readdir(m_handle)) != nullptr)
 		{
-			ec.assign(errno, system_category());
+			m_inode = de->d_ino;
+			m_name = de->d_name;
+		}
+		else
+		{
+			if (errno) ec.assign(errno, system_category());
 			m_done = true;
 		}
-		if (dummy == nullptr) m_done = true;
 #endif
 	}
 
@@ -499,14 +481,11 @@ namespace libtorrent {
 	bool file::has_manage_volume_privs = get_manage_volume_privs();
 #endif
 
-	file::file()
-		: m_file_handle(INVALID_HANDLE_VALUE)
-		, m_open_mode(0)
+	file::file() : m_file_handle(INVALID_HANDLE_VALUE)
 	{}
 
-	file::file(std::string const& path, std::uint32_t const mode, error_code& ec)
+	file::file(std::string const& path, open_mode_t const mode, error_code& ec)
 		: m_file_handle(INVALID_HANDLE_VALUE)
-		, m_open_mode(0)
 	{
 		// the return value is not important, since the
 		// error code contains the same information
@@ -518,20 +497,20 @@ namespace libtorrent {
 		close();
 	}
 
-	bool file::open(std::string const& path, std::uint32_t mode, error_code& ec)
+	bool file::open(std::string const& path, open_mode_t mode, error_code& ec)
 	{
 		close();
 		native_path_string file_path = convert_to_native_path_string(path);
 
 #ifdef TORRENT_WINDOWS
 
-		struct open_mode_t
+		struct win_open_mode_t
 		{
 			DWORD rw_mode;
 			DWORD create_mode;
 		};
 
-		static const open_mode_t mode_array[] =
+		static std::array<win_open_mode_t, 3> const mode_array{
 		{
 			// read_only
 			{GENERIC_READ, OPEN_EXISTING},
@@ -539,40 +518,32 @@ namespace libtorrent {
 			{GENERIC_WRITE, OPEN_ALWAYS},
 			// read_write
 			{GENERIC_WRITE | GENERIC_READ, OPEN_ALWAYS},
-		};
+		}};
 
-		static const DWORD attrib_array[] =
+		static std::array<DWORD, 4> const attrib_array{
 		{
 			FILE_ATTRIBUTE_NORMAL, // no attrib
 			FILE_ATTRIBUTE_HIDDEN, // hidden
 			FILE_ATTRIBUTE_NORMAL, // executable
 			FILE_ATTRIBUTE_HIDDEN, // hidden + executable
-		};
+		}};
 
-#if TORRENT_USE_WSTRING
-#define CreateFile_ CreateFileW
-#else
-#define CreateFile_ CreateFileA
-#endif
-
-		TORRENT_ASSERT((mode & rw_mask) < sizeof(mode_array)/sizeof(mode_array[0]));
-		open_mode_t const& m = mode_array[mode & rw_mask];
-		DWORD a = attrib_array[(mode & attribute_mask) >> 12];
+		TORRENT_ASSERT(static_cast<std::uint32_t>(mode & open_mode::rw_mask) < mode_array.size());
+		win_open_mode_t const& m = mode_array[static_cast<std::uint32_t>(mode & open_mode::rw_mask)];
+		DWORD a = attrib_array[static_cast<std::uint32_t>(mode & open_mode::attribute_mask) >> 12];
 
 		// one might think it's a good idea to pass in FILE_FLAG_RANDOM_ACCESS. It
 		// turns out that it isn't. That flag will break your operating system:
 		// http://support.microsoft.com/kb/2549369
 
-		DWORD flags = ((mode & random_access) ? 0 : FILE_FLAG_SEQUENTIAL_SCAN)
+		DWORD const flags = ((mode & open_mode::random_access) ? 0 : FILE_FLAG_SEQUENTIAL_SCAN)
 			| (a ? a : FILE_ATTRIBUTE_NORMAL)
 			| FILE_FLAG_OVERLAPPED
-			| ((mode & no_cache) ? FILE_FLAG_WRITE_THROUGH : 0);
+			| ((mode & open_mode::no_cache) ? FILE_FLAG_WRITE_THROUGH : 0);
 
-		handle_type handle = CreateFile_(file_path.c_str(), m.rw_mode
-			, (mode & lock_file) ? FILE_SHARE_READ : FILE_SHARE_READ | FILE_SHARE_WRITE
+		handle_type handle = CreateFileW(file_path.c_str(), m.rw_mode
+			, FILE_SHARE_READ | FILE_SHARE_WRITE
 			, 0, m.create_mode, flags, 0);
-
-#undef CreateFile_
 
 		if (handle == INVALID_HANDLE_VALUE)
 		{
@@ -585,7 +556,8 @@ namespace libtorrent {
 
 		// try to make the file sparse if supported
 		// only set this flag if the file is opened for writing
-		if ((mode & file::sparse) && (mode & rw_mask) != read_only)
+		if ((mode & open_mode::sparse)
+			&& (mode & open_mode::rw_mask) != open_mode::read_only)
 		{
 			DWORD temp;
 			overlapped_t ol;
@@ -603,7 +575,7 @@ namespace libtorrent {
 			| S_IRGRP | S_IWGRP
 			| S_IROTH | S_IWOTH;
 
-		if (mode & attribute_executable)
+		if ((mode & open_mode::attribute_executable))
 			permissions |= S_IXGRP | S_IXOTH | S_IXUSR;
 #ifdef O_BINARY
 		static const int mode_array[] = {O_RDONLY | O_BINARY, O_WRONLY | O_CREAT | O_BINARY, O_RDWR | O_CREAT | O_BINARY};
@@ -613,26 +585,27 @@ namespace libtorrent {
 
 		int open_mode = 0
 #ifdef O_NOATIME
-			| ((mode & no_atime) ? O_NOATIME : 0)
+			| ((mode & open_mode::no_atime) ? O_NOATIME : 0)
 #endif
 #ifdef O_SYNC
-			| ((mode & no_cache) ? O_SYNC : 0)
+			| ((mode & open_mode::no_cache) ? O_SYNC : 0)
 #endif
 			;
 
 		handle_type handle = ::open(file_path.c_str()
-			, mode_array[mode & rw_mask] | open_mode
+			, mode_array[static_cast<std::uint32_t>(mode & open_mode::rw_mask)] | open_mode
 			, permissions);
 
 #ifdef O_NOATIME
 		// O_NOATIME is not allowed for files we don't own
 		// so, if we get EPERM when we try to open with it
 		// try again without O_NOATIME
-		if (handle == -1 && (mode & no_atime) && errno == EPERM)
+		if (handle == -1 && (mode & open_mode::no_atime) && errno == EPERM)
 		{
-			mode &= ~no_atime;
+			mode &= ~open_mode::no_atime;
 			open_mode &= ~O_NOATIME;
-			handle = ::open(file_path.c_str(), mode_array[mode & rw_mask] | open_mode
+			handle = ::open(file_path.c_str()
+				, mode_array[static_cast<std::uint32_t>(mode & open_mode::rw_mask)] | open_mode
 				, permissions);
 		}
 #endif
@@ -645,15 +618,9 @@ namespace libtorrent {
 
 		m_file_handle = handle;
 
-		// The purpose of the lock_file flag is primarily to prevent other
-		// processes from corrupting files that are being used by libtorrent.
-		// the posix file locking mechanism does not prevent others from
-		// accessing files, unless they also attempt to lock the file. That's
-		// why the SETLK mechanism is not used here.
-
 #ifdef DIRECTIO_ON
 		// for solaris
-		if (mode & no_cache)
+		if ((mode & open_mode::no_cache))
 		{
 			int yes = 1;
 			directio(native_handle(), DIRECTIO_ON);
@@ -662,22 +629,25 @@ namespace libtorrent {
 
 #ifdef F_NOCACHE
 		// for BSD/Mac
-		if (mode & no_cache)
+		if ((mode & open_mode::no_cache))
 		{
 			int yes = 1;
-			fcntl(native_handle(), F_NOCACHE, &yes);
+			::fcntl(native_handle(), F_NOCACHE, &yes);
 
 #ifdef F_NODIRECT
 			// it's OK to temporarily cache written pages
-			fcntl(native_handle(), F_NODIRECT, &yes);
+			::fcntl(native_handle(), F_NODIRECT, &yes);
 #endif
 		}
 #endif
 
 #ifdef POSIX_FADV_RANDOM
-		if (mode & random_access)
+		if ((mode & open_mode::random_access))
 		{
 			// disable read-ahead
+			// NOTE: in android this function was introduced in API 21,
+			// but the constant POSIX_FADV_RANDOM is there for lower
+			// API levels, just don't add :: to allow a macro workaround
 			posix_fadvise(native_handle(), 0, 0, POSIX_FADV_RANDOM);
 		}
 #endif
@@ -752,9 +722,9 @@ typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
 		// if this file is open for writing, has the sparse
 		// flag set, but there are no sparse regions, unset
 		// the flag
-		std::uint32_t rw_mode = m_open_mode & rw_mask;
-		if ((rw_mode != read_only)
-			&& (m_open_mode & sparse)
+		open_mode_t const rw_mode = m_open_mode & open_mode::rw_mask;
+		if ((rw_mode != open_mode::read_only)
+			&& (m_open_mode & open_mode::sparse)
 			&& !is_sparse(native_handle()))
 		{
 			overlapped_t ol;
@@ -785,19 +755,18 @@ typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
 
 		m_file_handle = INVALID_HANDLE_VALUE;
 
-		m_open_mode = 0;
+		m_open_mode = open_mode_t{};
 	}
 
 	namespace {
 
-#if !TORRENT_USE_PREADV
 	void gather_copy(span<iovec_t const> bufs, char* dst)
 	{
 		std::size_t offset = 0;
 		for (auto buf : bufs)
 		{
-			std::memcpy(dst + offset, buf.iov_base, buf.iov_len);
-			offset += buf.iov_len;
+			std::memcpy(dst + offset, buf.data(), buf.size());
+			offset += buf.size();
 		}
 	}
 
@@ -806,19 +775,17 @@ typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
 		std::size_t offset = 0;
 		for (auto buf : bufs)
 		{
-			std::memcpy(buf.iov_base, src + offset, buf.iov_len);
-			offset += buf.iov_len;
+			std::memcpy(buf.data(), src + offset, buf.size());
+			offset += buf.size();
 		}
 	}
 
 	bool coalesce_read_buffers(span<iovec_t const>& bufs
 		, iovec_t& tmp)
 	{
-		std::size_t const buf_size = aux::numeric_cast<std::size_t>(bufs_size(bufs));
-		char* buf = static_cast<char*>(std::malloc(buf_size));
-		if (!buf) return false;
-		tmp.iov_base = buf;
-		tmp.iov_len = buf_size;
+		auto const buf_size = aux::numeric_cast<std::size_t>(bufs_size(bufs));
+		auto buf = new char[buf_size];
+		tmp = { buf, buf_size };
 		bufs = span<iovec_t const>(tmp);
 		return true;
 	}
@@ -827,21 +794,29 @@ typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
 		, char* const buf, bool const copy)
 	{
 		if (copy) scatter_copy(bufs, buf);
-		std::free(buf);
+		delete[] buf;
 	}
 
 	bool coalesce_write_buffers(span<iovec_t const>& bufs
 		, iovec_t& tmp)
 	{
-		std::size_t const buf_size = aux::numeric_cast<std::size_t>(bufs_size(bufs));
-		char* buf = static_cast<char*>(std::malloc(buf_size));
-		if (!buf) return false;
+		auto const buf_size = aux::numeric_cast<std::size_t>(bufs_size(bufs));
+		auto buf = new char[buf_size];
 		gather_copy(bufs, buf);
-		tmp.iov_base = buf;
-		tmp.iov_len = buf_size;
+		tmp = { buf, buf_size };
 		bufs = span<iovec_t const>(tmp);
 		return true;
 	}
+
+#if TORRENT_USE_PREADV
+namespace {
+	int bufs_size(span<::iovec> bufs)
+	{
+		std::size_t size = 0;
+		for (auto buf : bufs) size += buf.iov_len;
+		return int(size);
+	}
+}
 #endif // TORRENT_USE_PREADV
 
 	template <class Fun>
@@ -850,13 +825,22 @@ typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
 	{
 #if TORRENT_USE_PREADV
 
+		TORRENT_ALLOCA(vec, ::iovec, bufs.size());
+		auto it = vec.begin();
+		for (auto const& b : bufs)
+		{
+			it->iov_base = b.data();
+			it->iov_len = b.size();
+			++it;
+		}
+
 		int ret = 0;
-		while (!bufs.empty())
+		while (!vec.empty())
 		{
 #ifdef IOV_MAX
-			auto const nbufs = bufs.first((std::min)(int(bufs.size()), IOV_MAX));
+			auto const nbufs = vec.first(std::min(int(vec.size()), IOV_MAX));
 #else
-			auto const nbufs = bufs;
+			auto const nbufs = vec;
 #endif
 
 			int tmp_ret = 0;
@@ -877,10 +861,10 @@ typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
 			// just need to issue the read/write operation again. In either case,
 			// punt that to the upper layer, as reissuing the operations is
 			// complicated here
-			const int expected_len = bufs_size(nbufs);
+			int const expected_len = bufs_size(nbufs);
 			if (tmp_ret < expected_len) break;
 
-			bufs = bufs.subspan(nbufs.size());
+			vec = vec.subspan(nbufs.size());
 		}
 		return ret;
 
@@ -889,7 +873,7 @@ typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
 		std::int64_t ret = 0;
 		for (auto i : bufs)
 		{
-			std::int64_t const tmp_ret = f(fd, i.iov_base, i.iov_len, file_offset);
+			std::int64_t const tmp_ret = f(fd, i.data(), i.size(), file_offset);
 			if (tmp_ret < 0)
 			{
 #ifdef TORRENT_WINDOWS
@@ -901,7 +885,7 @@ typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
 			}
 			file_offset += tmp_ret;
 			ret += tmp_ret;
-			if (tmp_ret < int(i.iov_len)) break;
+			if (tmp_ret < int(i.size())) break;
 		}
 
 		return ret;
@@ -926,7 +910,7 @@ typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
 
 		for (auto i : bufs)
 		{
-			int tmp_ret = f(fd, i.iov_base, i.iov_len);
+			int tmp_ret = f(fd, i.data(), i.size());
 			if (tmp_ret < 0)
 			{
 #ifdef TORRENT_WINDOWS
@@ -938,7 +922,7 @@ typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
 			}
 			file_offset += tmp_ret;
 			ret += tmp_ret;
-			if (tmp_ret < int(i.iov_len)) break;
+			if (tmp_ret < int(i.size())) break;
 		}
 
 		return ret;
@@ -951,7 +935,7 @@ typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
 	// this has to be thread safe and atomic. i.e. on posix systems it has to be
 	// turned into a series of pread() calls
 	std::int64_t file::readv(std::int64_t file_offset, span<iovec_t const> bufs
-		, error_code& ec, std::uint32_t flags)
+		, error_code& ec, open_mode_t flags)
 	{
 		if (m_file_handle == INVALID_HANDLE_VALUE)
 		{
@@ -962,42 +946,38 @@ typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
 #endif
 			return -1;
 		}
-		TORRENT_ASSERT((m_open_mode & rw_mask) == read_only || (m_open_mode & rw_mask) == read_write);
+		TORRENT_ASSERT((m_open_mode & open_mode::rw_mask) == open_mode::read_only
+			|| (m_open_mode & open_mode::rw_mask) == open_mode::read_write);
 		TORRENT_ASSERT(!bufs.empty());
 		TORRENT_ASSERT(is_open());
-
-#if TORRENT_USE_PREADV
-		TORRENT_UNUSED(flags);
-
-		std::int64_t ret = iov(&::preadv, native_handle(), file_offset, bufs, ec);
-#else
 
 		// there's no point in coalescing single buffer writes
 		if (bufs.size() == 1)
 		{
-			flags &= ~file::coalesce_buffers;
+			flags &= ~open_mode::coalesce_buffers;
 		}
 
 		iovec_t tmp;
 		span<iovec_t const> tmp_bufs = bufs;
-		if ((flags & file::coalesce_buffers))
+		if (flags & open_mode::coalesce_buffers)
 		{
 			if (!coalesce_read_buffers(tmp_bufs, tmp))
 				// ok, that failed, don't coalesce this read
-				flags &= ~file::coalesce_buffers;
+				flags &= ~open_mode::coalesce_buffers;
 		}
 
-#if TORRENT_USE_PREAD
+#if TORRENT_USE_PREADV
+		std::int64_t ret = iov(&::preadv, native_handle(), file_offset, bufs, ec);
+#elif TORRENT_USE_PREAD
 		std::int64_t ret = iov(&::pread, native_handle(), file_offset, tmp_bufs, ec);
 #else
 		std::int64_t ret = iov(&::read, native_handle(), file_offset, tmp_bufs, ec);
 #endif
 
-		if ((flags & file::coalesce_buffers))
+		if (flags & open_mode::coalesce_buffers)
 			coalesce_read_buffers_end(bufs
-				, static_cast<char*>(tmp.iov_base), !ec);
+				, tmp.data(), !ec);
 
-#endif
 		return ret;
 	}
 
@@ -1005,7 +985,7 @@ typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
 	// that means, on posix this has to be turned into a series of
 	// pwrite() calls
 	std::int64_t file::writev(std::int64_t file_offset, span<iovec_t const> bufs
-		, error_code& ec, std::uint32_t flags)
+		, error_code& ec, open_mode_t flags)
 	{
 		if (m_file_handle == INVALID_HANDLE_VALUE)
 		{
@@ -1016,48 +996,44 @@ typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
 #endif
 			return -1;
 		}
-		TORRENT_ASSERT((m_open_mode & rw_mask) == write_only || (m_open_mode & rw_mask) == read_write);
+		TORRENT_ASSERT((m_open_mode & open_mode::rw_mask) == open_mode::write_only
+			|| (m_open_mode & open_mode::rw_mask) == open_mode::read_write);
 		TORRENT_ASSERT(!bufs.empty());
 		TORRENT_ASSERT(is_open());
 
 		ec.clear();
 
-#if TORRENT_USE_PREADV
-		TORRENT_UNUSED(flags);
-
-		std::int64_t ret = iov(&::pwritev, native_handle(), file_offset, bufs, ec);
-#else
-
 		// there's no point in coalescing single buffer writes
 		if (bufs.size() == 1)
 		{
-			flags &= ~file::coalesce_buffers;
+			flags &= ~open_mode::coalesce_buffers;
 		}
 
 		iovec_t tmp;
-		if (flags & file::coalesce_buffers)
+		if (flags & open_mode::coalesce_buffers)
 		{
 			if (!coalesce_write_buffers(bufs, tmp))
 				// ok, that failed, don't coalesce writes
-				flags &= ~file::coalesce_buffers;
+				flags &= ~open_mode::coalesce_buffers;
 		}
 
-#if TORRENT_USE_PREAD
+#if TORRENT_USE_PREADV
+		std::int64_t ret = iov(&::pwritev, native_handle(), file_offset, bufs, ec);
+#elif TORRENT_USE_PREAD
 		std::int64_t ret = iov(&::pwrite, native_handle(), file_offset, bufs, ec);
 #else
 		std::int64_t ret = iov(&::write, native_handle(), file_offset, bufs, ec);
 #endif
 
-		if (flags & file::coalesce_buffers)
-			std::free(tmp.iov_base);
+		if (flags & open_mode::coalesce_buffers)
+			delete[] tmp.data();
 
-#endif
 #if TORRENT_USE_FDATASYNC \
 	&& !defined F_NOCACHE && \
 	!defined DIRECTIO_ON
-		if (m_open_mode & no_cache)
+		if (m_open_mode & open_mode::no_cache)
 		{
-			if (fdatasync(native_handle()) != 0
+			if (::fdatasync(native_handle()) != 0
 				&& errno != EINVAL
 				&& errno != ENOSYS)
 			{
@@ -1071,23 +1047,14 @@ typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
 #ifdef TORRENT_WINDOWS
 	bool get_manage_volume_privs()
 	{
-		typedef BOOL (WINAPI *OpenProcessToken_t)(
-			HANDLE ProcessHandle,
-			DWORD DesiredAccess,
-			PHANDLE TokenHandle);
+		using OpenProcessToken_t = BOOL (WINAPI*)(
+			HANDLE, DWORD, PHANDLE);
 
-		typedef BOOL (WINAPI *LookupPrivilegeValue_t)(
-			LPCSTR lpSystemName,
-			LPCSTR lpName,
-			PLUID lpLuid);
+		using LookupPrivilegeValue_t = BOOL (WINAPI*)(
+			LPCSTR, LPCSTR, PLUID);
 
-		typedef BOOL (WINAPI *AdjustTokenPrivileges_t)(
-			HANDLE TokenHandle,
-			BOOL DisableAllPrivileges,
-			PTOKEN_PRIVILEGES NewState,
-			DWORD BufferLength,
-			PTOKEN_PRIVILEGES PreviousState,
-			PDWORD ReturnLength);
+		using AdjustTokenPrivileges_t = BOOL (WINAPI*)(
+			HANDLE, BOOL, PTOKEN_PRIVILEGES, DWORD, PTOKEN_PRIVILEGES, PDWORD);
 
 		auto OpenProcessToken =
 			aux::get_library_procedure<aux::advapi32, OpenProcessToken_t>("OpenProcessToken");
@@ -1125,7 +1092,7 @@ typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
 
 	void set_file_valid_data(HANDLE f, std::int64_t size)
 	{
-		typedef BOOL (WINAPI *SetFileValidData_t)(HANDLE, LONGLONG);
+		using SetFileValidData_t = BOOL (WINAPI*)(HANDLE, LONGLONG);
 		auto SetFileValidData =
 			aux::get_library_procedure<aux::kernel32, SetFileValidData_t>("SetFileValidData");
 
@@ -1167,35 +1134,7 @@ typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
 				ec.assign(GetLastError(), system_category());
 				return false;
 			}
-		}
-
-#if _WIN32_WINNT >= 0x0600 // only if Windows Vista or newer
-		if ((m_open_mode & sparse) == 0)
-		{
-			typedef DWORD (WINAPI *GetFileInformationByHandleEx_t)(HANDLE hFile
-				, FILE_INFO_BY_HANDLE_CLASS FileInformationClass
-				, LPVOID lpFileInformation
-				, DWORD dwBufferSize);
-
-			auto GetFileInformationByHandleEx =
-				aux::get_library_procedure<aux::kernel32, GetFileInformationByHandleEx_t>("GetFileInformationByHandleEx");
-
-			offs.QuadPart = 0;
-			if (GetFileInformationByHandleEx != nullptr)
-			{
-				// only allocate the space if the file
-				// is not fully allocated
-				FILE_STANDARD_INFO inf;
-				if (GetFileInformationByHandleEx(native_handle()
-					, FileStandardInfo, &inf, sizeof(inf)) == FALSE)
-				{
-					ec.assign(GetLastError(), system_category());
-					if (ec) return false;
-				}
-				offs = inf.AllocationSize;
-			}
-
-			if (offs.QuadPart != s)
+			if (!(m_open_mode & open_mode::sparse))
 			{
 				// if the user has permissions, avoid filling
 				// the file with zeroes, but just fill it with
@@ -1203,10 +1142,9 @@ typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
 				set_file_valid_data(m_file_handle, s);
 			}
 		}
-#endif // if Windows Vista
 #else // NON-WINDOWS
-		struct stat st;
-		if (fstat(native_handle(), &st) != 0)
+		struct stat st{};
+		if (::fstat(native_handle(), &st) != 0)
 		{
 			ec.assign(errno, system_category());
 			return false;
@@ -1214,7 +1152,7 @@ typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
 
 		// only truncate the file if it doesn't already
 		// have the right size. We don't want to update
-		if (st.st_size != s && ftruncate(native_handle(), s) < 0)
+		if (st.st_size != s && ::ftruncate(native_handle(), s) < 0)
 		{
 			ec.assign(errno, system_category());
 			return false;
@@ -1225,7 +1163,7 @@ typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
 		// is less than the file size. Otherwise we would just
 		// update the modification time of the file for no good
 		// reason.
-		if ((m_open_mode & sparse) == 0
+		if (!(m_open_mode & open_mode::sparse)
 			&& std::int64_t(st.st_blocks) < (s + st.st_blksize - 1) / st.st_blksize)
 		{
 			// How do we know that the file is already allocated?
@@ -1236,17 +1174,23 @@ typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
 			fstore_t f = {F_ALLOCATECONTIG, F_PEOFPOSMODE, 0, s, 0};
 			if (fcntl(native_handle(), F_PREALLOCATE, &f) < 0)
 			{
-				if (errno != ENOSPC)
+				// It appears Apple's new filesystem (APFS) does not
+				// support this control message and fails with EINVAL
+				// if so, just skip it
+				if (errno != EINVAL)
 				{
-					ec.assign(errno, system_category());
-					return false;
-				}
-				// ok, let's try to allocate non contiguous space then
-				f.fst_flags = F_ALLOCATEALL;
-				if (fcntl(native_handle(), F_PREALLOCATE, &f) < 0)
-				{
-					ec.assign(errno, system_category());
-					return false;
+					if (errno != ENOSPC)
+					{
+						ec.assign(errno, system_category());
+						return false;
+					}
+					// ok, let's try to allocate non contiguous space then
+					f.fst_flags = F_ALLOCATEALL;
+					if (fcntl(native_handle(), F_PREALLOCATE, &f) < 0)
+					{
+						ec.assign(errno, system_category());
+						return false;
+					}
 				}
 			}
 #endif // F_PREALLOCATE
@@ -1294,8 +1238,8 @@ typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
 		}
 		return file_size.QuadPart;
 #else
-		struct stat fs;
-		if (fstat(native_handle(), &fs) != 0)
+		struct stat fs = {};
+		if (::fstat(native_handle(), &fs) != 0)
 		{
 			ec.assign(errno, system_category());
 			return -1;
@@ -1347,7 +1291,7 @@ typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
 
 #elif defined SEEK_DATA
 		// this is supported on solaris
-		std::int64_t ret = lseek(native_handle(), start, SEEK_DATA);
+		std::int64_t ret = ::lseek(native_handle(), start, SEEK_DATA);
 		if (ret < 0) return start;
 		return start;
 #else

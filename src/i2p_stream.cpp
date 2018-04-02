@@ -35,10 +35,12 @@ POSSIBILITY OF SUCH DAMAGE.
 #if TORRENT_USE_I2P
 
 #include "libtorrent/i2p_stream.hpp"
+#include "libtorrent/aux_/proxy_settings.hpp"
 #include "libtorrent/assert.hpp"
 #include "libtorrent/error_code.hpp"
 #include "libtorrent/string_util.hpp"
 #include "libtorrent/settings_pack.hpp"
+#include "libtorrent/random.hpp"
 #include "libtorrent/hex.hpp" // for to_hex
 #include "libtorrent/debug.hpp"
 
@@ -53,7 +55,7 @@ namespace libtorrent {
 	{
 		const char* name() const BOOST_SYSTEM_NOEXCEPT override
 		{ return "i2p error"; }
-		std::string message(int ev) const BOOST_SYSTEM_NOEXCEPT override
+		std::string message(int ev) const override
 		{
 			static char const* messages[] =
 			{
@@ -73,7 +75,7 @@ namespace libtorrent {
 		}
 		boost::system::error_condition default_error_condition(
 			int ev) const BOOST_SYSTEM_NOEXCEPT override
-		{ return boost::system::error_condition(ev, *this); }
+		{ return {ev, *this}; }
 	};
 
 
@@ -87,7 +89,7 @@ namespace libtorrent {
 	{
 		boost::system::error_code make_error_code(i2p_error_code e)
 		{
-			return error_code(e, i2p_category());
+			return {e, i2p_category()};
 		}
 	}
 
@@ -130,7 +132,7 @@ namespace libtorrent {
 		m_state = sam_connecting;
 
 		char tmp[20];
-		std::generate(tmp, tmp + sizeof(tmp), &std::rand);
+		aux::random_bytes(tmp);
 		m_session_id.resize(sizeof(tmp)*2);
 		aux::to_hex(tmp, &m_session_id[0]);
 
@@ -178,8 +180,8 @@ namespace libtorrent {
 		if (m_state == sam_idle && m_name_lookup.empty() && is_open())
 			do_name_lookup(name, std::move(handler));
 		else
-			m_name_lookup.push_back(std::make_pair(std::string(name)
-				, std::move(handler)));
+			m_name_lookup.emplace_back(std::string(name)
+				, std::move(handler));
 	}
 
 	void i2p_connection::do_name_lookup(std::string const& name
@@ -201,7 +203,7 @@ namespace libtorrent {
 		if (!m_name_lookup.empty())
 		{
 			std::pair<std::string, name_lookup_handler>& nl = m_name_lookup.front();
-			do_name_lookup(std::move(nl.first), std::move(nl.second));
+			do_name_lookup(nl.first, std::move(nl.second));
 			m_name_lookup.pop_front();
 		}
 
@@ -218,20 +220,20 @@ namespace libtorrent {
 		: proxy_base(io_service)
 		, m_id(nullptr)
 		, m_command(cmd_create_session)
-		, m_state(0)
+		, m_state(read_hello_response)
 	{
 #if TORRENT_USE_ASSERTS
 		m_magic = 0x1337;
 #endif
 	}
 
+#if TORRENT_USE_ASSERTS
 	i2p_stream::~i2p_stream()
 	{
-#if TORRENT_USE_ASSERTS
 		TORRENT_ASSERT(m_magic == 0x1337);
 		m_magic = 0;
-#endif
 	}
+#endif
 
 	void i2p_stream::do_connect(error_code const& e, tcp::resolver::iterator i
 		, handler_type h)
@@ -283,7 +285,7 @@ namespace libtorrent {
 		COMPLETE_ASYNC("i2p_stream::read_line");
 		if (handle_error(e, h)) return;
 
-		int const read_pos = int(m_buffer.size());
+		auto const read_pos = int(m_buffer.size());
 
 		// look for \n which means end of the response
 		if (m_buffer[read_pos - 1] != '\n')
@@ -310,13 +312,6 @@ namespace libtorrent {
 		error_code invalid_response(i2p_error::parse_failed
 			, i2p_category());
 
-		// 0-terminate the string and parse it
-		// TODO: 3 once we've transitioned to string_view, remove the
-		// 0-termination
-		m_buffer.push_back(0);
-		char* ptr = m_buffer.data();
-		char* next = ptr;
-
 		string_view expect1;
 		string_view expect2;
 
@@ -341,40 +336,45 @@ namespace libtorrent {
 				break;
 		}
 
-		// TODO: 3 make string_tokenize return string_views instead
-		ptr = string_tokenize(next, ' ', &next);
-		if (ptr == nullptr || expect1.empty() || expect1 != ptr)
+		string_view remaining(m_buffer.data(), m_buffer.size());
+		string_view token;
+
+		std::tie(token, remaining) = split_string(remaining, ' ');
+		if (expect1.empty() || expect1 != token)
 		{ handle_error(invalid_response, h); return; }
-		ptr = string_tokenize(next, ' ', &next);
-		if (ptr == nullptr || expect2.empty() || expect2 != ptr)
+
+		std::tie(token, remaining) = split_string(remaining, ' ');
+		if (expect2.empty() || expect2 != token)
 		{ handle_error(invalid_response, h); return; }
 
 		int result = 0;
 
 		for(;;)
 		{
-			char const* const name = string_tokenize(next, '=', &next);
-			if (name == nullptr) break;
-			char const* const ptr2 = string_tokenize(next, ' ', &next);
-			if (ptr2 == nullptr) { handle_error(invalid_response, h); return; }
+			string_view name;
+			std::tie(name, remaining) = split_string(remaining, '=');
+			if (name.empty()) break;
+			string_view value;
+			std::tie(value, remaining) = split_string(remaining, ' ');
+			if (value.empty()) { handle_error(invalid_response, h); return; }
 
 			if ("RESULT"_sv == name)
 			{
-				if ("OK"_sv == ptr2)
+				if ("OK"_sv == value)
 					result = i2p_error::no_error;
-				else if ("CANT_REACH_PEER"_sv == ptr2)
+				else if ("CANT_REACH_PEER"_sv == value)
 					result = i2p_error::cant_reach_peer;
-				else if ("I2P_ERROR"_sv == ptr2)
+				else if ("I2P_ERROR"_sv == value)
 					result = i2p_error::i2p_error;
-				else if ("INVALID_KEY"_sv == ptr2)
+				else if ("INVALID_KEY"_sv == value)
 					result = i2p_error::invalid_key;
-				else if ("INVALID_ID"_sv == ptr2)
+				else if ("INVALID_ID"_sv == value)
 					result = i2p_error::invalid_id;
-				else if ("TIMEOUT"_sv == ptr2)
+				else if ("TIMEOUT"_sv == value)
 					result = i2p_error::timeout;
-				else if ("KEY_NOT_FOUND"_sv == ptr2)
+				else if ("KEY_NOT_FOUND"_sv == value)
 					result = i2p_error::key_not_found;
-				else if ("DUPLICATED_ID"_sv == ptr2)
+				else if ("DUPLICATED_ID"_sv == value)
 					result = i2p_error::duplicated_id;
 				else
 					result = i2p_error::num_errors; // unknown error
@@ -387,11 +387,11 @@ namespace libtorrent {
 			}*/
 			else if ("VALUE"_sv == name)
 			{
-				m_name_lookup = ptr2;
+				m_name_lookup = value.to_string();
 			}
 			else if ("DESTINATION"_sv == name)
 			{
-				m_dest = ptr2;
+				m_dest = value.to_string();
 			}
 		}
 
@@ -422,7 +422,9 @@ namespace libtorrent {
 				case cmd_connect:
 					send_connect(std::move(h));
 					break;
-				default:
+				case cmd_none:
+				case cmd_name_lookup:
+				case cmd_incoming:
 					h(e);
 					std::vector<char>().swap(m_buffer);
 			}
@@ -445,8 +447,6 @@ namespace libtorrent {
 				, std::bind(&i2p_stream::read_line, this, _1, h));
 			break;
 		}
-
-		return;
 	}
 
 	void i2p_stream::send_connect(handler_type h)

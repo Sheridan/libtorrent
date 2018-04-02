@@ -37,6 +37,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/torrent_info.hpp"
 #include "libtorrent/hex.hpp" // for to_hex
 #include "libtorrent/time.hpp"
+#include "libtorrent/aux_/openssl.hpp"
 
 #include "test.hpp"
 #include "test_utils.hpp"
@@ -57,13 +58,14 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <iostream>
 
 using namespace std::placeholders;
-using namespace libtorrent;
+using namespace lt;
 using std::ignore;
-namespace lt = libtorrent;
 
-int const alert_mask = alert::all_categories
-& ~alert::progress_notification
-& ~alert::stats_notification;
+namespace {
+
+auto const alert_mask = alert::all_categories
+	& ~alert::progress_notification
+	& ~alert::stats_notification;
 
 struct test_config_t
 {
@@ -160,7 +162,7 @@ void test_ssl(int test_idx, bool use_utp)
 	// if a peer fails once, don't try it again
 	sett.set_int(settings_pack::max_failcount, 1);
 
-	libtorrent::session ses1(sett, 0);
+	lt::session ses1(sett, {});
 
 	// this +20 is here to use a different port as ses1
 	port += 20;
@@ -173,7 +175,7 @@ void test_ssl(int test_idx, bool use_utp)
 
 	sett.set_str(settings_pack::listen_interfaces, listen_iface);
 
-	libtorrent::session ses2(sett, 0);
+	lt::session ses2(sett, {});
 
 	wait_for_listen(ses1, "ses1");
 	wait_for_listen(ses2, "ses2");
@@ -189,8 +191,8 @@ void test_ssl(int test_idx, bool use_utp)
 
 	add_torrent_params addp;
 	addp.save_path = "tmp1_ssl";
-	addp.flags &= ~add_torrent_params::flag_paused;
-	addp.flags &= ~add_torrent_params::flag_auto_managed;
+	addp.flags &= ~torrent_flags::paused;
+	addp.flags &= ~torrent_flags::auto_managed;
 
 	peer_disconnects = 0;
 	ssl_peer_disconnects = 0;
@@ -234,7 +236,7 @@ void test_ssl(int test_idx, bool use_utp)
 	std::printf("\n\n%s: ses1: connecting peer port: %d\n\n\n"
 		, time_now_string(), port);
 	tor1.connect_peer(tcp::endpoint(address::from_string("127.0.0.1", ec)
-		, port));
+		, std::uint16_t(port)));
 
 	const int timeout = 40;
 	for (int i = 0; i < timeout; ++i)
@@ -302,7 +304,7 @@ void test_ssl(int test_idx, bool use_utp)
 	p2 = ses2.abort();
 }
 
-std::string password_callback(int length, boost::asio::ssl::context::password_purpose p
+std::string password_callback(int /*length*/, boost::asio::ssl::context::password_purpose p
 	, std::string pw)
 {
 	if (p != boost::asio::ssl::context::for_reading) return "";
@@ -345,7 +347,7 @@ attack_t attacks[] =
 
 const int num_attacks = sizeof(attacks)/sizeof(attacks[0]);
 
-bool try_connect(libtorrent::session& ses1, int port
+bool try_connect(lt::session& ses1, int port
 	, std::shared_ptr<torrent_info> const& t, std::uint32_t flags)
 {
 	using boost::asio::ssl::context;
@@ -370,7 +372,7 @@ bool try_connect(libtorrent::session& ses1, int port
 	// create the SSL context for this torrent. We need to
 	// inject the root certificate, and no other, to
 	// verify other peers against
-	context ctx(ios, context::sslv23);
+	context ctx(context::sslv23);
 
 	ctx.set_options(context::default_workarounds
 		| boost::asio::ssl::context::no_sslv2
@@ -443,7 +445,7 @@ bool try_connect(libtorrent::session& ses1, int port
 
 	std::printf("connecting 127.0.0.1:%d\n", port);
 	ssl_sock.lowest_layer().connect(tcp::endpoint(
-		address_v4::from_string("127.0.0.1"), port), ec);
+		address_v4::from_string("127.0.0.1"), std::uint16_t(port)), ec);
 	print_alerts(ses1, "ses1", true, true, &on_alert);
 
 	if (ec)
@@ -458,7 +460,7 @@ bool try_connect(libtorrent::session& ses1, int port
 	{
 		std::string name = aux::to_hex(t->info_hash());
 		std::printf("SNI: %s\n", name.c_str());
-		SSL_set_tlsext_host_name(ssl_sock.native_handle(), name.c_str());
+		aux::openssl_set_tlsext_hostname(ssl_sock.native_handle(), name.c_str());
 	}
 	else if (flags & invalid_sni_hash)
 	{
@@ -469,7 +471,7 @@ bool try_connect(libtorrent::session& ses1, int port
 			name += hex_alphabet[rand() % 16];
 
 		std::printf("SNI: %s\n", name.c_str());
-		SSL_set_tlsext_host_name(ssl_sock.native_handle(), name.c_str());
+		aux::openssl_set_tlsext_hostname(ssl_sock.native_handle(), name.c_str());
 	}
 
 	std::printf("SSL handshake\n");
@@ -560,7 +562,7 @@ void test_malicious_peer()
 	sett.set_bool(settings_pack::enable_upnp, false);
 	sett.set_bool(settings_pack::enable_natpmp, false);
 
-	libtorrent::session ses1(sett, 0);
+	lt::session ses1(sett, {});
 	wait_for_listen(ses1, "ses1");
 
 	// create torrent
@@ -574,8 +576,8 @@ void test_malicious_peer()
 
 	add_torrent_params addp;
 	addp.save_path = "tmp3_ssl";
-	addp.flags &= ~add_torrent_params::flag_paused;
-	addp.flags &= ~add_torrent_params::flag_auto_managed;
+	addp.flags &= ~torrent_flags::paused;
+	addp.flags &= ~torrent_flags::auto_managed;
 	addp.ti = t;
 
 	torrent_handle tor1 = ses1.add_torrent(addp, ec);
@@ -600,6 +602,8 @@ void test_malicious_peer()
 		TEST_EQUAL(success, attacks[i].expect);
 	}
 }
+
+} // anonymous namespace
 #endif // TORRENT_USE_OPENSSL
 
 TORRENT_TEST(malicious_peer)

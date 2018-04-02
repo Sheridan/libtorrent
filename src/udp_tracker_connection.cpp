@@ -62,7 +62,7 @@ namespace libtorrent {
 		, tracker_manager& man
 		, tracker_request const& req
 		, std::weak_ptr<request_callback> c)
-		: tracker_connection(man, req, ios, c)
+		: tracker_connection(man, req, ios, std::move(c))
 		, m_transaction_id(0)
 		, m_attempts(0)
 		, m_state(action_t::error)
@@ -103,13 +103,12 @@ namespace libtorrent {
 		{
 			using namespace std::placeholders;
 			ADD_OUTSTANDING_ASYNC("udp_tracker_connection::name_lookup");
-			// when stopping, pass in the prefer cache flag, because we
+			// when stopping, pass in the cache-only flag, because we
 			// don't want to get stuck on DNS lookups when shutting down
-			// if we can avoid it
 			m_man.host_resolver().async_resolve(hostname
-				, tracker_req().event == tracker_request::stopped
-					? resolver_interface::prefer_cache
-					: resolver_interface::abort_on_shutdown
+				, (tracker_req().event == tracker_request::stopped
+					? resolver_interface::cache_only : resolver_flags{})
+					| resolver_interface::abort_on_shutdown
 				, std::bind(&udp_tracker_connection::name_lookup
 					, shared_from_this(), _1, _2, port));
 
@@ -126,7 +125,7 @@ namespace libtorrent {
 			, settings.get_int(settings_pack::tracker_receive_timeout));
 	}
 
-	void udp_tracker_connection::fail(error_code const& ec, int code
+	void udp_tracker_connection::fail(error_code const& ec
 		, char const* msg, seconds32 const interval, seconds32 const min_interval)
 	{
 		// m_target failed. remove it from the endpoint list
@@ -135,10 +134,11 @@ namespace libtorrent {
 
 		if (i != m_endpoints.end()) m_endpoints.erase(i);
 
-		// if that was the last one, fail the whole announce
-		if (m_endpoints.empty())
+		// if that was the last one, or the listen socket was closed
+		// fail the whole announce
+		if (m_endpoints.empty() || !tracker_req().outgoing_socket)
 		{
-			tracker_connection::fail(ec, code, msg, interval, min_interval);
+			tracker_connection::fail(ec, msg, interval, min_interval);
 			return;
 		}
 
@@ -146,7 +146,7 @@ namespace libtorrent {
 		std::shared_ptr<request_callback> cb = requester();
 		if (cb && cb->should_log())
 		{
-			cb->debug_log("*** UDP_TRACKER [ host: \"%s\" ip: \"%s\" | error: \"%s\" ]"
+			cb->debug_log(R"(*** UDP_TRACKER [ host: "%s" ip: "%s" | error: "%s" ])"
 				, m_hostname.c_str(), print_endpoint(m_target).c_str(), ec.message().c_str());
 		}
 #endif
@@ -157,7 +157,7 @@ namespace libtorrent {
 #ifndef TORRENT_DISABLE_LOGGING
 		if (cb && cb->should_log())
 		{
-			cb->debug_log("*** UDP_TRACKER trying next IP [ host: \"%s\" ip: \"%s\" ]"
+			cb->debug_log(R"(*** UDP_TRACKER trying next IP [ host: "%s" ip: "%s" ])"
 				, m_hostname.c_str(), print_endpoint(m_target).c_str());
 		}
 #endif
@@ -195,12 +195,36 @@ namespace libtorrent {
 
 		restart_read_timeout();
 
+		if (!tracker_req().outgoing_socket)
+		{
+			fail(error_code(errors::invalid_listen_socket));
+			return;
+		}
+
+		auto bind_address = bind_interface();
+
 		// look for an address that has the same kind as the one
 		// we're listening on. To make sure the tracker get our
 		// correct listening address.
-
+		bool is_v4 = bind_address.is_v4();
+#if TORRENT_USE_IPV6
+		auto scope = is_v4 ? 0 : bind_address.to_v6().scope_id();
+#endif
 		for (auto const& addr : addresses)
-			m_endpoints.push_back(tcp::endpoint(addr, std::uint16_t(port)));
+		{
+			if (addr.is_v4() != is_v4) continue;
+#if TORRENT_USE_IPV6
+			if (addr.is_v6() && addr.to_v6().scope_id() != scope)
+				continue;
+#endif
+			m_endpoints.emplace_back(addr, std::uint16_t(port));
+		}
+
+		if (m_endpoints.empty())
+		{
+			fail(error_code(boost::asio::error::address_family_not_supported));
+			return;
+		}
 
 		if (tracker_req().filter)
 		{
@@ -237,13 +261,13 @@ namespace libtorrent {
 
 	udp::endpoint udp_tracker_connection::pick_target_endpoint() const
 	{
-		std::vector<tcp::endpoint>::const_iterator iter = m_endpoints.begin();
+		auto iter = m_endpoints.begin();
 		udp::endpoint target = udp::endpoint(iter->address(), iter->port());
 
 		if (bind_interface() != address_v4::any())
 		{
 			// find first endpoint that matches our bind interface type
-			for (; iter != m_endpoints.end() && iter->address().is_v4()
+			for (; iter != m_endpoints.end() && is_v4(*iter)
 				!= bind_interface().is_v4(); ++iter);
 
 			if (iter == m_endpoints.end())
@@ -252,11 +276,11 @@ namespace libtorrent {
 				std::shared_ptr<request_callback> cb = requester();
 				if (cb)
 				{
-					char const* tracker_address_type = target.address().is_v4() ? "IPv4" : "IPv6";
+					char const* tracker_address_type = is_v4(target) ? "IPv4" : "IPv6";
 					char const* bind_address_type = bind_interface().is_v4() ? "IPv4" : "IPv6";
 					char msg[200];
 					std::snprintf(msg, sizeof(msg)
-						, "the tracker only resolves to an %s  address, and you're "
+						, "the tracker only resolves to an %s address, and you're "
 						"listening on an %s socket. This may prevent you from receiving "
 						"incoming connections."
 						, tracker_address_type, bind_address_type);
@@ -400,7 +424,7 @@ namespace libtorrent {
 
 		if (action == action_t::error)
 		{
-			fail(error_code(errors::tracker_failure), -1
+			fail(error_code(errors::tracker_failure)
 				, std::string(buf.data(), buf.size()).c_str());
 			return true;
 		}
@@ -501,13 +525,13 @@ namespace libtorrent {
 		error_code ec;
 		if (!m_hostname.empty())
 		{
-			m_man.send_hostname(m_hostname.c_str()
+			m_man.send_hostname(bind_socket(), m_hostname.c_str()
 				, m_target.port(), buf, ec
 				, udp_socket::tracker_connection);
 		}
 		else
 		{
-			m_man.send(m_target, buf, ec
+			m_man.send(bind_socket(), m_target, buf, ec
 				, udp_socket::tracker_connection);
 		}
 
@@ -565,12 +589,12 @@ namespace libtorrent {
 		error_code ec;
 		if (!m_hostname.empty())
 		{
-			m_man.send_hostname(m_hostname.c_str(), m_target.port()
+			m_man.send_hostname(bind_socket(), m_hostname.c_str(), m_target.port()
 				, buf, ec, udp_socket::tracker_connection);
 		}
 		else
 		{
-			m_man.send(m_target, buf, ec
+			m_man.send(bind_socket(), m_target, buf, ec
 				, udp_socket::tracker_connection);
 		}
 		m_state = action_t::scrape;
@@ -599,7 +623,7 @@ namespace libtorrent {
 
 		std::size_t const ip_stride =
 #if TORRENT_USE_IPV6
-			m_target.address().is_v6() ? 18 :
+			is_v6(m_target) ? 18 :
 #endif
 			6;
 
@@ -625,12 +649,12 @@ namespace libtorrent {
 		}
 
 #if TORRENT_USE_IPV6
-		if (m_target.address().is_v6())
+		if (is_v6(m_target))
 		{
 			resp.peers6.reserve(std::size_t(num_peers));
 			for (int i = 0; i < num_peers; ++i)
 			{
-				ipv6_peer_entry e;
+				ipv6_peer_entry e{};
 				std::memcpy(e.ip.data(), buf.data(), 16);
 				buf = buf.subspan(16);
 				e.port = aux::read_uint16(buf);
@@ -643,8 +667,8 @@ namespace libtorrent {
 			resp.peers4.reserve(std::size_t(num_peers));
 			for (int i = 0; i < num_peers; ++i)
 			{
-				ipv4_peer_entry e;
-				memcpy(e.ip.data(), buf.data(), 4);
+				ipv4_peer_entry e{};
+				std::memcpy(e.ip.data(), buf.data(), 4);
 				buf = buf.subspan(4);
 				e.port = aux::read_uint16(buf);
 				resp.peers4.push_back(e);
@@ -678,7 +702,7 @@ namespace libtorrent {
 
 		if (action == action_t::error)
 		{
-			fail(error_code(errors::tracker_failure), -1
+			fail(error_code(errors::tracker_failure)
 				, std::string(buf.data(), buf.size()).c_str());
 			return true;
 		}
@@ -746,7 +770,7 @@ namespace libtorrent {
 			&& !settings.get_str(settings_pack::announce_ip).empty())
 		{
 			error_code ec;
-			address ip = address::from_string(settings.get_str(settings_pack::announce_ip).c_str(), ec);
+			address ip = make_address(settings.get_str(settings_pack::announce_ip).c_str(), ec);
 			if (!ec && ip.is_v4()) announce_ip = ip.to_v4();
 		}
 		aux::write_uint32(announce_ip.to_ulong(), out);
@@ -781,13 +805,13 @@ namespace libtorrent {
 
 		if (!m_hostname.empty())
 		{
-			m_man.send_hostname(m_hostname.c_str()
+			m_man.send_hostname(bind_socket(), m_hostname.c_str()
 				, m_target.port(), {buf, std::size_t(sizeof(buf) - out.size())}, ec
 				, udp_socket::tracker_connection);
 		}
 		else
 		{
-			m_man.send(m_target, {buf, std::size_t(sizeof(buf) - out.size())}, ec
+			m_man.send(bind_socket(), m_target, {buf, std::size_t(sizeof(buf) - out.size())}, ec
 				, udp_socket::tracker_connection);
 		}
 		m_state = action_t::announce;

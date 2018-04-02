@@ -33,6 +33,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <cctype>
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 
 #include "libtorrent/aux_/disable_warnings_push.hpp"
 #include <boost/optional.hpp>
@@ -44,7 +45,6 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/aux_/numeric_cast.hpp"
 
 namespace {
-
 
 	using namespace libtorrent;
 
@@ -138,7 +138,7 @@ namespace {
 
 	// only support BitTorrentSpecification
 	// must be ordered alphabetically
-	static const map_entry name_map[] =
+	const map_entry name_map[] =
 	{
 		  {"7T", "aTorrent for android"}
 		, {"A",  "ABC"}
@@ -177,6 +177,7 @@ namespace {
 		, {"HL", "Halite"}
 		, {"HN", "Hydranode"}
 		, {"IL", "iLivid"}
+		, {"KC", "Koinonein"}
 		, {"KG", "KGet"}
 		, {"KT", "KTorrent"}
 		, {"LC", "LeechCraft"}
@@ -244,7 +245,7 @@ namespace {
 		char const* name;
 	};
 	// non-standard names
-	static const generic_map_entry generic_mappings[] =
+	const generic_map_entry generic_mappings[] =
 	{
 		{0, "Deadman Walking-", "Deadman"}
 		, {5, "Azureus", "Azureus 2.0.3.2"}
@@ -290,9 +291,7 @@ namespace {
 			|| ((lhs.id[0] == rhs.id[0]) && (lhs.id[1] < rhs.id[1]));
 	}
 
-namespace {
-
-	static std::string lookup(fingerprint const& f)
+	std::string lookup(fingerprint const& f)
 	{
 		char identity[200];
 
@@ -320,7 +319,7 @@ namespace {
 		{
 			// if we don't have this client in the list
 			// just use the one or two letter code
-			memcpy(temp, f.name, 2);
+			std::memcpy(temp, f.name, 2);
 			temp[2] = 0;
 			name = temp;
 		}
@@ -336,12 +335,13 @@ namespace {
 
 		return identity;
 	}
-}
+
 	bool find_string(char const* id, char const* search)
 	{
 		return std::equal(search, search + std::strlen(search), id);
 	}
-}
+
+} // anonymous namespace
 
 namespace libtorrent {
 
@@ -368,6 +368,13 @@ namespace libtorrent {
 
 	std::string identify_client(peer_id const& p)
 	{
+		return aux::identify_client_impl(p);
+	}
+
+namespace aux {
+
+	std::string identify_client_impl(peer_id const& p)
+	{
 		char const* PID = p.data();
 
 		if (p.is_all_zeros()) return "Unknown";
@@ -376,11 +383,8 @@ namespace libtorrent {
 		// non standard encodings
 		// ----------------------
 
-		const int num_generic_mappings = sizeof(generic_mappings) / sizeof(generic_mappings[0]);
-
-		for (int i = 0; i < num_generic_mappings; ++i)
+		for (auto const& e : generic_mappings)
 		{
-			generic_map_entry const& e = generic_mappings[i];
 			if (find_string(PID + e.offset, e.id)) return e.name;
 		}
 
@@ -389,8 +393,8 @@ namespace libtorrent {
 
 		if (find_string(PID, "eX"))
 		{
-			std::string user(PID + 2, PID + 14);
-			return std::string("eXeem ('") + user.c_str() + "')";
+			std::string user(PID + 2, 12);
+			return std::string("eXeem ('") + user + "')";
 		}
 		bool const is_equ_zero = std::equal(PID, PID + 12, "\0\0\0\0\0\0\0\0\0\0\0\0");
 
@@ -417,12 +421,12 @@ namespace libtorrent {
 			return "Generic";
 
 		std::string unknown("Unknown [");
-		for (peer_id::const_iterator i = p.begin(); i != p.end(); ++i)
-		{
-			unknown += is_print(char(*i)) ? char(*i) : '.';
-		}
+		for (unsigned char const c : p)
+			unknown += is_print(char(c)) ? char(c) : '.';
 		unknown += "]";
 		return unknown;
 	}
-}
+
+} // aux
+} // libtorrent
 

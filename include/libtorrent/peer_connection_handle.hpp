@@ -51,12 +51,13 @@ struct crypto_plugin;
 struct TORRENT_EXPORT peer_connection_handle
 {
 	explicit peer_connection_handle(std::weak_ptr<peer_connection> impl)
-		: m_connection(impl)
+		: m_connection(std::move(impl))
 	{}
 
 	connection_type type() const;
 
 	void add_extension(std::shared_ptr<peer_plugin>);
+	peer_plugin const* find_plugin(string_view type) const;
 
 	bool is_seed() const;
 
@@ -101,9 +102,9 @@ struct TORRENT_EXPORT peer_connection_handle
 
 	bool in_handshake() const;
 
-	void send_buffer(char const* begin, int size, int flags = 0);
+	void send_buffer(char const* begin, int size, std::uint32_t flags = 0);
 
-	time_t last_seen_complete() const;
+	std::time_t last_seen_complete() const;
 	time_point time_of_last_unchoke() const;
 
 	bool operator==(peer_connection_handle const& o) const
@@ -129,10 +130,10 @@ private:
 	}
 };
 
-struct TORRENT_EXPORT bt_peer_connection_handle : public peer_connection_handle
+struct TORRENT_EXPORT bt_peer_connection_handle : peer_connection_handle
 {
 	explicit bt_peer_connection_handle(peer_connection_handle pc)
-		: peer_connection_handle(pc)
+		: peer_connection_handle(std::move(pc))
 	{}
 
 	bool packet_finished() const;

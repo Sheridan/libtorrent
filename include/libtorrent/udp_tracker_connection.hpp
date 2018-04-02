@@ -59,8 +59,8 @@ namespace libtorrent {
 			, tracker_request const& req
 			, std::weak_ptr<request_callback> c);
 
-		void start();
-		void close();
+		void start() override;
+		void close() override;
 
 		std::uint32_t transaction_id() const { return m_transaction_id; }
 
@@ -84,7 +84,6 @@ namespace libtorrent {
 
 		void name_lookup(error_code const& error
 			, std::vector<address> const& addresses, int port);
-		void timeout(error_code const& error);
 		void start_announce();
 
 		bool on_receive(udp::endpoint const& ep, span<char const> buf);
@@ -94,16 +93,16 @@ namespace libtorrent {
 		bool on_scrape_response(span<char const> buf);
 
 		// wraps tracker_connection::fail
-		void fail(error_code const& ec, int code = -1
+		void fail(error_code const& ec
 			, char const* msg = ""
 			, seconds32 interval = seconds32(0)
-			, seconds32 min_interval = seconds32(0));
+			, seconds32 min_interval = seconds32(30));
 
 		void send_udp_connect();
 		void send_udp_announce();
 		void send_udp_scrape();
 
-		virtual void on_timeout(error_code const& ec);
+		void on_timeout(error_code const& ec) override;
 
 		udp::endpoint pick_target_endpoint() const;
 

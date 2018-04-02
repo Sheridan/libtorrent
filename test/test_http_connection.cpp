@@ -43,7 +43,9 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <iostream>
 #include <boost/optional.hpp>
 
-using namespace libtorrent;
+using namespace lt;
+
+namespace {
 
 io_service ios;
 resolver res(ios);
@@ -65,7 +67,7 @@ void print_http_header(http_parser const& p)
 	}
 }
 
-void http_connect_handler(http_connection& c)
+void http_connect_handler_test(http_connection& c)
 {
 	++connect_handler_called;
 	TEST_CHECK(c.socket().is_open());
@@ -76,20 +78,20 @@ void http_connect_handler(http_connection& c)
 //	TEST_CHECK(c.socket().remote_endpoint(ec).address() == address::from_string("127.0.0.1", ec));
 }
 
-void http_handler(error_code const& ec, http_parser const& parser
-	, char const* data, int size, http_connection& c)
+void http_handler_test(error_code const& ec, http_parser const& parser
+	, span<char const> data, http_connection&)
 {
 	++handler_called;
-	data_size = size;
+	data_size = int(data.size());
 	g_error_code = ec;
-	TORRENT_ASSERT(size == 0 || parser.finished());
+	TORRENT_ASSERT(data.empty() || parser.finished());
 
 	if (parser.header_finished())
 	{
 		http_status = parser.status_code();
 		if (http_status == 200)
 		{
-			TEST_CHECK(memcmp(data, data_buffer, size) == 0);
+			TEST_CHECK(memcmp(data.data(), data_buffer, data.size()) == 0);
 		}
 	}
 	print_http_header(parser);
@@ -119,9 +121,8 @@ void run_test(std::string const& url, int size, int status, int connected
 		<< " error: " << (ec?ec->message():"no error") << std::endl;
 
 	std::shared_ptr<http_connection> h = std::make_shared<http_connection>(ios
-		, res, &::http_handler, true, 1024*1024, &::http_connect_handler);
-	h->get(url, seconds(1), 0, &ps, 5, "test/user-agent", address_v4::any()
-		, 0, auth);
+		, res, &::http_handler_test, true, 1024*1024, &::http_connect_handler_test);
+	h->get(url, seconds(1), 0, &ps, 5, "test/user-agent", boost::none, resolver_flags{}, auth);
 	ios.reset();
 	error_code e;
 	ios.run(e);
@@ -146,7 +147,7 @@ void write_test_file()
 	std::srand(unsigned(std::time(nullptr)));
 	std::generate(data_buffer, data_buffer + sizeof(data_buffer), &std::rand);
 	error_code ec;
-	file test_file("test_file", file::write_only, ec);
+	file test_file("test_file", open_mode::write_only, ec);
 	TEST_CHECK(!ec);
 	if (ec) std::printf("file error: %s\n", ec.message().c_str());
 	iovec_t b = { data_buffer, 3216};
@@ -181,9 +182,9 @@ void run_suite(std::string const& protocol
 	ps.type = proxy_type;
 
 	if (ps.type != settings_pack::none)
-		ps.port = start_proxy(ps.type);
+		ps.port = aux::numeric_cast<std::uint16_t>(start_proxy(ps.type));
 
-	typedef boost::optional<error_code> err;
+	using err = boost::optional<error_code>;
 
 	char url[256];
 	std::snprintf(url, sizeof(url), "%s://127.0.0.1:%d/", protocol.c_str(), port);
@@ -201,6 +202,14 @@ void run_suite(std::string const& protocol
 	run_test(url_base + "password_protected", 3216, 200, 1, error_code(), ps
 		, "testuser:testpass");
 
+	// try a very long path
+	std::string path;
+	for (int i = 0; i < 6000; ++i)
+	{
+		path += static_cast<char>(i % 26) + 'a';
+	}
+	run_test(url_base + path, 0, 404, 1, err(), ps);
+
 	// only run the tests to handle NX_DOMAIN if we have a proper internet
 	// connection that doesn't inject false DNS responses (like Comcast does)
 	hostent* h = gethostbyname("non-existent-domain.se");
@@ -214,6 +223,8 @@ void run_suite(std::string const& protocol
 		stop_proxy(ps.port);
 	stop_web_server();
 }
+
+} // anonymous namespace
 
 #ifdef TORRENT_USE_OPENSSL
 TORRENT_TEST(no_proxy_ssl) { run_suite("https", settings_pack::none); }

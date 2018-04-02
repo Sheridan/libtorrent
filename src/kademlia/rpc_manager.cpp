@@ -43,12 +43,13 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <libtorrent/kademlia/dht_observer.hpp>
 #include <libtorrent/kademlia/direct_request.hpp>
 #include <libtorrent/kademlia/get_item.hpp>
+#include <libtorrent/kademlia/sample_infohashes.hpp>
+#include <libtorrent/kademlia/dht_settings.hpp>
 
 #include <libtorrent/socket_io.hpp> // for print_endpoint
-#include <libtorrent/hasher.hpp>
-#include <libtorrent/session_settings.hpp> // for dht_settings
 #include <libtorrent/aux_/time.hpp> // for aux::time_now
 #include <libtorrent/aux_/aligned_union.hpp>
+#include <libtorrent/broadcast_socket.hpp> // for is_v6
 
 #include <type_traits>
 #include <functional>
@@ -62,6 +63,16 @@ using namespace std::placeholders;
 namespace libtorrent { namespace dht {
 
 // TODO: 3 move this into it's own .cpp file
+
+constexpr observer_flags_t observer::flag_queried;
+constexpr observer_flags_t observer::flag_initial;
+constexpr observer_flags_t observer::flag_no_id;
+constexpr observer_flags_t observer::flag_short_timeout;
+constexpr observer_flags_t observer::flag_failed;
+constexpr observer_flags_t observer::flag_ipv6_address;
+constexpr observer_flags_t observer::flag_alive;
+constexpr observer_flags_t observer::flag_done;
+
 dht_observer* observer::get_observer() const
 {
 	return m_algorithm->get_node().observer();
@@ -73,7 +84,7 @@ void observer::set_target(udp::endpoint const& ep)
 
 	m_port = ep.port();
 #if TORRENT_USE_IPV6
-	if (ep.address().is_v6())
+	if (is_v6(ep))
 	{
 		flags |= flag_ipv6_address;
 		m_addr.v6 = ep.address().to_v6().to_bytes();
@@ -132,7 +143,7 @@ void observer::set_id(node_id const& id)
 {
 	if (m_id == id) return;
 	m_id = id;
-	if (m_algorithm) m_algorithm->resort_results();
+	if (m_algorithm) m_algorithm->resort_result(this);
 }
 
 using observer_storage = aux::aligned_union<1
@@ -143,15 +154,19 @@ using observer_storage = aux::aligned_union<1
 	, get_item_observer
 	, get_peers_observer
 	, obfuscated_get_peers_observer
+	, sample_infohashes_observer
 	, null_observer
 	, traversal_observer>::type;
 
 rpc_manager::rpc_manager(node_id const& our_id
 	, dht_settings const& settings
-	, routing_table& table, udp_socket_interface* sock
+	, routing_table& table
+	, aux::listen_socket_handle const& sock
+	, socket_manager* sock_man
 	, dht_logger* log)
 	: m_pool_allocator(sizeof(observer_storage), 10)
 	, m_sock(sock)
+	, m_sock_man(sock_man)
 #ifndef TORRENT_DISABLE_LOGGING
 	, m_log(log)
 #endif
@@ -224,11 +239,11 @@ void rpc_manager::unreachable(udp::endpoint const& ep)
 		TORRENT_ASSERT(i->second);
 		if (i->second->target_ep() != ep) { ++i; continue; }
 		observer_ptr o = i->second;
-		i = m_transactions.erase(i);
 #ifndef TORRENT_DISABLE_LOGGING
 		m_log->log(dht_logger::rpc_manager, "[%u] found transaction [ tid: %d ]"
-			, o->algorithm()->id(), int(o->transaction_id()));
+			, o->algorithm()->id(), i->first);
 #endif
+		i = m_transactions.erase(i);
 		o->timeout();
 		break;
 	}
@@ -345,7 +360,7 @@ bool rpc_manager::incoming(msg const& m, node_id* id)
 		return false;
 	}
 
-	node_id nid = node_id(node_id_ent.string_ptr());
+	node_id const nid = node_id(node_id_ent.string_ptr());
 	if (m_settings.enforce_node_id && !verify_id(nid, m.addr.address()))
 	{
 		o->timeout();
@@ -398,7 +413,7 @@ time_duration rpc_manager::tick()
 			if (m_log->should_log(dht_logger::rpc_manager))
 			{
 				m_log->log(dht_logger::rpc_manager, "[%u] timing out transaction id: %d from: %s"
-					, o->algorithm()->id(), o->transaction_id()
+					, o->algorithm()->id(), i->first
 					, print_endpoint(o->target_ep()).c_str());
 			}
 #endif
@@ -415,7 +430,7 @@ time_duration rpc_manager::tick()
 			if (m_log->should_log(dht_logger::rpc_manager))
 			{
 				m_log->log(dht_logger::rpc_manager, "[%u] short-timing out transaction id: %d from: %s"
-					, o->algorithm()->id(), o->transaction_id()
+					, o->algorithm()->id(), i->first
 					, print_endpoint(o->target_ep()).c_str());
 			}
 #endif
@@ -465,11 +480,10 @@ bool rpc_manager::invoke(entry& e, udp::endpoint const& target_addr
 	node& n = o->algorithm()->get_node();
 	if (!n.native_address(o->target_addr()))
 	{
-		a["want"].list().push_back(entry(n.protocol_family_name()));
+		a["want"].list().emplace_back(n.protocol_family_name());
 	}
 
 	o->set_target(target_addr);
-	o->set_transaction_id(tid);
 
 #ifndef TORRENT_DISABLE_LOGGING
 	if (m_log != nullptr && m_log->should_log(dht_logger::rpc_manager))
@@ -480,7 +494,7 @@ bool rpc_manager::invoke(entry& e, udp::endpoint const& target_addr
 	}
 #endif
 
-	if (m_sock->send_packet(e, target_addr))
+	if (m_sock_man->send_packet(m_sock, e, target_addr))
 	{
 		m_transactions.insert(std::make_pair(tid, o));
 #if TORRENT_USE_ASSERTS
@@ -497,7 +511,7 @@ observer::~observer()
 	// reported back to the traversal_algorithm as
 	// well. If it wasn't sent, it cannot have been
 	// reported back
-	TORRENT_ASSERT(m_was_sent == ((flags & flag_done) != 0) || m_was_abandoned);
+	TORRENT_ASSERT(m_was_sent == bool(flags & flag_done) || m_was_abandoned);
 	TORRENT_ASSERT(!m_in_constructor);
 #if TORRENT_USE_ASSERTS
 	TORRENT_ASSERT(m_in_use);

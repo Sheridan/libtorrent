@@ -41,7 +41,10 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <tuple>
 
 #include "libtorrent/config.hpp"
-#include "libtorrent/buffer.hpp"
+#include "libtorrent/span.hpp"
+#include "libtorrent/string_view.hpp"
+#include "libtorrent/time.hpp" // for seconds32
+#include "libtorrent/optional.hpp"
 
 namespace libtorrent {
 
@@ -60,14 +63,8 @@ namespace libtorrent {
 		enum flags_t { dont_parse_chunks = 1 };
 		explicit http_parser(int flags = 0);
 		~http_parser();
-		std::string const& header(char const* key) const
-		{
-			static std::string empty;
-			auto const i = m_header.find(key);
-			if (i == m_header.end()) return empty;
-			return i->second;
-		}
-
+		std::string const& header(string_view key) const;
+		boost::optional<seconds32> header_duration(string_view key) const;
 		std::string const& protocol() const { return m_protocol; }
 		int status_code() const { return m_status_code; }
 		std::string const& method() const { return m_method; }
@@ -94,7 +91,7 @@ namespace libtorrent {
 		// instanced parsed. It will use the internal chunk list to determine
 		// where the chunks are in the buffer. It returns the new length of
 		// the buffer
-		int collapse_chunk_headers(char* buffer, int size) const;
+		span<char> collapse_chunk_headers(span<char> buffer) const;
 
 		// returns false if the buffer doesn't contain a complete
 		// chunk header. In this case, call the function again with

@@ -130,49 +130,50 @@ POSSIBILITY OF SUCH DAMAGE.
 	}
 
 namespace libtorrent {
+namespace aux {
 
 	template <class S>
 	struct socket_type_int_impl
-	{ enum { value = 0 }; };
+	{ static constexpr int value = 0; };
 
 	template <>
 	struct socket_type_int_impl<tcp::socket>
-	{ enum { value = 1 }; };
+	{ static constexpr int value = 1; };
 
 	template <>
 	struct socket_type_int_impl<socks5_stream>
-	{ enum { value = 2 }; };
+	{ static constexpr int value = 2; };
 
 	template <>
 	struct socket_type_int_impl<http_stream>
-	{ enum { value = 3 }; };
+	{ static constexpr int value = 3; };
 
 	template <>
 	struct socket_type_int_impl<utp_stream>
-	{ enum { value = 4 }; };
+	{ static constexpr int value = 4; };
 
 #if TORRENT_USE_I2P
 	template <>
 	struct socket_type_int_impl<i2p_stream>
-	{ enum { value = 5 }; };
+	{ static constexpr int value = 5; };
 #endif
 
 #ifdef TORRENT_USE_OPENSSL
 	template <>
 	struct socket_type_int_impl<ssl_stream<tcp::socket>>
-	{ enum { value = 6 }; };
+	{ static constexpr int value = 6; };
 
 	template <>
 	struct socket_type_int_impl<ssl_stream<socks5_stream>>
-	{ enum { value = 7 }; };
+	{ static constexpr int value = 7; };
 
 	template <>
 	struct socket_type_int_impl<ssl_stream<http_stream>>
-	{ enum { value = 8 }; };
+	{ static constexpr int value = 8; };
 
 	template <>
 	struct socket_type_int_impl<ssl_stream<utp_stream>>
-	{ enum { value = 9 }; };
+	{ static constexpr int value = 9; };
 #endif
 
 	struct TORRENT_EXTRA_EXPORT socket_type
@@ -258,6 +259,14 @@ namespace libtorrent {
 		error_code set_option(SettableSocketOption const& opt, error_code& ec)
 		{ TORRENT_SOCKTYPE_FORWARD_RET(set_option(opt, ec), ec) }
 
+		void non_blocking(bool b, error_code& ec)
+		{ TORRENT_SOCKTYPE_FORWARD(non_blocking(b, ec)) }
+
+#ifndef BOOST_NO_EXCEPTIONS
+		void non_blocking(bool b)
+		{ TORRENT_SOCKTYPE_FORWARD(non_blocking(b)) }
+#endif
+
 #ifndef BOOST_NO_EXCEPTIONS
 		template <class GettableSocketOption>
 		void get_option(GettableSocketOption& opt)
@@ -332,6 +341,7 @@ namespace libtorrent {
 
 	// properly shuts down SSL sockets. holder keeps s alive
 	void async_shutdown(socket_type& s, std::shared_ptr<void> holder);
+}
 }
 
 #endif

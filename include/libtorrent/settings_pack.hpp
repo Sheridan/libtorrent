@@ -35,6 +35,7 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #include "libtorrent/entry.hpp"
 #include "libtorrent/string_view.hpp"
+#include "libtorrent/flags.hpp"
 
 #include <vector>
 #include <memory>
@@ -64,6 +65,7 @@ namespace libtorrent {
 	TORRENT_EXTRA_EXPORT void save_settings_to_dict(aux::session_settings const& s, entry::dictionary_type& sett);
 	TORRENT_EXTRA_EXPORT void apply_pack(settings_pack const* pack, aux::session_settings& sett
 		, aux::session_impl* ses = nullptr);
+	TORRENT_EXTRA_EXPORT void run_all_updates(aux::session_impl& ses);
 
 	TORRENT_EXPORT int setting_by_name(std::string const& name);
 	TORRENT_EXPORT char const* name_for_setting(int s);
@@ -86,14 +88,17 @@ namespace libtorrent {
 
 		settings_pack() = default;
 		settings_pack(settings_pack const&) = default;
-		settings_pack(settings_pack&&) = default;
+		settings_pack(settings_pack&&) noexcept = default;
 		settings_pack& operator=(settings_pack const&) = default;
-		settings_pack& operator=(settings_pack&&) = default;
+		settings_pack& operator=(settings_pack&&) noexcept = default;
 
 		void set_str(int name, std::string val);
 		void set_int(int name, int val);
 		void set_bool(int name, bool val);
 		bool has_val(int name) const;
+		template <typename Type, typename Tag>
+		void set_int(int name, flags::bitfield_flag<Type, Tag> const val)
+		{ set_int(name, static_cast<int>(static_cast<Type>(val))); }
 
 		// clear the settings pack from all settings
 		void clear();
@@ -199,11 +204,6 @@ namespace libtorrent {
 			// GUID must be uppercased string embraced in curly brackets.
 			// ``{E4F0B674-0DFC-48BB-98A5-2AA730BDB6D6}::7777`` - will accept
 			// connections on port 7777 on adapter with this GUID.
-			//
-			// .. note::
-			//   The current support for opening arbitrary UDP sockets is limited.
-			//   In this version of libtorrent, there will only ever be two UDP
-			//   sockets, one for IPv4 and one for IPv6.
 			listen_interfaces,
 
 			// when using a poxy, this is the hostname where the proxy is running
@@ -223,7 +223,7 @@ namespace libtorrent {
 
 			// this is the fingerprint for the client. It will be used as the
 			// prefix to the peer_id. If this is 20 bytes (or longer) it will be
-			// truncated at 20 bytes and used as the entire peer-id
+			// truncated to 20 bytes and used as the entire peer-id
 			//
 			// There is a utility function, generate_fingerprint() that can be used
 			// to generate a standard client peer ID fingerprint prefix.
@@ -503,10 +503,10 @@ namespace libtorrent {
 			no_recheck_incomplete_resume,
 
 			// ``anonymous_mode`` defaults to false. When set to true, the client
-			// tries to hide its identity to a certain degree. The peer-ID will no
-			// longer include the client's fingerprint. The user-agent will be
-			// reset to an empty string. Trackers will only be used if they are
-			// using a proxy server. The listen sockets are closed, and incoming
+			// tries to hide its identity to a certain degree. The user-agent will be
+			// reset to an empty string (except for private torrents). Trackers
+			// will only be used if they are using a proxy server.
+			// The listen sockets are closed, and incoming
 			// connections will only be accepted through a SOCKS5 or I2P proxy (if
 			// a peer proxy is set up and is run on the same machine as the
 			// tracker proxy). Since no incoming connections are accepted,
@@ -583,6 +583,7 @@ namespace libtorrent {
 			deprecated19,
 #endif
 
+#ifndef TORRENT_NO_DEPRECATE
 			// ``lock_files`` determines whether or not to lock files which
 			// libtorrent is downloading to or seeding from. This is implemented
 			// using ``fcntl(F_SETLK)`` on unix systems and by not passing in
@@ -590,6 +591,9 @@ namespace libtorrent {
 			// 3rd party processes from corrupting the files under libtorrent's
 			// feet.
 			lock_files,
+#else
+			deprecated26,
+#endif
 
 #ifndef TORRENT_NO_DEPRECATE
 			// ``contiguous_recv_buffer`` determines whether or not libtorrent
@@ -643,11 +647,15 @@ namespace libtorrent {
 			// failure is preferred, set this to false.
 			listen_system_port_fallback,
 
+#ifndef TORRENT_NO_DEPRECATE
 			// ``use_disk_cache_pool`` enables using a pool allocator for disk
 			// cache blocks. Enabling it makes the cache perform better at high
 			// throughput. It also makes the cache less likely and slower at
 			// returning memory back to the system, once allocated.
 			use_disk_cache_pool,
+#else
+			deprecated24,
+#endif
 
 			// when this is true, and incoming encrypted connections are enabled,
 			// &supportcrypt=1 is included in http tracker announces
@@ -675,7 +683,7 @@ namespace libtorrent {
 			enable_natpmp,
 
 			// Starts and stops Local Service Discovery. This service will
-			// broadcast the infohashes of all the non-private torrents on the
+			// broadcast the info-hashes of all the non-private torrents on the
 			// local network to look for peers on the same swarm within multicast
 			// reach.
 			enable_lsd,
@@ -709,6 +717,16 @@ namespace libtorrent {
 			// any.
 			proxy_tracker_connections,
 
+			// Starts and stops the internal IP table route changes notifier.
+			//
+			// The current implementation supports multiple platforms, and it is
+			// recommended to have it enable, but you may want to disable it if
+			// it's supported but unreliable, or if you have a better way to
+			// detect the changes. In the later case, you should manually call
+			// ``session_handle::reopen_network_sockets`` to ensure network
+			// changes are taken in consideration.
+			enable_ip_notifier,
+
 			max_bool_setting_internal
 		};
 
@@ -716,8 +734,7 @@ namespace libtorrent {
 		{
 			// ``tracker_completion_timeout`` is the number of seconds the tracker
 			// connection will wait from when it sent the request until it
-			// considers the tracker to have timed-out. Default value is 60
-			// seconds.
+			// considers the tracker to have timed-out.
 			tracker_completion_timeout = int_type_base,
 
 			// ``tracker_receive_timeout`` is the number of seconds to wait to
@@ -727,9 +744,11 @@ namespace libtorrent {
 			// occur.
 			tracker_receive_timeout,
 
-			// the time to wait when sending a stopped message before considering
-			// a tracker to have timed out. this is usually shorter, to make the
-			// client quit faster
+			// ``stop_tracker_timeout`` is the number of seconds to wait when
+			// sending a stopped message before considering a tracker to have
+			// timed out. This is usually shorter, to make the client quit faster.
+			// If the value is set to 0, the connections to trackers with the
+			// stopped event are suppressed.
 			stop_tracker_timeout,
 
 			// this is the maximum number of bytes in a tracker response. If a
@@ -869,7 +888,7 @@ namespace libtorrent {
 			//   the most recent pieces that are in the read cache.
 			suggest_mode,
 
-			// ``max_queued_disk_bytes`` is the number maximum number of bytes, to
+			// ``max_queued_disk_bytes`` is the maximum number of bytes, to
 			// be written to disk, that can wait in the disk I/O thread queue.
 			// This queue is only for waiting for the disk I/O thread to receive
 			// the job and either write it to disk or insert it in the write
@@ -914,7 +933,7 @@ namespace libtorrent {
 			//
 			// * ``fixed_slots_choker`` is the traditional choker with a fixed
 			//   number of unchoke slots (as specified by
-			//   ``session::set_max_uploads()``).
+			//   ``settings_pack::unchoke_slots_limit``).
 			//
 			// * ``rate_based_choker`` opens up unchoke slots based on the upload
 			//   rate achieved to peers. The more slots that are opened, the
@@ -959,20 +978,18 @@ namespace libtorrent {
 			// physical RAM available in the machine divided by 8. If the amount
 			// of physical RAM cannot be determined, it's set to 1024 (= 16 MiB).
 			//
-			// Disk buffers are allocated using a pool allocator, the number of
-			// blocks that are allocated at a time when the pool needs to grow can
-			// be specified in ``cache_buffer_chunk_size``. Lower numbers saves
-			// memory at the expense of more heap allocations. If it is set to 0,
-			// the effective chunk size is proportional to the total cache size,
-			// attempting to strike a good balance between performance and memory
-			// usage. It defaults to 0. ``cache_expiry`` is the number of seconds
-			// from the last cached write to a piece in the write cache, to when
-			// it's forcefully flushed to disk. Default is 60 second.
+			// ``cache_expiry`` is the number of seconds from the last cached write
+			// to a piece in the write cache, to when it's forcefully flushed to
+			// disk. Default is 60 second.
 			//
 			// On 32 bit builds, the effective cache size will be limited to 3/4 of
 			// 2 GiB to avoid exceeding the virtual address space limit.
 			cache_size,
+#ifndef TORRENT_NO_DEPRECATE
 			cache_buffer_chunk_size,
+#else
+			deprecated25,
+#endif
 			cache_expiry,
 
 			// determines how files are opened when they're in read only mode
@@ -1426,7 +1443,11 @@ namespace libtorrent {
 
 			// ``alert_queue_size`` is the maximum number of alerts queued up
 			// internally. If alerts are not popped, the queue will eventually
-			// fill up to this level.
+			// fill up to this level. Once the alert queue is full, additional
+			// alerts will be dropped, and not delievered to the client. Once the
+			// client drains the queue, new alerts may be delivered again. In order
+			// to know that alerts have been dropped, see
+			// session_handle::dropped_alerts().
 			alert_queue_size,
 
 			// ``max_metadata_size`` is the maximum allowed size (in bytes) to be
@@ -1434,7 +1455,7 @@ namespace libtorrent {
 			max_metadata_size,
 
 #ifndef TORRENT_NO_DEPRECATE
-			// DEPRECTED: use aio_threads instead
+			// DEPRECATED: use aio_threads instead
 
 			// ``hashing_threads`` is the number of threads to use for piece hash
 			// verification. It defaults to 1. For very high download rates, on
@@ -1503,8 +1524,10 @@ namespace libtorrent {
 			// when a seeding torrent reaches either the share ratio (bytes up /
 			// bytes down) or the seed time ratio (seconds as seed / seconds as
 			// downloader) or the seed time limit (seconds as seed) it is
-			// considered done, and it will leave room for other torrents these
-			// are specified as percentages
+			// considered done, and it will leave room for other torrents. These
+			// are specified as percentages. Torrents that are considered done will
+			// still be allowed to be seeded, they just won't have priority anymore.
+			// For more, see queuing_.
 			share_ratio_limit,
 			seed_time_ratio_limit,
 

@@ -45,6 +45,8 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/storage_defs.hpp"
 #include "libtorrent/time.hpp"
 #include "libtorrent/sha1_hash.hpp"
+#include "libtorrent/flags.hpp"
+#include "libtorrent/session_types.hpp"
 
 namespace libtorrent {
 
@@ -57,44 +59,52 @@ namespace libtorrent {
 	struct counters;
 	struct settings_pack;
 	struct storage_params;
+	struct storage_error;
 	class file_storage;
 
 	struct storage_holder;
 
-	enum file_open_mode
+	using file_open_mode_t = flags::bitfield_flag<std::uint8_t, struct file_open_mode_tag>;
+
+	// this is a bittorrent constant
+	constexpr int default_block_size = 0x4000;
+
+	namespace file_open_mode
 	{
 		// open the file for reading only
-		read_only = 0,
+		constexpr file_open_mode_t read_only{};
 
 		// open the file for writing only
-		write_only = 1,
+		constexpr file_open_mode_t write_only = 0_bit;
 
 		// open the file for reading and writing
-		read_write = 2,
+		constexpr file_open_mode_t read_write = 1_bit;
 
 		// the mask for the bits determining read or write mode
-		rw_mask = read_only | write_only | read_write,
+		constexpr file_open_mode_t rw_mask = read_only | write_only | read_write;
 
 		// open the file in sparse mode (if supported by the
 		// filesystem).
-		sparse = 0x4,
+		constexpr file_open_mode_t sparse = 2_bit;
 
 		// don't update the access timestamps on the file (if
 		// supported by the operating system and filesystem).
 		// this generally improves disk performance.
-		no_atime = 0x8,
+		constexpr file_open_mode_t no_atime = 3_bit;
 
 		// open the file for random access. This disables read-ahead
 		// logic
-		random_access = 0x10,
+		constexpr file_open_mode_t random_access = 5_bit;
 
+#ifndef TORRENT_NO_DEPRECATE
 		// prevent the file from being opened by another process
 		// while it's still being held open by this handle
-		locked = 0x20,
-	};
+		constexpr file_open_mode_t TORRENT_DEPRECATED locked = 6_bit;
+#endif
+	}
 
 	// this contains information about a file that's currently open by the
-	// libtorrent disk I/O subsystem. It's associated with a single torent.
+	// libtorrent disk I/O subsystem. It's associated with a single torrent.
 	struct TORRENT_EXPORT open_file_state
 	{
 		// the index of the file this entry refers to into the ``file_storage``
@@ -107,7 +117,7 @@ namespace libtorrent {
 		//
 		// Note that the read/write mode is not a bitmask. The two least significant bits are used
 		// to represent the read/write mode. Those bits can be masked out using the ``rw_mask`` constant.
-		std::uint32_t open_mode;
+		file_open_mode_t open_mode;
 
 		// a (high precision) timestamp of when the file was last used.
 		time_point last_use;
@@ -117,19 +127,25 @@ namespace libtorrent {
 	using pool_file_status = open_file_state;
 #endif
 
+	using disk_job_flags_t = flags::bitfield_flag<std::uint8_t, struct disk_job_flags_tag>;
+
 	struct TORRENT_EXTRA_EXPORT disk_interface
 	{
-		enum flags_t : std::uint8_t
-		{
-			sequential_access = 0x1,
+		// force making a copy of the cached block, rather
+		// than getting a reference to the block already in
+		// the cache.
+		static constexpr disk_job_flags_t force_copy = 0_bit;
 
-			// this flag is set on a job when a read operation did
-			// not hit the disk, but found the data in the read cache.
-			cache_hit = 0x2,
+		// hint that there may be more disk operations with sequential access to
+		// the file
+		static constexpr disk_job_flags_t sequential_access = 3_bit;
 
-			// don't keep the read block in cache
-			volatile_read = 0x10,
-		};
+		// don't keep the read block in cache
+		static constexpr disk_job_flags_t volatile_read = 4_bit;
+
+		// this flag is set on a job when a read operation did
+		// not hit the disk, but found the data in the read cache.
+		static constexpr disk_job_flags_t cache_hit = 5_bit;
 
 		virtual storage_holder new_torrent(storage_constructor_type sc
 			, storage_params p, std::shared_ptr<void> const&) = 0;
@@ -137,15 +153,15 @@ namespace libtorrent {
 		virtual storage_interface* get_torrent(storage_index_t) = 0;
 
 		virtual void async_read(storage_index_t storage, peer_request const& r
-			, std::function<void(disk_buffer_holder block, std::uint32_t flags, storage_error const& se)> handler
-			, void* requester, std::uint8_t flags = 0) = 0;
+			, std::function<void(disk_buffer_holder block, disk_job_flags_t flags, storage_error const& se)> handler
+			, disk_job_flags_t flags = {}) = 0;
 		virtual bool async_write(storage_index_t storage, peer_request const& r
 			, char const* buf, std::shared_ptr<disk_observer> o
 			, std::function<void(storage_error const&)> handler
-			, std::uint8_t flags = 0) = 0;
-		virtual void async_hash(storage_index_t storage, piece_index_t piece, std::uint8_t flags
-			, std::function<void(piece_index_t, sha1_hash const&, storage_error const&)> handler, void* requester) = 0;
-		virtual void async_move_storage(storage_index_t storage, std::string p, std::uint8_t flags
+			, disk_job_flags_t flags = {}) = 0;
+		virtual void async_hash(storage_index_t storage, piece_index_t piece, disk_job_flags_t flags
+			, std::function<void(piece_index_t, sha1_hash const&, storage_error const&)> handler) = 0;
+		virtual void async_move_storage(storage_index_t storage, std::string p, move_flags_t flags
 			, std::function<void(status_t, std::string const&, storage_error const&)> handler) = 0;
 		virtual void async_release_files(storage_index_t storage
 			, std::function<void()> handler = std::function<void()>()) = 0;
@@ -160,10 +176,10 @@ namespace libtorrent {
 		virtual void async_rename_file(storage_index_t storage
 			, file_index_t index, std::string name
 			, std::function<void(std::string const&, file_index_t, storage_error const&)> handler) = 0;
-		virtual void async_delete_files(storage_index_t storage, int options
+		virtual void async_delete_files(storage_index_t storage, remove_flags_t options
 			, std::function<void(storage_error const&)> handler) = 0;
 		virtual void async_set_file_priority(storage_index_t storage
-			, aux::vector<std::uint8_t, file_index_t> prio
+			, aux::vector<download_priority_t, file_index_t> prio
 			, std::function<void(storage_error const&)> handler) = 0;
 
 		virtual void async_clear_piece(storage_index_t storage, piece_index_t index
@@ -175,6 +191,8 @@ namespace libtorrent {
 			, bool no_pieces = true, bool session = true) const = 0;
 
 		virtual std::vector<open_file_state> get_status(storage_index_t) const = 0;
+
+		virtual void submit_jobs() = 0;
 
 #if TORRENT_USE_ASSERTS
 		virtual bool is_disk_buffer(char* buffer) const = 0;
@@ -212,14 +230,14 @@ namespace libtorrent {
 		storage_holder(storage_holder const&) = delete;
 		storage_holder& operator=(storage_holder const&) = delete;
 
-		storage_holder(storage_holder&& rhs)
+		storage_holder(storage_holder&& rhs) noexcept
 			: m_disk_io(rhs.m_disk_io)
 			, m_idx(rhs.m_idx)
 		{
 				rhs.m_disk_io = nullptr;
 		}
 
-		storage_holder& operator=(storage_holder&& rhs)
+		storage_holder& operator=(storage_holder&& rhs) noexcept
 		{
 			if (m_disk_io) m_disk_io->remove_torrent(m_idx);
 			m_disk_io = rhs.m_disk_io;

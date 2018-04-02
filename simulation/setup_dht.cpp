@@ -30,13 +30,14 @@ POSSIBILITY OF SUCH DAMAGE.
 
 */
 
-#include "libtorrent/session_settings.hpp"
+#include "libtorrent/kademlia/dht_settings.hpp"
 #include "libtorrent/io_service.hpp"
 #include "libtorrent/deadline_timer.hpp"
 #include "libtorrent/address.hpp"
 #include "libtorrent/time.hpp"
 #include "libtorrent/kademlia/node.hpp"
 #include "libtorrent/kademlia/dht_observer.hpp"
+#include "libtorrent/aux_/session_impl.hpp"
 #include "setup_transfer.hpp"
 #include <memory> // for unique_ptr
 #include <random>
@@ -44,12 +45,12 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/random.hpp"
 #include "libtorrent/crc32c.hpp"
 #include "libtorrent/alert_types.hpp" // for dht_routing_bucket
+#include "libtorrent/aux_/listen_socket_handle.hpp"
 
 #include "setup_dht.hpp"
 
-namespace lt = libtorrent;
 using namespace sim;
-using namespace libtorrent;
+using namespace lt;
 
 #ifndef TORRENT_DISABLE_DHT
 
@@ -76,43 +77,44 @@ namespace {
 		return dht::generate_id(addr);
 	}
 
+	std::shared_ptr<lt::aux::listen_socket_t> sim_listen_socket(tcp::endpoint ep)
+	{
+		auto ls = std::make_shared<lt::aux::listen_socket_t>();
+		ls->external_address.cast_vote(ep.address()
+			, lt::aux::session_interface::source_dht, lt::address());
+		ls->local_endpoint = ep;
+		return ls;
+	}
+
 } // anonymous namespace
 
-struct dht_node final : lt::dht::udp_socket_interface
+struct dht_node final : lt::dht::socket_manager
 {
-	dht_node(sim::simulation& sim, lt::dht_settings const& sett, lt::counters& cnt
+	dht_node(sim::simulation& sim, lt::dht::dht_settings const& sett, lt::counters& cnt
 		, int const idx, std::uint32_t const flags)
 		: m_io_service(sim, (flags & dht_network::bind_ipv6) ? addr6_from_int(idx) : addr_from_int(idx))
 		, m_dht_storage(lt::dht::dht_default_storage_constructor(sett))
-#if LIBSIMULATOR_USE_MOVE
-		, m_socket(m_io_service)
-		, m_dht((flags & dht_network::bind_ipv6) ? udp::v6() : udp::v4()
-			, this, sett, id_from_addr(m_io_service.get_ips().front())
-			, nullptr, cnt, m_nodes, *m_dht_storage)
-#else
-		, m_socket(new asio::ip::udp::socket(m_io_service))
-		, m_dht(new lt::dht::node((flags & dht_network::bind_ipv6) ? udp::v6() : udp::v4()
-			, this, sett, id_from_addr(m_io_service.get_ips().front())
-			, nullptr, cnt, m_nodes, *m_dht_storage))
-#endif
 		, m_add_dead_nodes((flags & dht_network::add_dead_nodes) != 0)
 		, m_ipv6((flags & dht_network::bind_ipv6) != 0)
+		, m_socket(m_io_service)
+		, m_ls(sim_listen_socket(tcp::endpoint(m_io_service.get_ips().front(), 6881)))
+		, m_dht(m_ls, this, sett, id_from_addr(m_io_service.get_ips().front())
+			, nullptr, cnt
+			, [](lt::dht::node_id const&, std::string const&) -> lt::dht::node* { return nullptr; }
+			, *m_dht_storage)
 	{
 		m_dht_storage->update_node_ids({id_from_addr(m_io_service.get_ips().front())});
-		m_nodes.insert(std::make_pair(dht().protocol_family_name(), &dht()));
 		error_code ec;
 		sock().open(m_ipv6 ? asio::ip::udp::v6() : asio::ip::udp::v4());
 		sock().bind(asio::ip::udp::endpoint(
 			m_ipv6 ? lt::address(lt::address_v6::any()) : lt::address(lt::address_v4::any()), 6881));
 
-		udp::socket::non_blocking_io ioc(true);
-		sock().io_control(ioc);
+		sock().non_blocking(true);
 		sock().async_receive_from(asio::mutable_buffers_1(m_buffer, sizeof(m_buffer))
 			, m_ep, [&](lt::error_code const& ec, std::size_t bytes_transferred)
 				{ this->on_read(ec, bytes_transferred); });
 	}
 
-#if LIBSIMULATOR_USE_MOVE
 	// This type is not copyable, because the socket and the dht node is not
 	// copyable.
 	dht_node(dht_node const&) = delete;
@@ -120,32 +122,16 @@ struct dht_node final : lt::dht::udp_socket_interface
 
 	// it's also not movable, because it passes in its this-pointer to the async
 	// receive function, which pins this object down. However, std::vector cannot
-	// hold non-movable and non-copyable types. Instead, pretend that it's
-	// movable and make sure it never needs to be moved (for instance, by
-	// reserving space in the vector before emplacing any nodes).
-	dht_node(dht_node&& n) noexcept
-		: m_socket(std::move(n.m_socket))
-		, m_dht(n.m_ipv6 ? udp::v6() : udp::v4(), this, n.m_dht.settings(), n.m_dht.nid()
-			, n.m_dht.observer(), n.m_dht.stats_counters()
-			, std::map<std::string, lt::dht::node*>(), *n.m_dht_storage)
-	{
-		assert(false && "dht_node is not movable");
-		throw std::runtime_error("dht_node is not movable");
-	}
-	dht_node& operator=(dht_node&&)
-		noexcept
-	{
-		assert(false && "dht_node is not movable");
-		throw std::runtime_error("dht_node is not movable");
-	}
-#endif
+	// hold non-movable and non-copyable types.
+	dht_node(dht_node&& n) = delete;
+	dht_node& operator=(dht_node&&) = delete;
 
 	void on_read(lt::error_code const& ec, std::size_t bytes_transferred)
 	{
 		if (ec) return;
 
-		using libtorrent::entry;
-		using libtorrent::bdecode;
+		using lt::entry;
+		using lt::bdecode;
 
 		int pos;
 		error_code err;
@@ -153,13 +139,13 @@ struct dht_node final : lt::dht::udp_socket_interface
 		// since the simulation is single threaded, we can get away with just
 		// allocating a single of these
 		static bdecode_node msg;
-		int ret = bdecode(m_buffer, m_buffer + bytes_transferred, msg, err, &pos, 10, 500);
+		int const ret = bdecode(m_buffer, m_buffer + bytes_transferred, msg, err, &pos, 10, 500);
 		if (ret != 0) return;
 
 		if (msg.type() != bdecode_node::dict_t) return;
 
-		libtorrent::dht::msg m(msg, m_ep);
-		dht().incoming(m);
+		lt::dht::msg m(msg, m_ep);
+		dht().incoming(m_ls, m);
 
 		sock().async_receive_from(asio::mutable_buffers_1(m_buffer, sizeof(m_buffer))
 			, m_ep, [&](lt::error_code const& ec, std::size_t bytes_transferred)
@@ -167,7 +153,7 @@ struct dht_node final : lt::dht::udp_socket_interface
 	}
 
 	bool has_quota() override { return true; }
-	bool send_packet(entry& e, udp::endpoint const& addr) override
+	bool send_packet(lt::aux::listen_socket_handle const& s, entry& e, udp::endpoint const& addr) override
 	{
 		// since the simulaton is single threaded, we can get away with allocating
 		// just a single send buffer
@@ -246,30 +232,19 @@ struct dht_node final : lt::dht::udp_socket_interface
 		sock().close();
 	}
 
-#if LIBSIMULATOR_USE_MOVE
 	lt::dht::node& dht() { return m_dht; }
 	lt::dht::node const& dht() const { return m_dht; }
-#else
-	lt::dht::node& dht() { return *m_dht; }
-	lt::dht::node const& dht() const { return *m_dht; }
-#endif
 
 private:
 	asio::io_service m_io_service;
 	std::shared_ptr<dht::dht_storage_interface> m_dht_storage;
-	std::map<std::string, lt::dht::node*> m_nodes;
-#if LIBSIMULATOR_USE_MOVE
+	bool const m_add_dead_nodes;
+	bool const m_ipv6;
 	lt::udp::socket m_socket;
 	lt::udp::socket& sock() { return m_socket; }
+	std::shared_ptr<lt::aux::listen_socket_t> m_ls;
 	lt::dht::node m_dht;
-#else
-	std::shared_ptr<lt::udp::socket> m_socket;
-	lt::udp::socket& sock() { return *m_socket; }
-	std::shared_ptr<lt::dht::node> m_dht;
-#endif
 	lt::udp::endpoint m_ep;
-	bool m_add_dead_nodes;
-	bool m_ipv6;
 	char m_buffer[1300];
 };
 
@@ -277,7 +252,6 @@ dht_network::dht_network(sim::simulation& sim, int num_nodes, std::uint32_t flag
 {
 	m_sett.ignore_dark_internet = false;
 	m_sett.restrict_routing_ips = false;
-	m_nodes.reserve(num_nodes);
 
 // TODO: how can we introduce churn among peers?
 

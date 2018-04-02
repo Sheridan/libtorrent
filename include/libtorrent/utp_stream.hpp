@@ -40,6 +40,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/error_code.hpp"
 #include "libtorrent/time.hpp"
 #include "libtorrent/close_reason.hpp"
+#include "libtorrent/broadcast_socket.hpp" // for is_v4
 
 #include <functional>
 
@@ -98,12 +99,12 @@ namespace libtorrent {
 		char m_storage[sizeof(T)];
 	};
 
-	typedef big_endian_int<std::uint64_t> be_uint64;
-	typedef big_endian_int<std::uint32_t> be_uint32;
-	typedef big_endian_int<std::uint16_t> be_uint16;
-	typedef big_endian_int<std::int64_t> be_int64;
-	typedef big_endian_int<std::int32_t> be_int32;
-	typedef big_endian_int<std::int16_t> be_int16;
+	using be_uint64 = big_endian_int<std::uint64_t>;
+	using be_uint32 = big_endian_int<std::uint32_t>;
+	using be_uint16 = big_endian_int<std::uint16_t>;
+	using be_int64 = big_endian_int<std::int64_t>;
+	using be_int32 = big_endian_int<std::int32_t>;
+	using be_int16 = big_endian_int<std::int16_t>;
 
 /*
 	uTP header from BEP 29
@@ -148,15 +149,19 @@ struct utp_header
 };
 
 struct utp_socket_impl;
+struct utp_socket_interface;
 
 utp_socket_impl* construct_utp_impl(std::uint16_t recv_id
 	, std::uint16_t send_id, void* userdata
 	, utp_socket_manager& sm);
 void detach_utp_impl(utp_socket_impl* s);
 void delete_utp_impl(utp_socket_impl* s);
+void utp_abort(utp_socket_impl* s);
 bool should_delete(utp_socket_impl* s);
+bool bound_to_udp_socket(utp_socket_impl* s, std::weak_ptr<utp_socket_interface> sock);
 void tick_utp_impl(utp_socket_impl* s, time_point now);
 void utp_init_mtu(utp_socket_impl* s, int link_mtu, int utp_mtu);
+void utp_init_socket(utp_socket_impl* s, std::weak_ptr<utp_socket_interface> sock);
 bool utp_incoming_packet(utp_socket_impl* s, span<char const> p
 	, udp::endpoint const& ep, time_point receive_time);
 bool utp_match(utp_socket_impl* s, udp::endpoint const& ep, std::uint16_t id);
@@ -183,12 +188,17 @@ struct TORRENT_EXTRA_EXPORT utp_stream
 	using endpoint_type = tcp::socket::endpoint_type;
 	using protocol_type = tcp::socket::protocol_type;
 
+#if BOOST_VERSION >= 106600
+	using executor_type = tcp::socket::executor_type;
+	executor_type get_executor() { return m_io_service.get_executor(); }
+#endif
+
 	explicit utp_stream(io_service& io_service);
 	~utp_stream();
 	utp_stream& operator=(utp_stream const&) = delete;
 	utp_stream(utp_stream const&) = delete;
-	utp_stream& operator=(utp_stream&&) = default;
-	utp_stream(utp_stream&&) = default;
+	utp_stream& operator=(utp_stream&&) noexcept = default;
+	utp_stream(utp_stream&&) noexcept = default;
 
 	lowest_layer_type& lowest_layer() { return *this; }
 
@@ -203,6 +213,12 @@ struct TORRENT_EXTRA_EXPORT utp_stream
 
 	template <class IO_Control_Command>
 	void io_control(IO_Control_Command&, error_code&) {}
+
+#ifndef BOOST_NO_EXCEPTIONS
+	void non_blocking(bool) {}
+#endif
+
+	error_code non_blocking(bool, error_code&) { return error_code(); }
 
 #ifndef BOOST_NO_EXCEPTIONS
 	void bind(endpoint_type const& /*endpoint*/) {}
@@ -249,11 +265,11 @@ struct TORRENT_EXTRA_EXPORT utp_stream
 	static void on_connect(void* self, error_code const& ec, bool kill);
 	static void on_close_reason(void* self, close_reason_t reason);
 
-	void add_read_buffer(void* buf, size_t len);
+	void add_read_buffer(void* buf, std::size_t len);
 	void issue_read();
-	void add_write_buffer(void const* buf, size_t len);
+	void add_write_buffer(void const* buf, std::size_t len);
 	void issue_write();
-	size_t read_some(bool clear_buffers);
+	std::size_t read_some(bool clear_buffers);
 
 	int send_delay() const;
 	int recv_delay() const;
@@ -284,15 +300,15 @@ struct TORRENT_EXTRA_EXPORT utp_stream
 	template <class Handler>
 	void async_connect(endpoint_type const& endpoint, Handler const& handler)
 	{
-		if (!endpoint.address().is_v4())
+		if (!is_v4(endpoint))
 		{
-			m_io_service.post(std::bind<void>(handler, boost::asio::error::operation_not_supported, 0));
+			m_io_service.post(std::bind<void>(handler, boost::asio::error::operation_not_supported));
 			return;
 		}
 
-		if (m_impl == 0)
+		if (m_impl == nullptr)
 		{
-			m_io_service.post(std::bind<void>(handler, boost::asio::error::not_connected, 0));
+			m_io_service.post(std::bind<void>(handler, boost::asio::error::not_connected));
 			return;
 		}
 
@@ -303,21 +319,26 @@ struct TORRENT_EXTRA_EXPORT utp_stream
 	template <class Mutable_Buffers, class Handler>
 	void async_read_some(Mutable_Buffers const& buffers, Handler const& handler)
 	{
-		if (m_impl == 0)
+		if (m_impl == nullptr)
 		{
-			m_io_service.post(std::bind<void>(handler, boost::asio::error::not_connected, 0));
+			m_io_service.post(std::bind<void>(handler, boost::asio::error::not_connected, std::size_t(0)));
 			return;
 		}
 
 		TORRENT_ASSERT(!m_read_handler);
 		if (m_read_handler)
 		{
-			m_io_service.post(std::bind<void>(handler, boost::asio::error::operation_not_supported, 0));
+			m_io_service.post(std::bind<void>(handler, boost::asio::error::operation_not_supported, std::size_t(0)));
 			return;
 		}
 		std::size_t bytes_added = 0;
+#if BOOST_VERSION >= 106600
+		for (auto i = buffer_sequence_begin(buffers)
+			, end(buffer_sequence_end(buffers)); i != end; ++i)
+#else
 		for (typename Mutable_Buffers::const_iterator i = buffers.begin()
 			, end(buffers.end()); i != end; ++i)
+#endif
 		{
 			if (buffer_size(*i) == 0) continue;
 			using boost::asio::buffer_cast;
@@ -329,7 +350,7 @@ struct TORRENT_EXTRA_EXPORT utp_stream
 		{
 			// if we're reading 0 bytes, post handler immediately
 			// asio's SSL layer depends on this behavior
-			m_io_service.post(std::bind<void>(handler, error_code(), 0));
+			m_io_service.post(std::bind<void>(handler, error_code(), std::size_t(0)));
 			return;
 		}
 
@@ -340,9 +361,9 @@ struct TORRENT_EXTRA_EXPORT utp_stream
 	template <class Handler>
 	void async_read_some(null_buffers const&, Handler const& handler)
 	{
-		if (m_impl == 0)
+		if (m_impl == nullptr)
 		{
-			m_io_service.post(std::bind<void>(handler, boost::asio::error::not_connected, 0));
+			m_io_service.post(std::bind<void>(handler, boost::asio::error::not_connected, std::size_t(0)));
 			return;
 		}
 
@@ -350,15 +371,12 @@ struct TORRENT_EXTRA_EXPORT utp_stream
 		if (m_read_handler)
 		{
 			TORRENT_ASSERT_FAIL(); // we should never do this!
-			m_io_service.post(std::bind<void>(handler, boost::asio::error::operation_not_supported, 0));
+			m_io_service.post(std::bind<void>(handler, boost::asio::error::operation_not_supported, std::size_t(0)));
 			return;
 		}
 		m_read_handler = handler;
 		issue_read();
 	}
-
-	void do_async_connect(endpoint_type const& ep
-		, std::function<void(error_code const&)> const& handler);
 
 	template <class Protocol>
 	void open(Protocol const&, error_code&)
@@ -372,7 +390,7 @@ struct TORRENT_EXTRA_EXPORT utp_stream
 	std::size_t read_some(Mutable_Buffers const& buffers, error_code& ec)
 	{
 		TORRENT_ASSERT(!m_read_handler);
-		if (m_impl == 0)
+		if (m_impl == nullptr)
 		{
 			ec = boost::asio::error::not_connected;
 			return 0;
@@ -387,8 +405,13 @@ struct TORRENT_EXTRA_EXPORT utp_stream
 		size_t buf_size = 0;
 #endif
 
+#if BOOST_VERSION >= 106600
+		for (auto i = buffer_sequence_begin(buffers)
+			, end(buffer_sequence_end(buffers)); i != end; ++i)
+#else
 		for (typename Mutable_Buffers::const_iterator i = buffers.begin()
 			, end(buffers.end()); i != end; ++i)
+#endif
 		{
 			using boost::asio::buffer_cast;
 			using boost::asio::buffer_size;
@@ -436,10 +459,10 @@ struct TORRENT_EXTRA_EXPORT utp_stream
 	template <class Const_Buffers, class Handler>
 	void async_write_some(Const_Buffers const& buffers, Handler const& handler)
 	{
-		if (m_impl == 0)
+		if (m_impl == nullptr)
 		{
 			m_io_service.post(std::bind<void>(handler
-				, boost::asio::error::not_connected, 0));
+				, boost::asio::error::not_connected, std::size_t(0)));
 			return;
 		}
 
@@ -447,13 +470,18 @@ struct TORRENT_EXTRA_EXPORT utp_stream
 		if (m_write_handler)
 		{
 			m_io_service.post(std::bind<void>(handler
-				, boost::asio::error::operation_not_supported, 0));
+				, boost::asio::error::operation_not_supported, std::size_t(0)));
 			return;
 		}
 
 		std::size_t bytes_added = 0;
+#if BOOST_VERSION >= 106600
+		for (auto i = buffer_sequence_begin(buffers)
+			, end(buffer_sequence_end(buffers)); i != end; ++i)
+#else
 		for (typename Const_Buffers::const_iterator i = buffers.begin()
 			, end(buffers.end()); i != end; ++i)
+#endif
 		{
 			if (buffer_size(*i) == 0) continue;
 			using boost::asio::buffer_cast;
@@ -465,7 +493,7 @@ struct TORRENT_EXTRA_EXPORT utp_stream
 		{
 			// if we're writing 0 bytes, post handler immediately
 			// asio's SSL layer depends on this behavior
-			m_io_service.post(std::bind<void>(handler, error_code(), 0));
+			m_io_service.post(std::bind<void>(handler, error_code(), std::size_t(0)));
 			return;
 		}
 		m_write_handler = handler;

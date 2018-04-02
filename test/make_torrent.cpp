@@ -40,10 +40,9 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/file_pool.hpp"
 #include "libtorrent/storage_defs.hpp"
 
-using namespace libtorrent;
+using namespace lt;
 
-std::shared_ptr<libtorrent::torrent_info> make_test_torrent(
-	torrent_args const& args)
+std::shared_ptr<lt::torrent_info> make_test_torrent(torrent_args const& args)
 {
 	entry e;
 
@@ -162,17 +161,24 @@ std::shared_ptr<libtorrent::torrent_info> make_test_torrent(
 	fwrite(&tmp[0], 1, tmp.size(), f);
 	fclose(f);
 
-	return std::make_shared<torrent_info>(&tmp[0], int(tmp.size()));
+	return std::make_shared<torrent_info>(tmp, from_span);
 }
 
-void generate_files(libtorrent::torrent_info const& ti, std::string const& path
+void generate_files(lt::torrent_info const& ti, std::string const& path
 	, bool alternate_data)
 {
 	file_pool fp;
 
-	storage_params params;
-	params.files = &ti.files();
-	params.path = path;
+	aux::vector<download_priority_t, file_index_t> priorities;
+	sha1_hash info_hash;
+	storage_params params{
+		ti.files(),
+		nullptr,
+		path,
+		storage_mode_t::storage_mode_sparse,
+		priorities,
+		info_hash
+	};
 
 	default_storage st(params, fp);
 
@@ -192,7 +198,7 @@ void generate_files(libtorrent::torrent_info const& ti, std::string const& path
 
 		iovec_t b = { &buffer[0], size_t(piece_size) };
 		storage_error ec;
-		int ret = st.writev(b, i, 0, 0, ec);
+		int ret = st.writev(b, i, 0, open_mode::read_only, ec);
 		if (ret != piece_size || ec)
 		{
 			std::printf("ERROR writing files: (%d expected %d) %s\n"

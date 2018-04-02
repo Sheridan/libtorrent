@@ -48,10 +48,6 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <linux/version.h> // for LINUX_VERSION_CODE and KERNEL_VERSION
 #endif // __linux
 
-#if defined TORRENT_DEBUG_BUFFERS && !defined TORRENT_DISABLE_POOL_ALLOCATOR
-#error TORRENT_DEBUG_BUFFERS only works if you also disable pool allocators with TORRENT_DISABLE_POOL_ALLOCATOR
-#endif
-
 #if !defined BOOST_ASIO_SEPARATE_COMPILATION && !defined BOOST_ASIO_DYN_LINK
 #define BOOST_ASIO_SEPARATE_COMPILATION
 #endif
@@ -172,13 +168,6 @@ POSSIBILITY OF SUCH DAMAGE.
 #if TARGET_OS_IPHONE
 #define TORRENT_USE_SC_NETWORK_REACHABILITY 1
 #endif
-
-#else // __APPLE__
-// FreeBSD has a reasonable iconv signature
-// unless we're on glibc
-#ifndef __GLIBC__
-# define TORRENT_ICONV_ARG (const char**)
-#endif
 #endif // __APPLE__
 
 #define TORRENT_USE_DEV_RANDOM 1
@@ -205,6 +194,7 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #define TORRENT_HAVE_MMAP 1
 #define TORRENT_USE_NETLINK 1
+#define TORRENT_USE_IFADDRS 0
 #define TORRENT_USE_IFCONF 1
 #define TORRENT_HAS_SALEN 0
 #define TORRENT_USE_FDATASYNC 1
@@ -214,10 +204,8 @@ POSSIBILITY OF SUCH DAMAGE.
 #define TORRENT_ANDROID
 #define TORRENT_HAS_FALLOCATE 0
 #define TORRENT_USE_ICONV 0
-#define TORRENT_USE_IFADDRS 0
 #define TORRENT_USE_MEMALIGN 1
 #else // ANDROID
-#define TORRENT_USE_IFADDRS 1
 #define TORRENT_USE_POSIX_MEMALIGN 1
 
 // posix_fallocate() is available under this condition
@@ -319,6 +307,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #ifndef TORRENT_USE_ICONV
 #define TORRENT_USE_ICONV 0
 #endif
+#define TORRENT_USE_MEMALIGN 1
 
 // ==== GNU/Hurd ===
 #elif defined __GNU__
@@ -333,7 +322,6 @@ POSSIBILITY OF SUCH DAMAGE.
 #define TORRENT_USE_IFCONF 1
 #define TORRENT_USE_SYSCTL 1
 #define TORRENT_USE_IPV6 0
-#define TORRENT_ICONV_ARG (const char**)
 #define TORRENT_USE_WRITEV 0
 #define TORRENT_USE_READV 0
 
@@ -358,10 +346,6 @@ POSSIBILITY OF SUCH DAMAGE.
 #define TORRENT_NO_RETURN __declspec(noreturn)
 #else
 #define TORRENT_NO_RETURN
-#endif
-
-#ifndef TORRENT_ICONV_ARG
-#define TORRENT_ICONV_ARG (char**)
 #endif
 
 #if defined __GNUC__ || defined __clang__
@@ -415,13 +399,9 @@ POSSIBILITY OF SUCH DAMAGE.
 #define TORRENT_USE_LOCALE 0
 #endif
 
-#ifndef TORRENT_USE_WSTRING
-#if !defined BOOST_NO_STD_WSTRING
-#define TORRENT_USE_WSTRING 1
-#else
-#define TORRENT_USE_WSTRING 0
-#endif // BOOST_NO_STD_WSTRING
-#endif // TORRENT_USE_WSTRING
+#if defined BOOST_NO_STD_WSTRING
+#error your C++ standard library appears to be missing std::wstring. This type is required on windows
+#endif
 
 #ifndef TORRENT_HAS_FALLOCATE
 #define TORRENT_HAS_FALLOCATE 1
@@ -523,19 +503,19 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #if !defined(TORRENT_READ_HANDLER_MAX_SIZE)
 # ifdef _GLIBCXX_DEBUG
-#  define TORRENT_READ_HANDLER_MAX_SIZE 400
+constexpr std::size_t TORRENT_READ_HANDLER_MAX_SIZE = 400;
 # else
 // if this is not divisible by 8, we're wasting space
-#  define TORRENT_READ_HANDLER_MAX_SIZE 336
+constexpr std::size_t TORRENT_READ_HANDLER_MAX_SIZE = 342;
 # endif
 #endif
 
 #if !defined(TORRENT_WRITE_HANDLER_MAX_SIZE)
 # ifdef _GLIBCXX_DEBUG
-#  define TORRENT_WRITE_HANDLER_MAX_SIZE 400
+constexpr std::size_t TORRENT_WRITE_HANDLER_MAX_SIZE = 400;
 # else
 // if this is not divisible by 8, we're wasting space
-#  define TORRENT_WRITE_HANDLER_MAX_SIZE 336
+constexpr std::size_t TORRENT_WRITE_HANDLER_MAX_SIZE = 342;
 # endif
 #endif
 
@@ -633,5 +613,10 @@ POSSIBILITY OF SUCH DAMAGE.
 #	define TORRENT_HAS_ARM_CRC32 0
 #endif
 #endif // TORRENT_HAS_ARM_CRC32
+
+namespace libtorrent {}
+
+// create alias
+namespace lt = libtorrent;
 
 #endif // TORRENT_CONFIG_HPP_INCLUDED

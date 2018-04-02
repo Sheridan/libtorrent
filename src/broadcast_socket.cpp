@@ -33,17 +33,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/config.hpp"
 
 #include "libtorrent/aux_/disable_warnings_push.hpp"
-
-#if defined TORRENT_OS2
-#include <pthread.h>
-#endif
-
 #include <boost/asio/ip/multicast.hpp>
-
-#ifdef TORRENT_WINDOWS
-#include <iphlpapi.h> // for if_nametoindex
-#endif
-
 #include "libtorrent/aux_/disable_warnings_pop.hpp"
 
 #include "libtorrent/socket.hpp"
@@ -59,7 +49,7 @@ namespace libtorrent {
 	bool is_ip_address(std::string const& host)
 	{
 		error_code ec;
-		address::from_string(host, ec);
+		make_address(host, ec);
 		return !ec;
 	}
 
@@ -69,9 +59,19 @@ namespace libtorrent {
 #if TORRENT_USE_IPV6
 			if (a.is_v6())
 			{
-				return a.to_v6().is_loopback()
-					|| a.to_v6().is_link_local()
-					|| a.to_v6().is_multicast_link_local();
+				// NOTE: site local is deprecated but by
+				// https://www.ietf.org/rfc/rfc3879.txt:
+				// routers SHOULD be configured to prevent
+				// routing of this prefix by default.
+
+				address_v6 const a6 = a.to_v6();
+				return a6.is_loopback()
+					|| a6.is_link_local()
+					|| a6.is_site_local()
+					|| a6.is_multicast_link_local()
+					|| a6.is_multicast_site_local()
+					//  fc00::/7, unique local address
+					|| (a6.to_bytes()[0] & 0xfe) == 0xfc;
 			}
 #endif
 			address_v4 a4 = a.to_v4();
@@ -119,9 +119,9 @@ namespace libtorrent {
 #if TORRENT_USE_IPV6
 		TORRENT_TRY {
 			if (!addr.is_v6()) return false;
-			std::uint8_t teredo_prefix[] = {0x20, 0x01, 0, 0};
+			static const std::uint8_t teredo_prefix[] = {0x20, 0x01, 0, 0};
 			address_v6::bytes_type b = addr.to_v6().to_bytes();
-			return memcmp(&b[0], teredo_prefix, 4) == 0;
+			return std::memcmp(b.data(), teredo_prefix, 4) == 0;
 		} TORRENT_CATCH(std::exception const&) { return false; }
 #else
 		TORRENT_UNUSED(addr);
@@ -138,7 +138,7 @@ namespace libtorrent {
 #elif defined TORRENT_WINDOWS
 		TORRENT_TRY {
 			error_code ec;
-			address::from_string("::1", ec);
+			make_address("::1", ec);
 			return !ec;
 		} TORRENT_CATCH(std::exception const&) { return false; }
 #else
@@ -147,7 +147,8 @@ namespace libtorrent {
 		error_code ec;
 		test.open(tcp::v6(), ec);
 		if (ec) return false;
-		test.bind(tcp::endpoint(address_v6::from_string("::1"), 0), ec);
+		error_code ignore;
+		test.bind(tcp::endpoint(make_address_v6("::1", ignore), 0), ec);
 		return !bool(ec);
 #endif
 	}
@@ -170,52 +171,32 @@ namespace libtorrent {
 		TORRENT_ASSERT(m_multicast_endpoint.address().is_multicast());
 	}
 
-	void broadcast_socket::open(receive_handler_t const& handler
+	void broadcast_socket::open(receive_handler_t handler
 		, io_service& ios, error_code& ec, bool loopback)
 	{
-		m_on_receive = handler;
+		m_on_receive = std::move(handler);
 
 		std::vector<ip_interface> interfaces = enum_net_interfaces(ios, ec);
 
 #if TORRENT_USE_IPV6
-		if (m_multicast_endpoint.address().is_v6())
+		if (is_v6(m_multicast_endpoint))
 			open_multicast_socket(ios, address_v6::any(), loopback, ec);
 		else
 #endif
 			open_multicast_socket(ios, address_v4::any(), loopback, ec);
 
-		for (std::vector<ip_interface>::const_iterator i = interfaces.begin()
-			, end(interfaces.end()); i != end; ++i)
+		for (auto const& i : interfaces)
 		{
 			// only multicast on compatible networks
-			if (i->interface_address.is_v4() != m_multicast_endpoint.address().is_v4()) continue;
+			if (i.interface_address.is_v4() != is_v4(m_multicast_endpoint)) continue;
 			// ignore any loopback interface
-			if (!loopback && is_loopback(i->interface_address)) continue;
+			if (!loopback && is_loopback(i.interface_address)) continue;
 
 			ec = error_code();
 
-			// if_nametoindex was introduced in vista
-#if TORRENT_USE_IPV6 \
-		&& (!defined TORRENT_WINDOWS || _WIN32_WINNT >= 0x0600) \
-		&& !defined TORRENT_MINGW
-
-			if (i->interface_address.is_v6() &&
-				i->interface_address.to_v6().is_link_local())
-			{
-				address_v6 addr6 = i->interface_address.to_v6();
-				addr6.scope_id(if_nametoindex(i->name));
-				open_multicast_socket(ios, addr6, loopback, ec);
-
-				address_v4 const& mask = i->netmask.is_v4()
-					? i->netmask.to_v4() : address_v4();
-				open_unicast_socket(ios, addr6, mask);
-				continue;
-			}
-
-#endif
-			open_multicast_socket(ios, i->interface_address, loopback, ec);
-			open_unicast_socket(ios, i->interface_address
-				, i->netmask.is_v4() ? i->netmask.to_v4() : address_v4());
+			open_multicast_socket(ios, i.interface_address, loopback, ec);
+			open_unicast_socket(ios, i.interface_address
+				, i.netmask.is_v4() ? i.netmask.to_v4() : address_v4());
 		}
 	}
 
@@ -237,7 +218,7 @@ namespace libtorrent {
 		if (ec) return;
 		s->set_option(enable_loopback(loopback), ec);
 		if (ec) return;
-		m_sockets.push_back(socket_entry(s));
+		m_sockets.emplace_back(s);
 		socket_entry& se = m_sockets.back();
 		ADD_OUTSTANDING_ASYNC("broadcast_socket::on_receive");
 		s->async_receive_from(boost::asio::buffer(se.buffer, sizeof(se.buffer))
@@ -255,7 +236,7 @@ namespace libtorrent {
 		s->bind(udp::endpoint(addr, 0), ec);
 		if (ec) return;
 
-		m_unicast_sockets.push_back(socket_entry(s, mask));
+		m_unicast_sockets.emplace_back(s, mask);
 		socket_entry& se = m_unicast_sockets.back();
 
 		// allow sending broadcast messages
@@ -327,7 +308,7 @@ namespace libtorrent {
 			maybe_abort();
 			return;
 		}
-		m_on_receive(s->remote, s->buffer, int(bytes_transferred));
+		m_on_receive(s->remote, {s->buffer, bytes_transferred});
 
 		if (maybe_abort()) return;
 		if (!s->socket) return;

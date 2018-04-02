@@ -40,15 +40,14 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/alert_types.hpp"
 #include "libtorrent/bdecode.hpp"
 
-using namespace libtorrent;
-namespace lt = libtorrent;
+using namespace lt;
 
 namespace
 {
 
 struct test_plugin : plugin
 {
-	std::uint32_t implemented_features() override
+	feature_flags_t implemented_features() override
 	{
 		return plugin::dht_request_feature;
 	}
@@ -99,9 +98,9 @@ TORRENT_TEST(direct_dht_request)
 	sp.set_str(settings_pack::dht_bootstrap_nodes, "");
 	sp.set_int(settings_pack::max_retry_port_bind, 800);
 	sp.set_str(settings_pack::listen_interfaces, "127.0.0.1:42434");
-	lt::session responder(sp, 0);
+	lt::session responder(sp, {});
 	sp.set_str(settings_pack::listen_interfaces, "127.0.0.1:45434");
-	lt::session requester(sp, 0);
+	lt::session requester(sp, {});
 
 	responder.add_extension(std::make_shared<test_plugin>());
 
@@ -110,7 +109,7 @@ TORRENT_TEST(direct_dht_request)
 	entry r;
 	r["q"] = "test_good";
 	requester.dht_direct_request(udp::endpoint(address::from_string("127.0.0.1")
-		, responder.listen_port()), r, (void*)12345);
+		, responder.listen_port()), r, reinterpret_cast<void*>(12345));
 
 	dht_direct_response_alert* ra = get_direct_response(requester);
 	TEST_CHECK(ra);
@@ -121,13 +120,13 @@ TORRENT_TEST(direct_dht_request)
 		TEST_EQUAL(ra->endpoint.port(), responder.listen_port());
 		TEST_EQUAL(response.type(), bdecode_node::dict_t);
 		TEST_EQUAL(response.dict_find_dict("r").dict_find_int_value("good"), 1);
-		TEST_EQUAL(ra->userdata, (void*)12345);
+		TEST_EQUAL(ra->userdata, reinterpret_cast<void*>(12345));
 	}
 
 	// failed request
 
 	requester.dht_direct_request(udp::endpoint(address::from_string("127.0.0.1"), 53545)
-		, r, (void*)123456);
+		, r, reinterpret_cast<void*>(123456));
 
 	ra = get_direct_response(requester);
 	TEST_CHECK(ra);
@@ -136,7 +135,7 @@ TORRENT_TEST(direct_dht_request)
 		TEST_EQUAL(ra->endpoint.address(), address::from_string("127.0.0.1"));
 		TEST_EQUAL(ra->endpoint.port(), 53545);
 		TEST_EQUAL(ra->response().type(), bdecode_node::none_t);
-		TEST_EQUAL(ra->userdata, (void*)123456);
+		TEST_EQUAL(ra->userdata, reinterpret_cast<void*>(123456));
 	}
 #endif // #if !defined TORRENT_DISABLE_EXTENSIONS && !defined TORRENT_DISABLE_DHT
 }

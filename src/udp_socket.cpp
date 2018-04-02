@@ -39,6 +39,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/debug.hpp"
 #include "libtorrent/deadline_timer.hpp"
 #include "libtorrent/aux_/numeric_cast.hpp"
+#include "libtorrent/broadcast_socket.hpp" // for is_v4
 
 #include <cstdlib>
 #include <functional>
@@ -64,6 +65,7 @@ struct socks5 : std::enable_shared_from_this<socks5>
 		: m_socks5_sock(ios)
 		, m_resolver(ios)
 		, m_timer(ios)
+		, m_retry_timer(ios)
 		, m_abort(false)
 		, m_active(false)
 	{
@@ -81,8 +83,8 @@ private:
 	std::shared_ptr<socks5> self() { return shared_from_this(); }
 
 	void on_name_lookup(error_code const& e, tcp::resolver::iterator i);
-	void on_connect_timeout(error_code const& ec);
-	void on_connected(error_code const& ec);
+	void on_connect_timeout(error_code const& e);
+	void on_connected(error_code const& e);
 	void handshake1(error_code const& e);
 	void handshake2(error_code const& e);
 	void handshake3(error_code const& e);
@@ -91,10 +93,12 @@ private:
 	void connect1(error_code const& e);
 	void connect2(error_code const& e);
 	void hung_up(error_code const& e);
+	void retry_socks_connect(error_code const& e);
 
 	tcp::socket m_socks5_sock;
 	tcp::resolver m_resolver;
 	deadline_timer m_timer;
+	deadline_timer m_retry_timer;
 	char m_tmp_buf[270];
 
 	aux::proxy_settings m_proxy_settings;
@@ -157,7 +161,7 @@ udp_socket::udp_socket(io_service& ios)
 
 int udp_socket::read(span<packet> pkts, error_code& ec)
 {
-	int const num = int(pkts.size());
+	auto const num = int(pkts.size());
 	int ret = 0;
 	packet p;
 
@@ -220,7 +224,7 @@ int udp_socket::read(span<packet> pkts, error_code& ec)
 }
 
 void udp_socket::send_hostname(char const* hostname, int const port
-	, span<char const> p, error_code& ec, int const flags)
+	, span<char const> p, error_code& ec, udp_send_flags_t const flags)
 {
 	TORRENT_ASSERT(is_single_thread());
 
@@ -246,12 +250,12 @@ void udp_socket::send_hostname(char const* hostname, int const port
 
 	// the overload that takes a hostname is really only supported when we're
 	// using a proxy
-	address target = address::from_string(hostname, ec);
+	address target = make_address(hostname, ec);
 	if (!ec) send(udp::endpoint(target, std::uint16_t(port)), p, ec, flags);
 }
 
 void udp_socket::send(udp::endpoint const& ep, span<char const> p
-	, error_code& ec, int const flags)
+	, error_code& ec, udp_send_flags_t const flags)
 {
 	TORRENT_ASSERT(is_single_thread());
 
@@ -265,7 +269,7 @@ void udp_socket::send(udp::endpoint const& ep, span<char const> p
 	const bool allow_proxy
 		= ((flags & peer_connection) && m_proxy_settings.proxy_peer_connections)
 		|| ((flags & tracker_connection) && m_proxy_settings.proxy_tracker_connections)
-		|| (flags & (tracker_connection | peer_connection)) == 0
+		|| !(flags & (tracker_connection | peer_connection))
 		;
 
 	if (allow_proxy && m_socks5_connection && m_socks5_connection->active())
@@ -278,14 +282,14 @@ void udp_socket::send(udp::endpoint const& ep, span<char const> p
 	if (m_force_proxy) return;
 
 	// set the DF flag for the socket and clear it again in the destructor
-	set_dont_frag df(m_socket, (flags & dont_fragment) != 0
-		&& ep.protocol() == udp::v4());
+	set_dont_frag df(m_socket, (flags & dont_fragment)
+		&& is_v4(ep));
 
 	m_socket.send_to(boost::asio::buffer(p.data(), p.size()), ep, 0, ec);
 }
 
 void udp_socket::wrap(udp::endpoint const& ep, span<char const> p
-	, error_code& ec, int const flags)
+	, error_code& ec, udp_send_flags_t const flags)
 {
 	TORRENT_UNUSED(flags);
 	using namespace libtorrent::detail;
@@ -295,7 +299,7 @@ void udp_socket::wrap(udp::endpoint const& ep, span<char const> p
 
 	write_uint16(0, h); // reserved
 	write_uint8(0, h); // fragment
-	write_uint8(ep.address().is_v4()?1:4, h); // atyp
+	write_uint8(is_v4(ep) ? 1 : 4, h); // atyp
 	write_endpoint(ep, h);
 
 	std::array<boost::asio::const_buffer, 2> iovec;
@@ -303,14 +307,14 @@ void udp_socket::wrap(udp::endpoint const& ep, span<char const> p
 	iovec[1] = boost::asio::const_buffer(p.data(), p.size());
 
 	// set the DF flag for the socket and clear it again in the destructor
-	set_dont_frag df(m_socket, (flags & dont_fragment) != 0
-		&& ep.protocol() == udp::v4());
+	set_dont_frag df(m_socket, (flags & dont_fragment)
+		&& is_v4(ep));
 
 	m_socket.send_to(iovec, m_socks5_connection->target(), 0, ec);
 }
 
 void udp_socket::wrap(char const* hostname, int const port, span<char const> p
-	, error_code& ec, int const flags)
+	, error_code& ec, udp_send_flags_t const flags)
 {
 	TORRENT_UNUSED(flags);
 	using namespace libtorrent::detail;
@@ -332,8 +336,8 @@ void udp_socket::wrap(char const* hostname, int const port, span<char const> p
 	iovec[1] = boost::asio::const_buffer(p.data(), p.size());
 
 	// set the DF flag for the socket and clear it again in the destructor
-	set_dont_frag df(m_socket, (flags & dont_fragment) != 0
-		&& m_socket.local_endpoint(ec).protocol() == udp::v4());
+	set_dont_frag df(m_socket, (flags & dont_fragment)
+		&& is_v4(m_socket.local_endpoint(ec)));
 
 	m_socket.send_to(iovec, m_socks5_connection->target(), 0, ec);
 }
@@ -347,7 +351,7 @@ bool udp_socket::unwrap(udp::endpoint& from, span<char>& buf)
 	using namespace libtorrent::detail;
 
 	// the minimum socks5 header size
-	int const size = aux::numeric_cast<int>(buf.size());
+	auto const size = aux::numeric_cast<int>(buf.size());
 	if (size <= 10) return false;
 
 	char* p = buf.data();
@@ -375,7 +379,7 @@ bool udp_socket::unwrap(udp::endpoint& from, span<char>& buf)
 		if (len > buf.end() - p) return false;
 		std::string hostname(p, p + len);
 		error_code ec;
-		address addr = address::from_string(hostname, ec);
+		address addr = make_address(hostname, ec);
 		// we only support "hostnames" that are a dotted decimal IP
 		if (ec) return false;
 		p += len;
@@ -433,8 +437,9 @@ void udp_socket::open(udp const& protocol, error_code& ec)
 	error_code err;
 #ifdef TORRENT_WINDOWS
 	m_socket.set_option(exclusive_address_use(true), err);
-#endif
+#else
 	m_socket.set_option(boost::asio::socket_base::reuse_address(true), err);
+#endif
 }
 
 void udp_socket::bind(udp::endpoint const& ep, error_code& ec)
@@ -443,8 +448,7 @@ void udp_socket::bind(udp::endpoint const& ep, error_code& ec)
 	if (ec) return;
 	m_socket.bind(ep, ec);
 	if (ec) return;
-	udp::socket::non_blocking_io ioc(true);
-	m_socket.io_control(ioc, ec);
+	m_socket.non_blocking(true, ec);
 	if (ec) return;
 
 	error_code err;
@@ -503,7 +507,7 @@ void socks5::on_name_lookup(error_code const& e, tcp::resolver::iterator i)
 	m_proxy_addr.port(i->endpoint().port());
 
 	error_code ec;
-	m_socks5_sock.open(m_proxy_addr.address().is_v4()?tcp::v4():tcp::v6(), ec);
+	m_socks5_sock.open(is_v4(m_proxy_addr) ? tcp::v4() : tcp::v6(), ec);
 
 	// enable keepalives
 	m_socks5_sock.set_option(boost::asio::socket_base::keep_alive(true), ec);
@@ -518,11 +522,11 @@ void socks5::on_name_lookup(error_code const& e, tcp::resolver::iterator i)
 		, self(), _1));
 }
 
-void socks5::on_connect_timeout(error_code const& ec)
+void socks5::on_connect_timeout(error_code const& e)
 {
 	COMPLETE_ASYNC("socks5::on_connect_timeout");
 
-	if (ec == boost::asio::error::operation_aborted) return;
+	if (e == boost::asio::error::operation_aborted) return;
 
 	if (m_abort) return;
 
@@ -737,7 +741,15 @@ void socks5::hung_up(error_code const& e)
 
 	if (e == boost::asio::error::operation_aborted || m_abort) return;
 
-	// the socks connection was closed, re-open it
+	// the socks connection was closed, re-open it in a bit
+	m_retry_timer.expires_from_now(seconds(5));
+	m_retry_timer.async_wait(std::bind(&socks5::retry_socks_connect
+		, self(), _1));
+}
+
+void socks5::retry_socks_connect(error_code const& e)
+{
+	if (e) return;
 	start(m_proxy_settings);
 }
 
@@ -749,5 +761,10 @@ void socks5::close()
 	m_resolver.cancel();
 	m_timer.cancel();
 }
+
+constexpr udp_send_flags_t udp_socket::peer_connection;
+constexpr udp_send_flags_t udp_socket::tracker_connection;
+constexpr udp_send_flags_t udp_socket::dont_queue;
+constexpr udp_send_flags_t udp_socket::dont_fragment;
 
 }

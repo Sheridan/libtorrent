@@ -39,6 +39,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/aux_/proxy_settings.hpp"
 #include "libtorrent/debug.hpp"
 #include "libtorrent/span.hpp"
+#include "libtorrent/flags.hpp"
 
 #include <array>
 #include <memory>
@@ -47,17 +48,17 @@ namespace libtorrent {
 
 	struct socks5;
 
+	using udp_send_flags_t = flags::bitfield_flag<std::uint8_t, struct udp_send_flags_tag>;
+
 	class TORRENT_EXTRA_EXPORT udp_socket : single_threaded
 	{
 	public:
 		explicit udp_socket(io_service& ios);
 
-		enum flags_t {
-			peer_connection = 1
-			, tracker_connection = 2
-			, dont_queue = 4
-			, dont_fragment = 8
-		};
+		static constexpr udp_send_flags_t peer_connection = 0_bit;
+		static constexpr udp_send_flags_t tracker_connection = 1_bit;
+		static constexpr udp_send_flags_t dont_queue = 2_bit;
+		static constexpr udp_send_flags_t dont_fragment = 3_bit;
 
 		bool is_open() const { return m_abort == false; }
 		io_service& get_io_service() { return m_socket.get_io_service(); }
@@ -85,10 +86,10 @@ namespace libtorrent {
 
 		// this is only valid when using a socks5 proxy
 		void send_hostname(char const* hostname, int port, span<char const> p
-			, error_code& ec, int flags = 0);
+			, error_code& ec, udp_send_flags_t flags = {});
 
 		void send(udp::endpoint const& ep, span<char const> p
-			, error_code& ec, int flags = 0);
+			, error_code& ec, udp_send_flags_t flags = {});
 		void open(udp const& protocol, error_code& ec);
 		void bind(udp::endpoint const& ep, error_code& ec);
 		void close();
@@ -109,8 +110,8 @@ namespace libtorrent {
 			return local_endpoint(ec);
 		}
 
-		typedef udp::socket::receive_buffer_size receive_buffer_size;
-		typedef udp::socket::send_buffer_size send_buffer_size;
+		using receive_buffer_size = udp::socket::receive_buffer_size;
+		using send_buffer_size = udp::socket::send_buffer_size;
 
 		template <class SocketOption>
 		void get_option(SocketOption const& opt, error_code& ec)
@@ -136,8 +137,8 @@ namespace libtorrent {
 		udp_socket(udp_socket const&);
 		udp_socket& operator=(udp_socket const&);
 
-		void wrap(udp::endpoint const& ep, span<char const> p, error_code& ec, int flags);
-		void wrap(char const* hostname, int port, span<char const> p, error_code& ec, int flags);
+		void wrap(udp::endpoint const& ep, span<char const> p, error_code& ec, udp_send_flags_t flags);
+		void wrap(char const* hostname, int port, span<char const> p, error_code& ec, udp_send_flags_t flags);
 		bool unwrap(udp::endpoint& from, span<char>& buf);
 
 		udp::socket m_socket;

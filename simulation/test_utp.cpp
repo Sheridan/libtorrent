@@ -41,8 +41,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <fstream>
 #include <iostream>
 
-using namespace libtorrent;
-namespace lt = libtorrent;
+using namespace lt;
 
 TORRENT_TEST(utp)
 {
@@ -62,7 +61,7 @@ TORRENT_TEST(utp)
 		}
 		// add torrent
 		, [](lt::add_torrent_params& params) {
-			params.flags |= add_torrent_params::flag_seed_mode;
+			params.flags |= torrent_flags::seed_mode;
 		}
 		// on alert
 		, [&](lt::alert const*, lt::session& ses) {

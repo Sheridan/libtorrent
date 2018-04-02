@@ -34,12 +34,14 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #include "simulator/simulator.hpp"
 
+#include "libtorrent/aux_/listen_socket_handle.hpp"
+#include "libtorrent/aux_/session_impl.hpp"
 #include "libtorrent/udp_socket.hpp"
 #include "libtorrent/kademlia/dht_tracker.hpp"
 #include "libtorrent/kademlia/dht_state.hpp"
 #include "libtorrent/performance_counters.hpp"
 #include "libtorrent/entry.hpp"
-#include "libtorrent/session_settings.hpp"
+#include "libtorrent/kademlia/dht_settings.hpp"
 #include "libtorrent/span.hpp"
 #include "libtorrent/kademlia/dht_observer.hpp"
 
@@ -47,8 +49,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <cstdarg>
 #include <cmath>
 
-using namespace libtorrent;
-namespace lt = libtorrent;
+using namespace lt;
 using namespace sim;
 using namespace std::placeholders;
 
@@ -56,16 +57,9 @@ using namespace std::placeholders;
 
 struct obs : dht::dht_observer
 {
-	void set_external_address(address const& /* addr */
+	void set_external_address(lt::aux::listen_socket_handle const&, address const& /* addr */
 		, address const& /* source */) override
 	{}
-	address external_address(udp proto) override
-	{
-		if (proto == udp::v4())
-			return address_v4::from_string("40.30.20.10");
-		else
-			return address_v6();
-	}
 	void get_peers(sha1_hash const&) override {}
 	void outgoing_get_peers(sha1_hash const& /* target */
 		, sha1_hash const& /* sent_target */, udp::endpoint const& /* ep */) override {}
@@ -91,6 +85,12 @@ struct obs : dht::dht_observer
 #endif
 };
 
+void send_packet(lt::udp_socket& sock, lt::aux::listen_socket_handle const&, udp::endpoint const& ep
+	, span<char const> p, error_code& ec, udp_send_flags_t const flags)
+{
+	sock.send(ep, p, ec, flags);
+}
+
 #endif // #if !defined TORRENT_DISABLE_DHT
 
 TORRENT_TEST(dht_rate_limit)
@@ -104,9 +104,13 @@ TORRENT_TEST(dht_rate_limit)
 	// receiver (the DHT under test)
 	lt::udp_socket sock(dht_ios);
 	obs o;
+	auto ls = std::make_shared<lt::aux::listen_socket_t>();
+	ls->external_address.cast_vote(address_v4::from_string("40.30.20.10")
+		, lt::aux::session_interface::source_dht, lt::address());
+	ls->local_endpoint = tcp::endpoint(address_v4::from_string("40.30.20.10"), 8888);
 	error_code ec;
 	sock.bind(udp::endpoint(address_v4::from_string("40.30.20.10"), 8888), ec);
-	dht_settings dhtsett;
+	dht::dht_settings dhtsett;
 	dhtsett.block_ratelimit = 100000; // disable the DOS blocker
 	dhtsett.ignore_dark_internet = false;
 	dhtsett.upload_rate_limit = 400;
@@ -117,8 +121,9 @@ TORRENT_TEST(dht_rate_limit)
 	dht::dht_state state;
 	std::unique_ptr<lt::dht::dht_storage_interface> dht_storage(dht::dht_default_storage_constructor(dhtsett));
 	auto dht = std::make_shared<lt::dht::dht_tracker>(
-		&o, dht_ios, std::bind(&udp_socket::send, &sock, _1, _2, _3, _4)
+		&o, dht_ios, std::bind(&send_packet, std::ref(sock), _1, _2, _3, _4, _5)
 		, dhtsett, cnt, *dht_storage, state);
+	dht->new_socket(ls);
 
 	bool stop = false;
 	std::function<void(error_code const&, size_t)> on_read
@@ -128,7 +133,7 @@ TORRENT_TEST(dht_rate_limit)
 		udp_socket::packet p;
 		error_code err;
 		int const num = int(sock.read(lt::span<udp_socket::packet>(&p, 1), err));
-		if (num) dht->incoming_packet(p.from, p.data);
+		if (num) dht->incoming_packet(ls, p.from, p.data);
 		if (stop || err) return;
 		sock.async_read(on_read);
 	};
@@ -140,7 +145,7 @@ TORRENT_TEST(dht_rate_limit)
 	udp::socket sender_sock(sender_ios);
 	sender_sock.open(udp::v4());
 	sender_sock.bind(udp::endpoint(address_v4(), 4444));
-	sender_sock.io_control(udp::socket::non_blocking_io(true));
+	sender_sock.non_blocking(true);
 	asio::high_resolution_timer timer(sender_ios);
 	std::function<void(error_code const&)> sender_tick = [&](error_code const&)
 	{
@@ -212,4 +217,54 @@ TORRENT_TEST(dht_rate_limit)
 		+ cnt[counters::dht_ping_in], num_packets);
 
 #endif // #if !defined TORRENT_DISABLE_EXTENSIONS && !defined TORRENT_DISABLE_DHT
+}
+
+// TODO: put test here to take advantage of existing code, refactor
+TORRENT_TEST(dht_delete_socket)
+{
+#ifndef TORRENT_DISABLE_DHT
+
+	sim::default_config cfg;
+	sim::simulation sim(cfg);
+	sim::asio::io_service dht_ios(sim, lt::address_v4::from_string("40.30.20.10"));
+
+	lt::udp_socket sock(dht_ios);
+	error_code ec;
+	sock.bind(udp::endpoint(address_v4::from_string("40.30.20.10"), 8888), ec);
+
+	obs o;
+	auto ls = std::make_shared<lt::aux::listen_socket_t>();
+	ls->external_address.cast_vote(address_v4::from_string("40.30.20.10")
+		, lt::aux::session_interface::source_dht, lt::address());
+	ls->local_endpoint = tcp::endpoint(address_v4::from_string("40.30.20.10"), 8888);
+	dht::dht_settings dhtsett;
+	counters cnt;
+	dht::dht_state state;
+	std::unique_ptr<lt::dht::dht_storage_interface> dht_storage(dht::dht_default_storage_constructor(dhtsett));
+	auto dht = std::make_shared<lt::dht::dht_tracker>(
+		&o, dht_ios, std::bind(&send_packet, std::ref(sock), _1, _2, _3, _4, _5)
+		, dhtsett, cnt, *dht_storage, state);
+
+	dht->start([](std::vector<std::pair<dht::node_entry, std::string>> const&){});
+	dht->new_socket(ls);
+
+	// schedule the removal of the socket at exactly 2 second,
+	// this simulates the fact that the internal scheduled call
+	// to connection_timeout will be executed right after leaving
+	// the state of cancellable
+	asio::high_resolution_timer t1(dht_ios);
+	t1.expires_from_now(chrono::seconds(2));
+	t1.async_wait([&](error_code const&)
+		{
+			dht->delete_socket(ls);
+		});
+
+	// stop the DHT
+	asio::high_resolution_timer t2(dht_ios);
+	t2.expires_from_now(chrono::seconds(3));
+	t2.async_wait([&](error_code const&) { dht->stop(); });
+
+	sim.run();
+
+#endif // TORRENT_DISABLE_DHT
 }

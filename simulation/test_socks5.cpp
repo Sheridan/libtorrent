@@ -48,9 +48,8 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <iostream>
 
 using namespace sim;
-using namespace libtorrent;
+using namespace lt;
 
-namespace lt = libtorrent;
 
 // this is the general template for these tests. create the session with custom
 // settings (Settings), set up the test, by adding torrents with certain
@@ -83,8 +82,8 @@ void run_test(Setup const& setup
 	});
 
 	lt::add_torrent_params params = create_torrent(1);
-	params.flags &= ~lt::add_torrent_params::flag_auto_managed;
-	params.flags &= ~lt::add_torrent_params::flag_paused;
+	params.flags &= ~lt::torrent_flags::auto_managed;
+	params.flags &= ~lt::torrent_flags::paused;
 	params.save_path = save_path(0);
 	ses->async_add_torrent(params);
 
@@ -103,7 +102,7 @@ void run_test(Setup const& setup
 
 TORRENT_TEST(socks5_tcp_announce)
 {
-	using namespace libtorrent;
+	using namespace lt;
 	int tracker_port = -1;
 	int alert_port = -1;
 	run_test(
@@ -162,7 +161,7 @@ TORRENT_TEST(socks5_tcp_announce)
 
 TORRENT_TEST(udp_tracker)
 {
-	using namespace libtorrent;
+	using namespace lt;
 	bool tracker_alert = false;
 	bool connected = false;
 	bool announced = false;
@@ -194,7 +193,7 @@ TORRENT_TEST(udp_tracker)
 			udp_server tracker(sim, "2.2.2.2", 8080,
 			[&](char const* msg, int size)
 			{
-				using namespace libtorrent::detail;
+				using namespace lt::detail;
 				std::vector<char> ret;
 				TEST_CHECK(size >= 16);
 
@@ -247,3 +246,40 @@ TORRENT_TEST(udp_tracker)
 	TEST_CHECK(announced);
 }
 
+TORRENT_TEST(socks5_udp_retry)
+{
+	// this test is asserting that when a UDP associate command fails, we have a
+	// 5 second delay before we try again. There is no need to actually add a
+	// torrent for this test, just to open the udp socket with a socks5 proxy
+	using namespace libtorrent;
+
+	// setup the simulation
+	sim::default_config network_cfg;
+	sim::simulation sim{network_cfg};
+	std::unique_ptr<sim::asio::io_service> ios = make_io_service(sim, 0);
+	lt::session_proxy zombie;
+
+	sim::asio::io_service proxy_ios{sim, addr("50.50.50.50") };
+	// close UDP associate connectons prematurely
+	sim::socks_server socks5(proxy_ios, 5555, 5, socks_flag::disconnect_udp_associate);
+
+	lt::settings_pack pack = settings();
+	pack.set_str(settings_pack::listen_interfaces, "50.50.50.50:6881");
+	// create session
+	std::shared_ptr<lt::session> ses = std::make_shared<lt::session>(pack, *ios);
+	set_proxy(*ses, settings_pack::socks5);
+
+	// run for 60 seconds.The sokcks5 retry interval is expected to be 5 seconds,
+	// meaning there should have been 12 connection attempts
+	sim::timer t(sim, lt::seconds(60), [&](boost::system::error_code const& ec)
+	{
+		fprintf(stderr, "shutting down\n");
+		// shut down
+		zombie = ses->abort();
+		ses.reset();
+	});
+	sim.run();
+
+	// number of UDP ASSOCIATE commands invoked on the socks proxy
+	TEST_EQUAL(socks5.cmd_counts()[2], 12);
+}

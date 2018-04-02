@@ -40,42 +40,48 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/add_torrent_params.hpp"
 
 #include <set>
-#include <string>
 
 namespace libtorrent { namespace aux {
 
-	int copy_bufs(span<iovec_t const> bufs, int const bytes, span<iovec_t> target)
+	int copy_bufs(span<iovec_t const> bufs, int bytes
+		, span<iovec_t> target)
 	{
-		int size = 0;
-		for (int i = 0;; i++)
+		TORRENT_ASSERT(bytes >= 0);
+		auto dst = target.begin();
+		int ret = 0;
+		if (bytes == 0) return ret;
+		for (iovec_t const& src : bufs)
 		{
-			std::size_t const idx = std::size_t(i);
-			target[idx] = bufs[idx];
-			size += int(bufs[idx].iov_len);
-			if (size >= bytes)
-			{
-				TORRENT_ASSERT(target[idx].iov_len >= aux::numeric_cast<std::size_t>(size - bytes));
-				target[idx].iov_len -= aux::numeric_cast<std::size_t>(size - bytes);
-				return i + 1;
-			}
+			std::size_t const to_copy = std::min(src.size(), std::size_t(bytes));
+			*dst = src.first(to_copy);
+			bytes -= int(to_copy);
+			++ret;
+			++dst;
+			if (bytes <= 0) return ret;
 		}
+		return ret;
 	}
 
-	span<iovec_t> advance_bufs(span<iovec_t> bufs, int const bytes)
+	typed_span<iovec_t> advance_bufs(typed_span<iovec_t> bufs, int const bytes)
 	{
-		int size = 0;
+		TORRENT_ASSERT(bytes >= 0);
+		std::size_t size = 0;
 		for (;;)
 		{
-			size += int(bufs.front().iov_len);
-			if (size >= bytes)
+			size += bufs.front().size();
+			if (size >= std::size_t(bytes))
 			{
-				bufs.front().iov_base = reinterpret_cast<char*>(bufs.front().iov_base)
-					+ bufs.front().iov_len - (size - bytes);
-				bufs.front().iov_len = aux::numeric_cast<std::size_t>(size - bytes);
+				bufs.front() = bufs.front().last(size - std::size_t(bytes));
 				return bufs;
 			}
 			bufs = bufs.subspan(1);
 		}
+	}
+
+	void clear_bufs(span<iovec_t const> bufs)
+	{
+		for (auto buf : bufs)
+			std::memset(buf.data(), 0, buf.size());
 	}
 
 #if TORRENT_USE_ASSERTS
@@ -83,14 +89,16 @@ namespace libtorrent { namespace aux {
 
 	int count_bufs(span<iovec_t const> bufs, int bytes)
 	{
-		int size = 0;
-		int count = 1;
-		if (bytes == 0) return 0;
-		for (auto i = bufs.begin();; ++i, ++count)
+		std::size_t size = 0;
+		int count = 0;
+		if (bytes == 0) return count;
+		for (auto b : bufs)
 		{
-			size += int(i->iov_len);
-			if (size >= bytes) return count;
+			++count;
+			size += b.size();
+			if (size >= std::size_t(bytes)) return count;
 		}
+		return count;
 	}
 
 	}
@@ -101,8 +109,8 @@ namespace libtorrent { namespace aux {
 	// and writing. This function is a template, and the fileop decides what to
 	// do with the file and the buffers.
 	int readwritev(file_storage const& files, span<iovec_t const> const bufs
-		, piece_index_t const piece, const int offset, fileop& op
-		, storage_error& ec)
+		, piece_index_t const piece, const int offset
+		, storage_error& ec, fileop op)
 	{
 		TORRENT_ASSERT(piece >= piece_index_t(0));
 		TORRENT_ASSERT(piece < files.end_piece());
@@ -143,7 +151,7 @@ namespace libtorrent { namespace aux {
 		{
 			file_bytes_left = bytes_left;
 			if (file_offset + file_bytes_left > files.file_size(file_index))
-				file_bytes_left = (std::max)(static_cast<int>(files.file_size(file_index) - file_offset), 0);
+				file_bytes_left = std::max(static_cast<int>(files.file_size(file_index) - file_offset), 0);
 
 			// there are no bytes left in this file, move to the next one
 			// this loop skips over empty files
@@ -159,14 +167,14 @@ namespace libtorrent { namespace aux {
 
 				file_bytes_left = bytes_left;
 				if (file_offset + file_bytes_left > files.file_size(file_index))
-					file_bytes_left = (std::max)(static_cast<int>(files.file_size(file_index) - file_offset), 0);
+					file_bytes_left = std::max(static_cast<int>(files.file_size(file_index) - file_offset), 0);
 			}
 
 			// make a copy of the iovec array that _just_ covers the next
 			// file_bytes_left bytes, i.e. just this one operation
-			int tmp_bufs_used = copy_bufs(current_buf, file_bytes_left, tmp_buf);
+			int const tmp_bufs_used = copy_bufs(current_buf, file_bytes_left, tmp_buf);
 
-			int bytes_transferred = op.file_op(file_index, file_offset
+			int const bytes_transferred = op(file_index, file_offset
 				, tmp_buf.first(tmp_bufs_used), ec);
 			if (ec) return -1;
 
@@ -196,13 +204,13 @@ namespace libtorrent { namespace aux {
 		, std::string const& save_path
 		, std::string const& destination_save_path
 		, part_file* pf
-		, int const flags, storage_error& ec)
+		, move_flags_t const flags, storage_error& ec)
 	{
 		status_t ret = status_t::no_error;
 		std::string const new_save_path = complete(destination_save_path);
 
 		// check to see if any of the files exist
-		if (flags == fail_if_exist)
+		if (flags == move_flags_t::fail_if_exist)
 		{
 			file_status s;
 			error_code err;
@@ -220,7 +228,7 @@ namespace libtorrent { namespace aux {
 					{
 						ec.ec = err;
 						ec.file(i);
-						ec.operation = storage_error::stat;
+						ec.operation = operation_t::file_stat;
 						return { status_t::file_exist, save_path };
 					}
 				}
@@ -239,7 +247,7 @@ namespace libtorrent { namespace aux {
 				{
 					ec.ec = err;
 					ec.file(file_index_t(-1));
-					ec.operation = storage_error::mkdir;
+					ec.operation = operation_t::mkdir;
 					return { status_t::fatal_disk_error, save_path };
 				}
 			}
@@ -247,7 +255,7 @@ namespace libtorrent { namespace aux {
 			{
 				ec.ec = err;
 				ec.file(file_index_t(-1));
-				ec.operation = storage_error::stat;
+				ec.operation = operation_t::file_stat;
 				return { status_t::fatal_disk_error, save_path };
 			}
 		}
@@ -256,7 +264,7 @@ namespace libtorrent { namespace aux {
 		// later
 		aux::vector<bool, file_index_t> copied_files(std::size_t(f.num_files()), false);
 
-		file_index_t i;
+		file_index_t i{};
 		error_code e;
 		for (i = file_index_t(0); i < f.end_file(); ++i)
 		{
@@ -266,7 +274,7 @@ namespace libtorrent { namespace aux {
 			std::string const old_path = combine_path(save_path, f.file_path(i));
 			std::string const new_path = combine_path(new_save_path, f.file_path(i));
 
-			if (flags == dont_replace && exists(new_path))
+			if (flags == move_flags_t::dont_replace && exists(new_path))
 			{
 				if (ret == status_t::no_error) ret = status_t::need_full_check;
 				continue;
@@ -297,7 +305,7 @@ namespace libtorrent { namespace aux {
 			{
 				ec.ec = e;
 				ec.file(i);
-				ec.operation = storage_error::rename;
+				ec.operation = operation_t::file_rename;
 				break;
 			}
 		}
@@ -308,8 +316,8 @@ namespace libtorrent { namespace aux {
 			if (e)
 			{
 				ec.ec = e;
-				ec.file(file_index_t(-1));
-				ec.operation = storage_error::partfile_move;
+				ec.file(torrent_status::error_file_partfile);
+				ec.operation = operation_t::partfile_move;
 			}
 		}
 
@@ -392,7 +400,7 @@ namespace libtorrent { namespace aux {
 	}
 
 	void delete_files(file_storage const& fs, std::string const& save_path
-		, std::string const& part_file_name, int const options, storage_error& ec)
+		, std::string const& part_file_name, remove_flags_t const options, storage_error& ec)
 	{
 		if (options == session::delete_files)
 		{
@@ -416,7 +424,7 @@ namespace libtorrent { namespace aux {
 					}
 				}
 				delete_one_file(p, ec.ec);
-				if (ec) { ec.file(i); ec.operation = storage_error::remove; }
+				if (ec) { ec.file(i); ec.operation = operation_t::file_remove; }
 			}
 
 			// remove the directories. Reverse order to delete
@@ -431,7 +439,7 @@ namespace libtorrent { namespace aux {
 				{
 					ec.file(file_index_t(-1));
 					ec.ec = error;
-					ec.operation = storage_error::remove;
+					ec.operation = operation_t::file_remove;
 				}
 			}
 		}
@@ -445,7 +453,7 @@ namespace libtorrent { namespace aux {
 			{
 				ec.file(file_index_t(-1));
 				ec.ec = error;
-				ec.operation = storage_error::remove;
+				ec.operation = operation_t::file_remove;
 			}
 		}
 	}
@@ -453,7 +461,7 @@ namespace libtorrent { namespace aux {
 	bool verify_resume_data(add_torrent_params const& rd
 		, aux::vector<std::string, file_index_t> const& links
 		, file_storage const& fs
-		, aux::vector<std::uint8_t, file_index_t> const& file_priority
+		, aux::vector<download_priority_t, file_index_t> const& file_priority
 		, stat_cache& stat
 		, std::string const& save_path
 		, storage_error& ec)
@@ -489,13 +497,14 @@ namespace libtorrent { namespace aux {
 
 				ec.ec = err;
 				ec.file(idx);
-				ec.operation = storage_error::hard_link;
+				ec.operation = operation_t::file_hard_link;
 				return false;
 			}
 		}
 #endif // TORRENT_DISABLE_MUTABLE_TORRENTS
 
-		bool const seed = rd.have_pieces.all_set();
+		bool const seed = rd.have_pieces.all_set()
+			&& rd.have_pieces.size() >= fs.num_pieces();
 
 		// parse have bitmask. Verify that the files we expect to have
 		// actually do exist
@@ -512,7 +521,7 @@ namespace libtorrent { namespace aux {
 			// expected location, but is likely to be in a partfile. Just exempt it
 			// from checking
 			if (file_index < file_priority.end_index()
-				&& file_priority[file_index] == 0)
+				&& file_priority[file_index] == dont_download)
 				continue;
 
 			error_code error;
@@ -525,14 +534,14 @@ namespace libtorrent { namespace aux {
 				{
 					ec.ec = error;
 					ec.file(file_index);
-					ec.operation = storage_error::stat;
+					ec.operation = operation_t::file_stat;
 					return false;
 				}
 				else
 				{
 					ec.ec = errors::mismatching_file_size;
 					ec.file(file_index);
-					ec.operation = storage_error::stat;
+					ec.operation = operation_t::file_stat;
 					return false;
 				}
 			}
@@ -543,7 +552,7 @@ namespace libtorrent { namespace aux {
 				// the wrong size. Reject the resume data
 				ec.ec = errors::mismatching_file_size;
 				ec.file(file_index);
-				ec.operation = storage_error::check_resume;
+				ec.operation = operation_t::check_resume;
 				return false;
 			}
 
@@ -555,6 +564,35 @@ namespace libtorrent { namespace aux {
 			i = std::max(next(i), pr.piece);
 		}
 		return true;
+	}
+
+	bool has_any_file(
+		file_storage const& fs
+		, std::string const& save_path
+		, stat_cache& cache
+		, storage_error& ec)
+	{
+		for (file_index_t i(0); i < fs.end_file(); ++i)
+		{
+			std::int64_t const sz = cache.get_filesize(
+				i, fs, save_path, ec.ec);
+
+			if (sz < 0)
+			{
+				if (ec && ec.ec != boost::system::errc::no_such_file_or_directory)
+				{
+					ec.file(i);
+					ec.operation = operation_t::file_stat;
+					cache.clear();
+					return false;
+				}
+				// some files not existing is expected and not an error
+				ec.ec.clear();
+			}
+
+			if (sz > 0) return true;
+		}
+		return false;
 	}
 
 }}

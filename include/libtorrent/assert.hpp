@@ -50,10 +50,10 @@ TORRENT_EXPORT void print_backtrace(char* out, int len, int max_depth = 0, void*
 #define TORRENT_WHILE_0  \
 	__pragma( warning(push) ) \
 	__pragma( warning(disable:4127) ) \
-	while (0) \
+	while (false) \
 	__pragma( warning(pop) )
 #else
-#define TORRENT_WHILE_0 while (0)
+#define TORRENT_WHILE_0 while (false)
 #endif
 
 
@@ -71,7 +71,7 @@ TORRENT_EXPORT void assert_fail(const char* expr, int line
 #if TORRENT_USE_ASSERTS
 
 #ifdef TORRENT_PRODUCTION_ASSERTS
-extern char const* libtorrent_assert_log;
+extern TORRENT_EXPORT char const* libtorrent_assert_log;
 #endif
 
 #if TORRENT_USE_IOSTREAM
@@ -81,10 +81,10 @@ extern char const* libtorrent_assert_log;
 #ifndef TORRENT_USE_SYSTEM_ASSERTS
 
 #define TORRENT_ASSERT_PRECOND(x) \
-	do { if (x) {} else assert_fail(#x, __LINE__, __FILE__, TORRENT_FUNCTION, 0, 1); } TORRENT_WHILE_0
+	do { if (x) {} else assert_fail(#x, __LINE__, __FILE__, TORRENT_FUNCTION, nullptr, 1); } TORRENT_WHILE_0
 
 #define TORRENT_ASSERT(x) \
-	do { if (x) {} else assert_fail(#x, __LINE__, __FILE__, TORRENT_FUNCTION, 0, 0); } TORRENT_WHILE_0
+	do { if (x) {} else assert_fail(#x, __LINE__, __FILE__, TORRENT_FUNCTION, nullptr, 0); } TORRENT_WHILE_0
 
 #if TORRENT_USE_IOSTREAM
 #define TORRENT_ASSERT_VAL(x, y) \
@@ -101,7 +101,7 @@ extern char const* libtorrent_assert_log;
 #endif
 
 #define TORRENT_ASSERT_FAIL() \
-	assert_fail("<unconditional>", __LINE__, __FILE__, TORRENT_FUNCTION, 0, 0)
+	assert_fail("<unconditional>", __LINE__, __FILE__, TORRENT_FUNCTION, nullptr, 0)
 
 #else
 #include <cassert>

@@ -42,7 +42,7 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #include <functional>
 
-using namespace libtorrent;
+using namespace lt;
 using namespace std::placeholders;
 
 struct test_torrent_t
@@ -112,22 +112,22 @@ TORRENT_TEST(resolve_links)
 
 		aux::vector<resolve_links::link_t, file_index_t> const& links = l.get_links();
 
-		std::string::size_type num_matches = std::count_if(links.begin(), links.end()
-			, std::bind(&resolve_links::link_t::ti, _1));
+		auto const num_matches = std::size_t(std::count_if(links.begin(), links.end()
+			, std::bind(&resolve_links::link_t::ti, _1)));
 
 		// some debug output in case the test fails
 		if (num_matches > e.expected_matches)
 		{
 			file_storage const& fs = ti1->files();
-			for (file_index_t i{0}; i != links.end_index(); ++i)
+			for (file_index_t idx{0}; idx != links.end_index(); ++idx)
 			{
-				TORRENT_ASSERT(i < file_index_t{fs.num_files()});
+				TORRENT_ASSERT(idx < file_index_t{fs.num_files()});
 				std::printf("%*s --> %s : %d\n"
-					, int(fs.file_name(i).size())
-					, fs.file_name(i).data()
-					, links[i].ti
-					? aux::to_hex(links[i].ti->info_hash()).c_str()
-					: "", static_cast<int>(links[i].file_idx));
+					, int(fs.file_name(idx).size())
+					, fs.file_name(idx).data()
+					, links[idx].ti
+					? aux::to_hex(links[idx].ti->info_hash()).c_str()
+					: "", static_cast<int>(links[idx].file_idx));
 			}
 		}
 
@@ -148,8 +148,8 @@ TORRENT_TEST(range_lookup_duplicated_files)
 	fs2.add_file("test_resolve_links_dir/tmp1", 1024);
 	fs2.add_file("test_resolve_links_dir/tmp2", 1024);
 
-	libtorrent::create_torrent t1(fs1, 1024);
-	libtorrent::create_torrent t2(fs2, 1024);
+	lt::create_torrent t1(fs1, 1024);
+	lt::create_torrent t2(fs2, 1024);
 
 	t1.set_hash(piece_index_t{0}, sha1_hash::max());
 
@@ -157,9 +157,8 @@ TORRENT_TEST(range_lookup_duplicated_files)
 	std::vector<char> tmp2;
 	bencode(std::back_inserter(tmp1), t1.generate());
 	bencode(std::back_inserter(tmp2), t2.generate());
-	error_code ec;
-	auto ti1 = std::make_shared<torrent_info>(&tmp1[0], int(tmp1.size()), ec);
-	auto ti2 = std::make_shared<torrent_info>(&tmp2[0], int(tmp2.size()), ec);
+	auto ti1 = std::make_shared<torrent_info>(tmp1, from_span);
+	auto ti2 = std::make_shared<torrent_info>(tmp2, from_span);
 
 	std::printf("resolving\n");
 	resolve_links l(ti1);
@@ -167,7 +166,7 @@ TORRENT_TEST(range_lookup_duplicated_files)
 
 	aux::vector<resolve_links::link_t, file_index_t> const& links = l.get_links();
 
-	std::string::size_type num_matches = std::count_if(links.begin(), links.end()
+	auto const num_matches = std::count_if(links.begin(), links.end()
 		, std::bind(&resolve_links::link_t::ti, _1));
 
 	TEST_EQUAL(num_matches, 1);

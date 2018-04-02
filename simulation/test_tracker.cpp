@@ -33,6 +33,9 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "test.hpp"
 #include "settings.hpp"
 #include "setup_swarm.hpp"
+#include "setup_transfer.hpp" // for addr()
+#include "utils.hpp" // for print_alerts
+#include "create_torrent.hpp"
 #include "simulator/simulator.hpp"
 #include "simulator/http_server.hpp"
 #include "simulator/utils.hpp"
@@ -43,9 +46,10 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/file_storage.hpp"
 #include "libtorrent/torrent_info.hpp"
 
-using namespace libtorrent;
+#include <iostream>
+
+using namespace lt;
 using namespace sim;
-namespace lt = libtorrent;
 
 using chrono::duration_cast;
 
@@ -56,6 +60,12 @@ template <typename Tp1, typename Tp2>
 bool eq(Tp1 const lhs, Tp2 const rhs)
 {
 	return std::abs(lt::duration_cast<seconds>(lhs - rhs).count()) <= 1;
+}
+
+template <class T>
+std::shared_ptr<T> clone_ptr(std::shared_ptr<T> const& ptr)
+{
+	return std::make_shared<T>(*ptr);
 }
 
 void test_interval(int interval)
@@ -92,6 +102,10 @@ void test_interval(int interval)
 	std::vector<lt::time_point> announce_alerts;
 
 	lt::settings_pack default_settings = settings();
+	// since the test tracker is only listening on IPv4 we need to configure the
+	// client to do the same so that the number of tracker_announce_alerts matches
+	// the number of announces seen by the tracker
+	default_settings.set_str(settings_pack::listen_interfaces, "0.0.0.0:6881");
 	lt::add_torrent_params default_add_torrent;
 
 	setup_swarm(1, swarm_test::upload, sim, default_settings, default_add_torrent
@@ -262,6 +276,8 @@ TORRENT_TEST(announce_interval_1200)
 
 struct sim_config : sim::default_config
 {
+	explicit sim_config(bool ipv6 = true) : ipv6(ipv6) {}
+
 	chrono::high_resolution_clock::duration hostname_lookup(
 		asio::ip::address const& requestor
 		, std::string hostname
@@ -271,12 +287,15 @@ struct sim_config : sim::default_config
 		if (hostname == "tracker.com")
 		{
 			result.push_back(address_v4::from_string("10.0.0.2"));
-			result.push_back(address_v6::from_string("ff::dead:beef"));
+			if (ipv6)
+				result.push_back(address_v6::from_string("ff::dead:beef"));
 			return duration_cast<chrono::high_resolution_clock::duration>(chrono::milliseconds(100));
 		}
 
 		return default_config::hostname_lookup(requestor, hostname, result, ec);
 	}
+
+	bool ipv6;
 };
 
 void on_alert_notify(lt::session* ses)
@@ -296,9 +315,10 @@ void on_alert_notify(lt::session* ses)
 	});
 }
 
-// this test makes sure that a tracker whose host name resolves to both IPv6 and
-// IPv4 addresses will be announced to twice, once for each address family
-TORRENT_TEST(ipv6_support)
+static const int num_interfaces = 3;
+
+void test_ipv6_support(char const* listen_interfaces
+	, int const expect_v4, int const expect_v6)
 {
 	using sim::asio::ip::address_v4;
 	sim_config network_cfg;
@@ -314,25 +334,30 @@ TORRENT_TEST(ipv6_support)
 	int v4_announces = 0;
 	int v6_announces = 0;
 
+	// if we're not listening we'll just report port 0
+	std::string const expect_port = (listen_interfaces && listen_interfaces == ""_sv)
+		? "&port=0" : "&port=6881";
+
 	http_v4.register_handler("/announce"
-	, [&v4_announces](std::string method, std::string req
+	, [&v4_announces,expect_port](std::string method, std::string req
 		, std::map<std::string, std::string>&)
 	{
 		++v4_announces;
 		TEST_EQUAL(method, "GET");
-
+		TEST_CHECK(req.find(expect_port) != std::string::npos);
 		char response[500];
 		int const size = std::snprintf(response, sizeof(response), "d8:intervali1800e5:peers0:e");
 		return sim::send_response(200, "OK", size) + response;
 	});
 
 	http_v6.register_handler("/announce"
-	, [&v6_announces](std::string method, std::string req
+	, [&v6_announces,expect_port](std::string method, std::string req
 		, std::map<std::string, std::string>&)
 	{
 		++v6_announces;
 		TEST_EQUAL(method, "GET");
 
+		TEST_CHECK(req.find(expect_port) != std::string::npos);
 		char response[500];
 		int const size = std::snprintf(response, sizeof(response), "d8:intervali1800e5:peers0:e");
 		return sim::send_response(200, "OK", size) + response;
@@ -341,9 +366,23 @@ TORRENT_TEST(ipv6_support)
 	{
 		lt::session_proxy zombie;
 
-		asio::io_service ios(sim, { address_v4::from_string("10.0.0.3")
-			, address_v6::from_string("ffff::1337") });
+		std::vector<asio::ip::address> ips;
+
+		for (int i = 0; i < num_interfaces; i++)
+		{
+			char ep[30];
+			std::snprintf(ep, sizeof(ep), "10.0.0.%d", i + 1);
+			ips.push_back(address::from_string(ep));
+			std::snprintf(ep, sizeof(ep), "ffff::1337:%d", i + 1);
+			ips.push_back(address::from_string(ep));
+		}
+
+		asio::io_service ios(sim, ips);
 		lt::settings_pack sett = settings();
+		if (listen_interfaces)
+		{
+			sett.set_str(settings_pack::listen_interfaces, listen_interfaces);
+		}
 		std::unique_ptr<lt::session> ses(new lt::session(sett, ios));
 
 		ses->set_alert_notify(std::bind(&on_alert_notify, ses.get()));
@@ -379,9 +418,165 @@ TORRENT_TEST(ipv6_support)
 		sim.run();
 	}
 
+	TEST_EQUAL(v4_announces, expect_v4);
+	TEST_EQUAL(v6_announces, expect_v6);
+}
+
+void test_udpv6_support(char const* listen_interfaces
+	, int const expect_v4, int const expect_v6)
+{
+	using sim::asio::ip::address_v4;
+	sim_config network_cfg;
+	sim::simulation sim{network_cfg};
+
+	sim::asio::io_service web_server_v4(sim, address_v4::from_string("10.0.0.2"));
+	sim::asio::io_service web_server_v6(sim, address_v6::from_string("ff::dead:beef"));
+
+	int v4_announces = 0;
+	int v6_announces = 0;
+
+	{
+		lt::session_proxy zombie;
+
+		std::vector<asio::ip::address> ips;
+
+		for (int i = 0; i < num_interfaces; i++)
+		{
+			char ep[30];
+			std::snprintf(ep, sizeof(ep), "10.0.0.%d", i + 1);
+			ips.push_back(address::from_string(ep));
+			std::snprintf(ep, sizeof(ep), "ffff::1337:%d", i + 1);
+			ips.push_back(address::from_string(ep));
+		}
+
+		asio::io_service ios(sim, ips);
+		lt::settings_pack sett = settings();
+		if (listen_interfaces)
+		{
+			sett.set_str(settings_pack::listen_interfaces, listen_interfaces);
+		}
+		std::unique_ptr<lt::session> ses(new lt::session(sett, ios));
+
+		// since we don't have a udp tracker to run in the sim, looking for the
+		// alerts is the closest proxy
+		ses->set_alert_notify([&]{
+			ses->get_io_service().post([&] {
+				std::vector<lt::alert*> alerts;
+				ses->pop_alerts(&alerts);
+
+				for (lt::alert* a : alerts)
+				{
+					lt::time_duration d = a->timestamp().time_since_epoch();
+					std::uint32_t const millis = std::uint32_t(
+						lt::duration_cast<lt::milliseconds>(d).count());
+					std::printf("%4d.%03d: %s\n", millis / 1000, millis % 1000,
+						a->message().c_str());
+					if (auto tr = alert_cast<tracker_announce_alert>(a))
+					{
+						if (is_v4(tr->local_endpoint))
+							++v4_announces;
+						else
+							++v6_announces;
+					}
+					else if (alert_cast<tracker_error_alert>(a))
+					{
+						TEST_CHECK(false && "unexpected tracker error");
+					}
+				}
+			});
+		});
+
+		lt::add_torrent_params p;
+		p.name = "test-torrent";
+		p.save_path = ".";
+		p.info_hash.assign("abababababababababab");
+
+		p.trackers.push_back("udp://tracker.com:8080/announce");
+		ses->async_add_torrent(p);
+
+		// stop the torrent 5 seconds in
+		sim::timer t1(sim, lt::seconds(5)
+			, [&ses](boost::system::error_code const&)
+		{
+			std::vector<lt::torrent_handle> torrents = ses->get_torrents();
+			for (auto const& t : torrents)
+			{
+				t.pause();
+			}
+		});
+
+		// then shut down 10 seconds in
+		sim::timer t2(sim, lt::seconds(10)
+			, [&ses,&zombie](boost::system::error_code const&)
+		{
+			zombie = ses->abort();
+			ses.reset();
+		});
+
+		sim.run();
+	}
+
+	TEST_EQUAL(v4_announces, expect_v4);
+	TEST_EQUAL(v6_announces, expect_v6);
+}
+
+// this test makes sure that a tracker whose host name resolves to both IPv6 and
+// IPv4 addresses will be announced to twice, once for each address family
+TORRENT_TEST(ipv6_support)
+{
+	// null means default
+	test_ipv6_support(nullptr, 2, num_interfaces * 2);
+}
+
+TORRENT_TEST(announce_no_listen)
+{
+	// if we don't listen on any sockets at all (but only make outgoing peer
+	// connections) we still need to make sure we announce to trackers
+	test_ipv6_support("", 2, 2);
+}
+
+TORRENT_TEST(announce_udp_no_listen)
+{
+	// since there's no actual udp tracker in this test, we will only try to
+	// announce once, and fail. We won't announce the event=stopped
+	test_udpv6_support("", 1, 1);
+}
+
+TORRENT_TEST(ipv6_support_bind_v4_v6_any)
+{
 	// 2 because there's one announce on startup and one when shutting down
-	TEST_EQUAL(v4_announces, 2);
-	TEST_EQUAL(v6_announces, 2);
+	// IPv6 will send announces for each interface
+	test_ipv6_support("0.0.0.0:6881,[::0]:6881", 2, num_interfaces * 2);
+}
+
+TORRENT_TEST(ipv6_support_bind_v6_any)
+{
+	test_ipv6_support("[::0]:6881", 0, num_interfaces * 2);
+}
+
+TORRENT_TEST(ipv6_support_bind_v4)
+{
+	test_ipv6_support("10.0.0.3:6881", 2, 0);
+}
+
+TORRENT_TEST(ipv6_support_bind_v6)
+{
+	test_ipv6_support("[ffff::1337:1]:6881", 0, 2);
+}
+
+TORRENT_TEST(ipv6_support_bind_v6_3interfaces)
+{
+	test_ipv6_support("[ffff::1337:1]:6881,[ffff::1337:2]:6881,[ffff::1337:3]:6881", 0, 3 * 2);
+}
+
+TORRENT_TEST(ipv6_support_bind_v4_v6)
+{
+	test_ipv6_support("10.0.0.3:6881,[ffff::1337:1]:6881", 2, 2);
+}
+
+TORRENT_TEST(ipv6_support_bind_v6_v4)
+{
+	test_ipv6_support("[ffff::1337:1]:6881,10.0.0.3:6881", 2, 2);
 }
 
 // this runs a simulation of a torrent with tracker(s), making sure the request
@@ -401,11 +596,14 @@ void tracker_test(Setup setup, Announce a, Test1 test1, Test2 test2
 	sim::simulation sim{network_cfg};
 
 	sim::asio::io_service tracker_ios(sim, address_v4::from_string("10.0.0.2"));
+	sim::asio::io_service tracker_ios6(sim, address_v6::from_string("ff::dead:beef"));
 
 	// listen on port 8080
 	sim::http_server http(tracker_ios, 8080);
+	sim::http_server http6(tracker_ios6, 8080);
 
 	http.register_handler(url_path, a);
+	http6.register_handler(url_path, a);
 
 	lt::session_proxy zombie;
 
@@ -492,11 +690,15 @@ TORRENT_TEST(test_error)
 		}
 		, [](announce_entry const& ae)
 		{
-			TEST_EQUAL(ae.is_working(), false);
-			TEST_EQUAL(ae.message, "test");
 			TEST_EQUAL(ae.url, "http://tracker.com:8080/announce");
-			TEST_EQUAL(ae.last_error, error_code(errors::tracker_failure));
-			TEST_EQUAL(ae.fails, 1);
+			TEST_EQUAL(ae.endpoints.size(), 2);
+			for (auto const& aep : ae.endpoints)
+			{
+				TEST_EQUAL(aep.is_working(), false);
+				TEST_EQUAL(aep.message, "test");
+				TEST_EQUAL(aep.last_error, error_code(errors::tracker_failure));
+				TEST_EQUAL(aep.fails, 1);
+			}
 		});
 }
 
@@ -514,11 +716,15 @@ TORRENT_TEST(test_warning)
 		}
 		, [](announce_entry const& ae)
 		{
-			TEST_EQUAL(ae.is_working(), true);
-			TEST_EQUAL(ae.message, "test2");
 			TEST_EQUAL(ae.url, "http://tracker.com:8080/announce");
-			TEST_EQUAL(ae.last_error, error_code());
-			TEST_EQUAL(ae.fails, 0);
+			TEST_EQUAL(ae.endpoints.size(), 2);
+			for (auto const& aep : ae.endpoints)
+			{
+				TEST_EQUAL(aep.is_working(), true);
+				TEST_EQUAL(aep.message, "test2");
+				TEST_EQUAL(aep.last_error, error_code());
+				TEST_EQUAL(aep.fails, 0);
+			}
 		});
 }
 
@@ -537,14 +743,18 @@ TORRENT_TEST(test_scrape_data_in_announce)
 		}
 		, [](announce_entry const& ae)
 		{
-			TEST_EQUAL(ae.is_working(), true);
-			TEST_EQUAL(ae.message, "");
 			TEST_EQUAL(ae.url, "http://tracker.com:8080/announce");
-			TEST_EQUAL(ae.last_error, error_code());
-			TEST_EQUAL(ae.fails, 0);
-			TEST_EQUAL(ae.scrape_complete, 1);
-			TEST_EQUAL(ae.scrape_incomplete, 2);
-			TEST_EQUAL(ae.scrape_downloaded, 3);
+			TEST_EQUAL(ae.endpoints.size(), 2);
+			for (auto const& aep : ae.endpoints)
+			{
+				TEST_EQUAL(aep.is_working(), true);
+				TEST_EQUAL(aep.message, "");
+				TEST_EQUAL(aep.last_error, error_code());
+				TEST_EQUAL(aep.fails, 0);
+				TEST_EQUAL(aep.scrape_complete, 1);
+				TEST_EQUAL(aep.scrape_incomplete, 2);
+				TEST_EQUAL(aep.scrape_downloaded, 3);
+			}
 		});
 }
 
@@ -571,9 +781,13 @@ TORRENT_TEST(test_scrape)
 
 			TEST_EQUAL(tr.size(), 1);
 			announce_entry const& ae = tr[0];
-			TEST_EQUAL(ae.scrape_incomplete, 2);
-			TEST_EQUAL(ae.scrape_complete, 1);
-			TEST_EQUAL(ae.scrape_downloaded, 3);
+			TEST_EQUAL(ae.endpoints.size(), 2);
+			for (auto const& aep : ae.endpoints)
+			{
+				TEST_EQUAL(aep.scrape_incomplete, 2);
+				TEST_EQUAL(aep.scrape_complete, 1);
+				TEST_EQUAL(aep.scrape_downloaded, 3);
+			}
 		}
 		, "/scrape");
 }
@@ -589,11 +803,15 @@ TORRENT_TEST(test_http_status)
 		}
 		, [](announce_entry const& ae)
 		{
-			TEST_EQUAL(ae.is_working(), false);
-			TEST_EQUAL(ae.message, "Not A Tracker");
 			TEST_EQUAL(ae.url, "http://tracker.com:8080/announce");
-			TEST_EQUAL(ae.last_error, error_code(410, http_category()));
-			TEST_EQUAL(ae.fails, 1);
+			TEST_EQUAL(ae.endpoints.size(), 2);
+			for (auto const& aep : ae.endpoints)
+			{
+				TEST_EQUAL(aep.is_working(), false);
+				TEST_EQUAL(aep.message, "Not A Tracker");
+				TEST_EQUAL(aep.last_error, error_code(410, http_category()));
+				TEST_EQUAL(aep.fails, 1);
+			}
 		});
 }
 
@@ -611,11 +829,15 @@ TORRENT_TEST(test_interval)
 		}
 		, [](announce_entry const& ae)
 		{
-			TEST_EQUAL(ae.is_working(), true);
-			TEST_EQUAL(ae.message, "");
 			TEST_EQUAL(ae.url, "http://tracker.com:8080/announce");
-			TEST_EQUAL(ae.last_error, error_code());
-			TEST_EQUAL(ae.fails, 0);
+			TEST_EQUAL(ae.endpoints.size(), 2);
+			for (auto const& aep : ae.endpoints)
+			{
+				TEST_EQUAL(aep.is_working(), true);
+				TEST_EQUAL(aep.message, "");
+				TEST_EQUAL(aep.last_error, error_code());
+				TEST_EQUAL(aep.fails, 0);
+			}
 
 			TEST_EQUAL(ae.trackerid, "testtest");
 		});
@@ -635,12 +857,16 @@ TORRENT_TEST(test_invalid_bencoding)
 		}
 		, [](announce_entry const& ae)
 		{
-			TEST_EQUAL(ae.is_working(), false);
-			TEST_EQUAL(ae.message, "");
 			TEST_EQUAL(ae.url, "http://tracker.com:8080/announce");
-			TEST_EQUAL(ae.last_error, error_code(bdecode_errors::expected_value
-				, bdecode_category()));
-			TEST_EQUAL(ae.fails, 1);
+			TEST_EQUAL(ae.endpoints.size(), 2);
+			for (auto const& aep : ae.endpoints)
+			{
+				TEST_EQUAL(aep.is_working(), false);
+				TEST_EQUAL(aep.message, "");
+				TEST_EQUAL(aep.last_error, error_code(bdecode_errors::expected_value
+					, bdecode_category()));
+				TEST_EQUAL(aep.fails, 1);
+			}
 		});
 }
 
@@ -686,22 +912,31 @@ TORRENT_TEST(try_next)
 				std::printf("tracker \"%s\"\n", tr[i].url.c_str());
 				if (tr[i].url == "http://tracker.com:8080/announce")
 				{
-					TEST_EQUAL(tr[i].fails, 0);
+					for (auto const& aep : tr[i].endpoints)
+					{
+						TEST_EQUAL(aep.fails, 0);
+					}
 					TEST_EQUAL(tr[i].verified, true);
 				}
 				else if (tr[i].url == "http://failing-tracker.com/announce")
 				{
-					TEST_CHECK(tr[i].fails >= 1);
+					for (auto const& aep : tr[i].endpoints)
+					{
+						TEST_CHECK(aep.fails >= 1);
+						TEST_EQUAL(aep.last_error
+							, error_code(boost::asio::error::host_not_found));
+					}
 					TEST_EQUAL(tr[i].verified, false);
-					TEST_EQUAL(tr[i].last_error
-						, error_code(boost::asio::error::host_not_found));
 				}
 				else if (tr[i].url == "udp://failing-tracker.com/announce")
 				{
-					TEST_CHECK(tr[i].fails >= 1);
 					TEST_EQUAL(tr[i].verified, false);
-					TEST_EQUAL(tr[i].last_error
-						, error_code(boost::asio::error::host_not_found));
+					for (auto const& aep : tr[i].endpoints)
+					{
+						TEST_CHECK(aep.fails >= 1);
+						TEST_EQUAL(aep.last_error
+							, error_code(boost::asio::error::host_not_found));
+					}
 				}
 				else
 				{
@@ -716,7 +951,7 @@ std::shared_ptr<torrent_info> make_torrent(bool priv)
 {
 	file_storage fs;
 	fs.add_file("foobar", 13241);
-	create_torrent ct(fs);
+	lt::create_torrent ct(fs);
 
 	ct.add_tracker("http://tracker.com:8080/announce");
 
@@ -728,8 +963,7 @@ std::shared_ptr<torrent_info> make_torrent(bool priv)
 	entry e = ct.generate();
 	std::vector<char> buf;
 	bencode(std::back_inserter(buf), e);
-	error_code ec;
-	return std::make_shared<torrent_info>(buf.data(), int(buf.size()), ec);
+	return std::make_shared<torrent_info>(buf, from_span);
 }
 
 // make sure we _do_ send our IPv6 address to trackers for private torrents
@@ -764,6 +998,30 @@ TORRENT_TEST(tracker_ipv6_argument)
 		, [](torrent_handle) {});
 	TEST_EQUAL(got_announce, true);
 	TEST_EQUAL(got_ipv6, true);
+}
+
+TORRENT_TEST(tracker_key_argument)
+{
+	std::set<std::string> keys;
+	tracker_test(
+		[](lt::add_torrent_params& p, lt::session& ses)
+		{
+			p.ti = make_torrent(true);
+			return 60;
+		},
+		[&](std::string method, std::string req
+			, std::map<std::string, std::string>& headers)
+		{
+			auto const pos = req.find("&key=");
+			TEST_CHECK(pos != std::string::npos);
+			keys.insert(req.substr(pos + 5, req.find_first_of('&', pos + 5) - pos - 5));
+			return sim::send_response(200, "OK", 11) + "d5:peers0:e";
+		}
+		, [](torrent_handle h) {}
+		, [](torrent_handle h) {});
+
+	// make sure we got two separate keys, one for each listen socket interface
+	TEST_EQUAL(keys.size(), 2);
 }
 
 // make sure we do _not_ send our IPv6 address to trackers for non-private
@@ -877,6 +1135,112 @@ TORRENT_TEST(tracker_user_agent_privacy_mode_private_torrent)
 		, [](torrent_handle h) {}
 		, [](torrent_handle h) {});
 	TEST_EQUAL(got_announce, true);
+}
+
+// This test sets up two peers, one seed an one downloader. The downloader has
+// two trackers, both in tier 0. The behavior we expect is that it picks one of
+// the trackers at random and announces to it. Since both trackers are working,
+// it should not announce to the tracker it did not initially pick.
+
+// #error parameterize this test over adding the trackers into different tiers
+// and setting "announce_to_all_tiers"
+
+TORRENT_TEST(tracker_tiers)
+{
+	using namespace libtorrent;
+
+	char const* peer0_ip = "50.0.0.1";
+	char const* peer1_ip = "50.0.0.2";
+
+	using asio::ip::address;
+	address peer0 = addr(peer0_ip);
+	address peer1 = addr(peer1_ip);
+
+	// setup the simulation
+	sim::default_config network_cfg;
+	sim::simulation sim{network_cfg};
+	sim::asio::io_service ios0 { sim, peer0 };
+	sim::asio::io_service ios1 { sim, peer1 };
+
+	sim::asio::io_service tracker1(sim, address_v4::from_string("3.0.0.1"));
+	sim::asio::io_service tracker2(sim, address_v4::from_string("3.0.0.2"));
+	sim::http_server http1(tracker1, 8080);
+	sim::http_server http2(tracker2, 8080);
+
+	bool received_announce[2] = {false, false};
+	http1.register_handler("/announce"
+		, [&](std::string method, std::string req
+		, std::map<std::string, std::string>&)
+	{
+		received_announce[0] = true;
+		std::string const ret = "d8:intervali60e5:peers0:e";
+		return sim::send_response(200, "OK", static_cast<int>(ret.size())) + ret;
+	});
+
+	http2.register_handler("/announce"
+		, [&](std::string method, std::string req
+		, std::map<std::string, std::string>&)
+	{
+		received_announce[1] = true;
+		std::string const ret = "d8:intervali60e5:peers0:e";
+		return sim::send_response(200, "OK", static_cast<int>(ret.size())) + ret;
+	});
+
+	lt::session_proxy zombie[2];
+
+	// setup settings pack to use for the session (customization point)
+	lt::settings_pack pack = settings();
+	// create session
+	std::shared_ptr<lt::session> ses[2];
+	pack.set_str(settings_pack::listen_interfaces, peer0_ip + std::string(":6881"));
+	ses[0] = std::make_shared<lt::session>(pack, ios0);
+
+	pack.set_str(settings_pack::listen_interfaces, peer1_ip + std::string(":6881"));
+	ses[1] = std::make_shared<lt::session>(pack, ios1);
+
+	// only monitor alerts for session 0 (the downloader)
+	print_alerts(*ses[0], [=](lt::session& ses, lt::alert const* a) {
+		if (auto ta = alert_cast<lt::add_torrent_alert>(a))
+		{
+			ta->handle.connect_peer(lt::tcp::endpoint(peer1, 6881));
+		}
+	});
+
+	print_alerts(*ses[1]);
+
+	// the first peer is a downloader, the second peer is a seed
+	lt::add_torrent_params params = ::create_torrent(1);
+	auto ti2 = clone_ptr(params.ti);
+	params.flags &= ~lt::torrent_flags::auto_managed;
+	params.flags &= ~lt::torrent_flags::paused;
+
+	// These trackers are in the same tier. libtorrent is expected to pick one at
+	// random and stick to it, never announce to the other one.
+	params.ti->add_tracker("http://3.0.0.1:8080/announce", 0);
+	params.ti->add_tracker("http://3.0.0.2:8080/announce", 0);
+	params.save_path = save_path(0);
+	ses[0]->async_add_torrent(params);
+
+	params.ti = ti2;
+	params.save_path = save_path(1);
+	ses[1]->async_add_torrent(params);
+
+	sim::timer t(sim, lt::minutes(30), [&](boost::system::error_code const& ec)
+	{
+		TEST_CHECK(received_announce[0] != received_announce[1]);
+		TEST_CHECK(ses[0]->get_torrents()[0].status().is_seeding);
+		TEST_CHECK(ses[1]->get_torrents()[0].status().is_seeding);
+
+		// shut down
+		int idx = 0;
+		for (auto& s : ses)
+		{
+			zombie[idx++] = s->abort();
+			s.reset();
+		}
+	});
+
+	sim.run();
 }
 
 // TODO: test external IP

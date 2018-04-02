@@ -42,8 +42,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/magnet_uri.hpp"
 #include "libtorrent/extensions/ut_metadata.hpp"
 
-using namespace libtorrent;
-namespace lt = libtorrent;
+using namespace lt;
 
 enum flags_t
 {
@@ -91,7 +90,7 @@ void run_metadata_test(int flags)
 	lt::add_torrent_params default_add_torrent;
 	if (flags & upload_only)
 	{
-		default_add_torrent.flags |= add_torrent_params::flag_upload_mode;
+		default_add_torrent.flags |= torrent_flags::upload_mode;
 	}
 
 	setup_swarm(2, (flags & reverse) ? swarm_test::upload : swarm_test::download
@@ -101,10 +100,20 @@ void run_metadata_test(int flags)
 		, [](lt::add_torrent_params& params) {
 			// we want to add the torrent via magnet link
 			error_code ec;
-			parse_magnet_uri(lt::make_magnet_uri(*params.ti), params, ec);
+			add_torrent_params const p = parse_magnet_uri(
+				lt::make_magnet_uri(*params.ti), ec);
 			TEST_CHECK(!ec);
+			params.name = p.name;
+			params.trackers = p.trackers;
+			params.tracker_tiers = p.tracker_tiers;
+			params.url_seeds = p.url_seeds;
+			params.info_hash = p.info_hash;
+			params.peers = p.peers;
+#ifndef TORRENT_DISABLE_DHT
+			params.dht_nodes = p.dht_nodes;
+#endif
 			params.ti.reset();
-			params.flags &= ~add_torrent_params::flag_upload_mode;
+			params.flags &= ~torrent_flags::upload_mode;
 		}
 		// on alert
 		, [&](lt::alert const* a, lt::session& ses) {

@@ -35,7 +35,7 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #include "test.hpp"
 
-using namespace libtorrent;
+using namespace lt;
 
 namespace
 {
@@ -87,7 +87,7 @@ TORRENT_TEST(hasher)
 			h.update(test_array[test], int(std::strlen(test_array[test])));
 
 		sha1_hash result;
-		aux::from_hex({result_array[test], 40}, (char*)&result[0]);
+		aux::from_hex({result_array[test], 40}, result.data());
 		TEST_CHECK(result == h.final());
 	}
 }

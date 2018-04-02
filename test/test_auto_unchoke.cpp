@@ -42,10 +42,11 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "test.hpp"
 #include "setup_transfer.hpp"
 
+namespace {
+
 void test_swarm()
 {
-	using namespace libtorrent;
-	namespace lt = libtorrent;
+	using namespace lt;
 
 	// these are declared before the session objects
 	// so that they are destructed last. This enables
@@ -74,6 +75,9 @@ void test_swarm()
 	pack.set_bool(settings_pack::enable_natpmp, false);
 	pack.set_bool(settings_pack::enable_upnp, false);
 	pack.set_bool(settings_pack::enable_dht, false);
+#ifndef TORRENT_NO_DEPRECATE
+	pack.set_bool(settings_pack::rate_limit_utp, true);
+#endif
 
 	pack.set_int(settings_pack::out_enc_policy, settings_pack::pe_forced);
 	pack.set_int(settings_pack::in_enc_policy, settings_pack::pe_forced);
@@ -134,9 +138,11 @@ void test_swarm()
 	p3 = ses3.abort();
 }
 
+} // anonymous namespace
+
 TORRENT_TEST(auto_unchoke)
 {
-	using namespace libtorrent;
+	using namespace lt;
 
 	// in case the previous run was t r catch (std::exception&) {}erminated
 	error_code ec;
@@ -154,4 +160,3 @@ TORRENT_TEST(auto_unchoke)
 	remove_all("./tmp2_unchoke", ec);
 	remove_all("./tmp3_unchoke", ec);
 }
-

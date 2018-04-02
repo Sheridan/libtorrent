@@ -171,11 +171,11 @@ void get_item::done()
 
 void get_item_observer::reply(msg const& m)
 {
-	public_key pk;
-	signature sig;
+	public_key pk{};
+	signature sig{};
 	sequence_number seq{0};
 
-	bdecode_node r = m.message.dict_find_dict("r");
+	bdecode_node const r = m.message.dict_find_dict("r");
 	if (!r)
 	{
 #ifndef TORRENT_DISABLE_LOGGING

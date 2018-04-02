@@ -36,7 +36,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/address.hpp"
 #include "libtorrent/error_code.hpp"
 
-using namespace libtorrent;
+using namespace lt;
 
 TORRENT_TEST(is_local)
 {
@@ -57,7 +57,6 @@ TORRENT_TEST(is_loopback)
 #if TORRENT_USE_IPV6
 	if (supports_ipv6())
 	{
-		error_code ec;
 		TEST_CHECK(is_loopback(address::from_string("::1", ec)));
 		TEST_CHECK(!ec);
 	}

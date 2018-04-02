@@ -41,25 +41,31 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <libtorrent/kademlia/routing_table.hpp>
 #include <libtorrent/kademlia/observer.hpp>
 #include <libtorrent/address.hpp>
+#include <libtorrent/flags.hpp>
+#include <libtorrent/bdecode.hpp>
 
-#include "libtorrent/aux_/disable_warnings_push.hpp"
-#include <boost/noncopyable.hpp>
-#include "libtorrent/aux_/disable_warnings_pop.hpp"
+namespace libtorrent {
 
-namespace libtorrent { struct dht_lookup; }
-namespace libtorrent { namespace dht {
+struct dht_lookup;
+
+namespace dht {
 
 class node;
+struct node_endpoint;
+
+using traversal_flags_t = libtorrent::flags::bitfield_flag<std::uint8_t, struct traversal_flags_tag>;
 
 // this class may not be instantiated as a stack object
-struct TORRENT_EXTRA_EXPORT traversal_algorithm : boost::noncopyable
-	, std::enable_shared_from_this<traversal_algorithm>
+struct TORRENT_EXTRA_EXPORT traversal_algorithm
+	: std::enable_shared_from_this<traversal_algorithm>
 {
 	void traverse(node_id const& id, udp::endpoint const& addr);
 	void finished(observer_ptr o);
 
-	enum flags_t { prevent_request = 1, short_timeout = 2 };
-	void failed(observer_ptr o, int flags = 0);
+	static constexpr traversal_flags_t prevent_request = 0_bit;
+	static constexpr traversal_flags_t short_timeout = 1_bit;
+
+	void failed(observer_ptr o, traversal_flags_t flags = {});
 	virtual ~traversal_algorithm();
 	void status(dht_lookup& l);
 
@@ -68,10 +74,12 @@ struct TORRENT_EXTRA_EXPORT traversal_algorithm : boost::noncopyable
 
 	node_id const& target() const { return m_target; }
 
-	void resort_results();
-	void add_entry(node_id const& id, udp::endpoint const& addr, unsigned char flags);
+	void resort_result(observer*);
+	void add_entry(node_id const& id, udp::endpoint const& addr, observer_flags_t flags);
 
 	traversal_algorithm(node& dht_node, node_id const& target);
+	traversal_algorithm(traversal_algorithm const&) = delete;
+	traversal_algorithm& operator=(traversal_algorithm const&) = delete;
 	int invoke_count() const { TORRENT_ASSERT(m_invoke_count >= 0); return m_invoke_count; }
 	int branch_factor() const { TORRENT_ASSERT(m_branch_factor >= 0); return m_branch_factor; }
 
@@ -104,15 +112,27 @@ protected:
 	int num_timeouts() const { return m_timeouts; }
 
 	node& m_node;
+
+	// this vector is sorted by node-id distance from our node id. Closer nodes
+	// are earlier in the vector. However, not the entire vector is necessarily
+	// sorted, the tail of the vector may contain nodes out-of-order. This is
+	// used when bootstrapping. The ``m_sorted_results`` member indicates how
+	// many of the first elements are sorted.
 	std::vector<observer_ptr> m_results;
+
+	int num_sorted_results() const { return m_sorted_results; }
 
 private:
 
 	node_id const m_target;
-	std::int16_t m_invoke_count = 0;
-	std::int16_t m_branch_factor = 3;
+	std::int8_t m_invoke_count = 0;
+	std::int8_t m_branch_factor = 3;
+	// the number of elements at the beginning of m_results that are sorted by
+	// node_id.
+	std::int8_t m_sorted_results = 0;
 	std::int16_t m_responses = 0;
 	std::int16_t m_timeouts = 0;
+
 #ifndef TORRENT_DISABLE_LOGGING
 	// this is a unique ID for this specific traversal_algorithm instance,
 	// just used for logging
@@ -129,18 +149,22 @@ private:
 #endif
 };
 
+void look_for_nodes(char const* nodes_key, udp const& protocol
+	, bdecode_node const& r, std::function<void(node_endpoint const&)> f);
+
 struct traversal_observer : observer
 {
 	traversal_observer(
-		std::shared_ptr<traversal_algorithm> const& algorithm
+		std::shared_ptr<traversal_algorithm> algorithm
 		, udp::endpoint const& ep, node_id const& id)
-		: observer(algorithm, ep, id)
+		: observer(std::move(algorithm), ep, id)
 	{}
 
 	// parses out "nodes" and keeps traversing
-	virtual void reply(msg const&);
+	void reply(msg const&) override;
 };
 
-} } // namespace libtorrent::dht
+} // namespace dht
+} // namespace libtorrent
 
 #endif // TRAVERSAL_ALGORITHM_050324_HPP

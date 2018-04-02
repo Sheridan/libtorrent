@@ -45,8 +45,9 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "setup_transfer.hpp"
 #include <fstream>
 
-using namespace libtorrent;
-namespace lt = libtorrent;
+using namespace lt;
+
+namespace {
 
 void test_transfer()
 {
@@ -61,7 +62,7 @@ void test_transfer()
 	session_proxy p1;
 	session_proxy p2;
 
-	const int mask = alert::all_categories
+	auto const mask = alert::all_categories
 		& ~(alert::progress_notification
 			| alert::performance_warning
 			| alert::stats_notification);
@@ -96,8 +97,8 @@ void test_transfer()
 
 	// for performance testing
 	add_torrent_params atp;
-	atp.flags &= ~add_torrent_params::flag_paused;
-	atp.flags &= ~add_torrent_params::flag_auto_managed;
+	atp.flags &= ~torrent_flags::paused;
+	atp.flags &= ~torrent_flags::auto_managed;
 //	atp.storage = &disabled_storage_constructor;
 
 	// test using piece sizes smaller than 16kB
@@ -132,6 +133,8 @@ void test_transfer()
 	p1 = ses1.abort();
 	p2 = ses2.abort();
 }
+
+} // anonymous namespace
 
 TORRENT_TEST(utp)
 {

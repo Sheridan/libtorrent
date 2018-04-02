@@ -45,18 +45,19 @@ POSSIBILITY OF SUCH DAMAGE.
 
 namespace libtorrent {
 
-	struct dht_settings;
 	class entry;
 }
 
 namespace libtorrent { namespace dht {
+	struct dht_settings;
+
 	// This structure hold the relevant counters for the storage
 	struct TORRENT_EXPORT dht_storage_counters
 	{
-		std::int32_t torrents;
-		std::int32_t peers;
-		std::int32_t immutable_data;
-		std::int32_t mutable_data;
+		std::int32_t torrents = 0;
+		std::int32_t peers = 0;
+		std::int32_t immutable_data = 0;
+		std::int32_t mutable_data = 0;
 
 		// This member function set the counters to zero.
 		void reset();
@@ -204,18 +205,18 @@ namespace libtorrent { namespace dht {
 			, span<char const> salt
 			, address const& addr) = 0;
 
-		// This function retrieves a sample infohashes
+		// This function retrieves a sample info-hashes
 		//
 		// For implementers:
-		// The infohashes should be stored in ["samples"] (N × 20 bytes).
+		// The info-hashes should be stored in ["samples"] (N × 20 bytes).
 		// the following keys should be filled
 		// item["interval"] - the subset refresh interval in seconds.
-		// item["num"] - number of infohashes in storage.
+		// item["num"] - number of info-hashes in storage.
 		//
 		// Internally, this function is allowed to lazily evaluate, cache
 		// and modify the actual sample to put in ``item``
 		//
-		// returns the number of infohashes in the sample.
+		// returns the number of info-hashes in the sample.
 		//
 		virtual int get_infohashes_sample(entry& item) = 0;
 

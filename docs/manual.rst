@@ -62,7 +62,7 @@ how to find out about it and what to do about it.
 
 Make sure to keep track of the paused state, the error state and the upload
 mode of your torrents. By default, torrents are auto-managed, which means
-libtorrent will pause them, unpause them, scrape them and take them out
+libtorrent will pause, resume, scrape them and take them out
 of upload-mode automatically.
 
 Whenever a torrent encounters a fatal error, it will be stopped, and the
@@ -91,9 +91,9 @@ network primitives
 There are a few typedefs in the ``libtorrent`` namespace which pulls
 in network types from the ``boost::asio`` namespace. These are::
 
-	typedef boost::asio::ip::address address;
-	typedef boost::asio::ip::address_v4 address_v4;
-	typedef boost::asio::ip::address_v6 address_v6;
+	using address = boost::asio::ip::address;
+	using address_v4 = boost::asio::ip::address_v4;
+	using address_v6 = boost::asio::ip::address_v6;
 	using boost::asio::ip::tcp;
 	using boost::asio::ip::udp;
 
@@ -109,7 +109,7 @@ with an associated port.
 
 For documentation on these types, please refer to the `asio documentation`_.
 
-.. _`asio documentation`: http://asio.sourceforge.net/asio-0.3.8/doc/asio/reference.html
+.. _`asio documentation`: http://www.boost.org/doc/libs/1_66_0/doc/html/boost_asio.html
 
 exceptions
 ==========
@@ -129,7 +129,7 @@ for system errors. That is, errors that belong to the generic or system category
 
 Errors that belong to the libtorrent error category are not localized however, they
 are only available in english. In order to translate libtorrent errors, compare the
-error category of the ``error_code`` object against ``libtorrent::libtorrent_category()``,
+error category of the ``error_code`` object against ``lt::libtorrent_category()``,
 and if matches, you know the error code refers to the list above. You can provide
 your own mapping from error code to string, which is localized. In this case, you
 cannot rely on ``error_code::message()`` to generate your strings.
@@ -143,7 +143,7 @@ Here's a simple example of how to translate error codes:
 
 	std::string error_code_to_string(boost::system::error_code const& ec)
 	{
-		if (ec.category() != libtorrent::libtorrent_category())
+		if (ec.category() != lt::libtorrent_category())
 		{
 			return ec.message();
 		}
@@ -183,6 +183,19 @@ download, without any .torrent file.
 The format of the magnet URI is:
 
 **magnet:?xt=urn:btih:** *Base16 encoded info-hash* [ **&dn=** *name of download* ] [ **&tr=** *tracker URL* ]*
+
+In order to download *just* the metadata (.torrent file) from a magnet link, set
+file priorities to 0 in add_torrent_params::file_priorities. It's OK to set the
+priority for more files than what is in the torrent. It may not be trivial to
+know how many files a torrent has before the metadata has been downloaded.
+Additional file priorities will be ignored. By setting a large number of files
+to priority 0, chances are that they will all be set to 0 once the metadata is
+received (and we know how many files there are).
+
+In this case, when the metadata is received from the swarm, the torrent will
+still be running, but it will disconnect the majority of peers (since connections
+to peers that already have the metadata are redundant). It will keep seeding the
+*metadata* only.
 
 queuing
 =======
@@ -261,8 +274,24 @@ Once a torrent completes checking and moves into a diffferent state, the next in
 line will be started for checking.
 
 Any torrent added force-started or force-stopped (i.e. the auto managed flag is
-_not_ set), will not be subject to this limit and they will all check
+*not* set), will not be subject to this limit and they will all check
 independently and in parallel.
+
+Once a torrent completes the checking of its files, or fastresume data, it will
+be put in the queue for downloading and potentially start downloading immediately.
+In order to add a torrent and check its files without starting the download, it
+can be added in ``stop_when_ready`` mode.
+See add_torrent_params::flag_stop_when_ready. This flag will stop the torrent
+once it is ready to start downloading.
+
+This is conceptually the same as waiting for the ``torrent_checked_alert`` and
+then call::
+
+	h.auto_managed(false);
+	h.pause();
+
+With the important distinction that it entirely avoids the brief window where
+the torrent is in downloading state.
 
 downloading queue
 -----------------
@@ -286,7 +315,7 @@ It limits the number of started seeds to settings_pack::active_seeds.
 
 On top of this basic bias, *seed priority* can be controller by specifying a
 seed ratio (the upload to download ratio), a seed-time ratio (the download
-time to seeding time ratio) and a seed-time (the abosulte time to be seeding a
+time to seeding time ratio) and a seed-time (the absolute time to be seeding a
 torrent). Until all those targets are hit, the torrent will be prioritized for
 seeding.
 
@@ -321,7 +350,7 @@ anything. If peers are allowed, torrents may:
 2. announce to the DHT
 3. announce to local peer discovery (local service discovery)
 
-Each of those actions are associated with a cost and hence may need a seprarate
+Each of those actions are associated with a cost and hence may need a separate
 limit. These limits are controlled by settings_pack::active_tracker_limit,
 settings_pack::active_dht_limit and settings_pack::active_lsd_limit
 respectively.
@@ -535,7 +564,7 @@ It will of course still check for existing pieces and fast resume data. The main
 drawbacks of this mode are:
 
  * It may take longer to start the torrent, since it will need to fill the files
-   with zeroes. This delay is linear to the size of the download.
+   with zeros. This delay is linear to the size of the download.
 
  * The download may occupy unnecessary disk space between download sessions.
 
@@ -736,13 +765,21 @@ rate limits.
 When the rate limits are adjusted for a specific torrent, a class is created
 implicitly for that torrent.
 
-The default peer class IDs are defined as enums in the ``session`` class::
+The default peer class IDs are defined as enums in the ``session`` class:
+
+.. code:: c++
 
 	enum {
 		global_peer_class_id,
 		tcp_peer_class_id,
 		local_peer_class_id
 	};
+
+The default peer classes are automatically created on session startup, and
+configured to apply to each respective type of connection. There's nothing
+preventing a client from reconfiguring the peer class ip- and type filters
+to disable or customize which peers they apply to. See set_peer_class_filter()
+and set_peer_class_type_filter().
 
 A peer class can be considered a more general form of *lables* that some
 clients have. Peer classes however are not just applied to torrents, but
@@ -753,9 +790,9 @@ object), and deleted with the delete_peer_class() call.
 
 Peer classes are configured with the set_peer_class() get_peer_class() calls.
 
-Custom peer classes can be assigned to torrents, with the ??? call, in which
-case all its peers will belong to the class. They can also be assigned based on
-the peer's IP address. See set_peer_class_filter() for more information.
+Custom peer classes can be assigned based on the peer's IP address or the type
+of transport protocol used. See set_peer_class_filter() and
+set_peer_class_type_filter() for more information.
 
 peer class examples
 -------------------

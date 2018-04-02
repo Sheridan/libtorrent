@@ -37,6 +37,11 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <list>
 #include <vector>
 #include <unordered_set>
+#include <array>
+
+#include "libtorrent/aux_/disable_warnings_push.hpp"
+#include <boost/intrusive/list.hpp>
+#include "libtorrent/aux_/disable_warnings_pop.hpp"
 
 #include "libtorrent/time.hpp"
 #include "libtorrent/error_code.hpp"
@@ -72,15 +77,15 @@ namespace aux {
 
 	struct piece_log_t
 	{
-		explicit piece_log_t(int j, int b= -1): job(j), block(b) {}
-		int job;
+		explicit piece_log_t(job_action_t j, int b = -1): job(j), block(b) {}
+		job_action_t job;
 		int block;
 
 		// these are "jobs" thar cause piece_refcount
 		// to be incremented
 		enum artificial_jobs
 		{
-			flushing = disk_io_job::num_job_ids, // 20
+			flushing = static_cast<int>(job_action_t::num_job_ids), // 20
 			flush_expired,
 			try_flush_write_blocks,
 			try_flush_write_blocks2,
@@ -90,11 +95,12 @@ namespace aux {
 
 			last_job
 		};
+		explicit piece_log_t(artificial_jobs j, int b = -1): job(static_cast<job_action_t>(j)), block(b) {}
 
-		static char const* const job_names[7];
+		static std::array<char const*, 7> const job_names;
 	};
 
-	char const* job_name(int j);
+	char const* job_name(job_action_t j);
 
 #endif // TORRENT_DISABLE_LOGGING
 
@@ -103,30 +109,30 @@ namespace aux {
 	void assert_print_piece(cached_piece_entry const* pe);
 #endif
 
-	extern const char* const job_action_name[];
+	extern std::array<const char*, 15> const job_action_name;
 
 	struct TORRENT_EXTRA_EXPORT partial_hash
 	{
 		partial_hash(): offset(0) {}
 		// the number of bytes in the piece that has been hashed
 		int offset;
-		// the sha-1 context
+		// the SHA-1 context
 		hasher h;
 	};
 
 	struct cached_block_entry
 	{
 		cached_block_entry()
-			: buf(0)
-			, refcount(0)
-			, dirty(false)
-			, pending(false)
+			: refcount(0)
+			, dirty(0)
+			, pending(0)
+			, cache_hit(0)
 		{
 		}
 
-		char* buf;
+		char* buf = nullptr;
 
-		enum { max_refcount = (1 << 30) - 1 };
+		static constexpr int max_refcount = (1 << 29) - 1;
 
 		// the number of references to this buffer. These references
 		// might be in outstanding asynchronous requests or in peer
@@ -134,7 +140,7 @@ namespace aux {
 		// all references are gone and refcount reaches 0. The buf
 		// pointer in this struct doesn't count as a reference and
 		// is always the last to be cleared
-		std::uint32_t refcount:30;
+		std::uint32_t refcount:29;
 
 		// if this is true, this block needs to be written to
 		// disk before it's freed. Typically all blocks in a piece
@@ -150,6 +156,11 @@ namespace aux {
 		// write job to write this block.
 		std::uint32_t pending:1;
 
+		// this is set to 1 if this block has been read at least once. If the same
+		// block is read twice, the whole piece is considered *frequently* used,
+		// not just recently used.
+		std::uint32_t cache_hit:1;
+
 #if TORRENT_USE_ASSERTS
 		// this many of the references are held by hashing operations
 		int hashing_count = 0;
@@ -162,7 +173,10 @@ namespace aux {
 
 	// list_node is here to be able to link this cache entry
 	// into one of the LRU lists
-	struct TORRENT_EXTRA_EXPORT cached_piece_entry : list_node<cached_piece_entry>
+	struct TORRENT_EXTRA_EXPORT cached_piece_entry
+		: list_node<cached_piece_entry>
+		, boost::intrusive::list_base_hook<boost::intrusive::link_mode<
+			boost::intrusive::auto_unlink>>
 	{
 		cached_piece_entry();
 		~cached_piece_entry();
@@ -173,9 +187,8 @@ namespace aux {
 		{
 			return refcount == 0
 				&& piece_refcount == 0
-				&& num_blocks == 0
 				&& !hashing
-				&& read_jobs.size() == 0
+				&& read_jobs.empty()
 				&& outstanding_read == 0
 				&& (ignore_hash || !hash || hash->offset == 0);
 		}
@@ -194,16 +207,12 @@ namespace aux {
 		void* get_storage() const { return storage.get(); }
 
 		bool operator==(cached_piece_entry const& rhs) const
-		{ return storage.get() == rhs.storage.get() && piece == rhs.piece; }
+		{ return piece == rhs.piece && storage.get() == rhs.storage.get(); }
 
 		// if this is set, we'll be calculating the hash
 		// for this piece. This member stores the interim
 		// state while we're calculating the hash.
 		std::unique_ptr<partial_hash> hash;
-
-		// set to a unique identifier of a peer that last
-		// requested from this piece.
-		void* last_requester = nullptr;
 
 		// the pointers to the block data. If this is a ghost
 		// cache entry, there won't be any data here
@@ -215,7 +224,7 @@ namespace aux {
 		//TODO: make this 32 bits and to count seconds since the block cache was created
 		time_point expire = min_time();
 
-		piece_index_t piece;
+		piece_index_t piece{0};
 
 		// the number of dirty blocks in this piece
 		std::uint64_t num_dirty:14;
@@ -239,7 +248,8 @@ namespace aux {
 		std::uint16_t hashing_done:1;
 
 		// if this is true, whenever refcount hits 0,
-		// this piece should be deleted
+		// this piece should be deleted from the cache
+		// (not just demoted)
 		std::uint16_t marked_for_deletion:1;
 
 		// this is set to true once we flush blocks past
@@ -305,8 +315,13 @@ namespace aux {
 		// read job queue (read_jobs).
 		std::uint16_t outstanding_read:1;
 
+		// this is set when the piece should be evicted as soon as there
+		// no longer are any references to it. Evicted here means demoted
+		// to a ghost list
+		std::uint32_t marked_for_eviction:1;
+
 		// the number of blocks that have >= 1 refcount
-		std::uint16_t pinned = 0;
+		std::uint32_t pinned:15;
 
 		// ---- 32 bit boundary ---
 
@@ -328,8 +343,7 @@ namespace aux {
 
 	struct TORRENT_EXTRA_EXPORT block_cache : disk_buffer_pool
 	{
-		block_cache(int block_size, io_service& ios
-			, std::function<void()> const& trigger_trim);
+		block_cache(io_service& ios, std::function<void()> const& trigger_trim);
 
 	private:
 
@@ -360,15 +374,22 @@ namespace aux {
 
 		int num_write_lru_pieces() const { return m_lru[cached_piece_entry::write_lru].size(); }
 
+		enum eviction_mode
+		{
+			allow_ghost,
+			disallow_ghost
+		};
+
 		// mark this piece for deletion. If there are no outstanding
 		// requests to this piece, it's removed immediately, and the
 		// passed in iterator will be invalidated
-		void mark_for_deletion(cached_piece_entry* p);
+		void mark_for_eviction(cached_piece_entry* p, eviction_mode mode);
 
-		// similar to mark_for_deletion, except for actually marking the
+		// similar to mark_for_eviction, except for actually marking the
 		// piece for deletion. If the piece was actually deleted,
 		// the function returns true
-		bool evict_piece(cached_piece_entry* p, tailqueue<disk_io_job>& jobs);
+		bool evict_piece(cached_piece_entry* p, tailqueue<disk_io_job>& jobs
+			, eviction_mode mode);
 
 		// if this piece is in L1 or L2 proper, move it to
 		// its respective ghost list
@@ -382,7 +403,7 @@ namespace aux {
 		// called when we're reading and we found the piece we're
 		// reading from in the hash table (not necessarily that we
 		// hit the block we needed)
-		void cache_hit(cached_piece_entry* p, void* requester, bool volatile_read);
+		void cache_hit(cached_piece_entry* p, int block, bool volatile_read);
 
 		// free block from piece entry
 		void free_block(cached_piece_entry* pe, int block);
@@ -469,7 +490,6 @@ namespace aux {
 		int copy_from_piece(cached_piece_entry* p, disk_io_job* j
 			, buffer_allocator_interface& allocator, bool expect_no_fail = false);
 
-		void free_piece(cached_piece_entry* p);
 		int drain_piece_bufs(cached_piece_entry& p, std::vector<char*>& buf);
 
 		// block container

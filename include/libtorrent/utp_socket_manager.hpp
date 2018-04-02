@@ -36,7 +36,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <map>
 #include <functional>
 
-#include "libtorrent/socket_type.hpp"
+#include "libtorrent/aux_/socket_type.hpp"
 #include "libtorrent/session_status.hpp"
 #include "libtorrent/enum_net.hpp"
 #include "libtorrent/aux_/session_settings.hpp"
@@ -49,25 +49,33 @@ namespace libtorrent {
 	struct utp_socket_impl;
 	struct counters;
 
-	struct utp_socket_manager final
+	// interface/handle to the underlying udp socket
+	struct TORRENT_EXTRA_EXPORT utp_socket_interface
 	{
-		typedef std::function<void(udp::endpoint const&
-			, span<char const>
-			, error_code&, int)> send_fun_t;
+		virtual udp::endpoint local_endpoint() = 0;
+	protected:
+		virtual ~utp_socket_interface() = default;
+	};
 
-		typedef std::function<void(std::shared_ptr<socket_type> const&)>
-			incoming_utp_callback_t;
+	struct utp_socket_manager
+	{
+		using send_fun_t = std::function<void(std::weak_ptr<utp_socket_interface>
+			, udp::endpoint const&
+			, span<char const>
+			, error_code&, udp_send_flags_t)>;
+
+		using incoming_utp_callback_t =  std::function<void(std::shared_ptr<aux::socket_type> const&)>;
 
 		utp_socket_manager(send_fun_t const& send_fun
 			, incoming_utp_callback_t const& cb
 			, io_service& ios
 			, aux::session_settings const& sett
-			, counters& cnt, void* ssl_context
-			);
+			, counters& cnt, void* ssl_context);
 		~utp_socket_manager();
 
 		// return false if this is not a uTP packet
-		bool incoming_packet(udp::endpoint const& ep, span<char const> p);
+		bool incoming_packet(std::weak_ptr<utp_socket_interface> socket
+			, udp::endpoint const& ep, span<char const> p);
 
 		// if the UDP socket failed with an EAGAIN or EWOULDBLOCK, this will be
 		// called once the socket is writeable again
@@ -75,16 +83,17 @@ namespace libtorrent {
 
 		// when the upper layer has drained the underlying UDP socket, this is
 		// called, and uTP sockets will send their ACKs. This ensures ACKs at
-		// least coalese packets returned during the same wakeup
+		// least coalesce packets returned during the same wakeup
 		void socket_drained();
 
 		void tick(time_point now);
 
-		// flags for send_packet
-		enum { dont_fragment = 1 };
-		void send_packet(udp::endpoint const& ep, char const* p, int len
-			, error_code& ec, int flags = 0);
+		void send_packet(std::weak_ptr<utp_socket_interface> sock, udp::endpoint const& ep
+			, char const* p, int len
+			, error_code& ec, udp_send_flags_t flags = {});
 		void subscribe_writable(utp_socket_impl* s);
+
+		void remove_udp_socket(std::weak_ptr<utp_socket_interface> sock);
 
 		// internal, used by utp_stream
 		void remove_socket(std::uint16_t id);
@@ -132,7 +141,7 @@ namespace libtorrent {
 		incoming_utp_callback_t m_cb;
 
 		// replace with a hash-map
-		typedef std::multimap<std::uint16_t, utp_socket_impl*> socket_map_t;
+		using socket_map_t = std::multimap<std::uint16_t, utp_socket_impl*>;
 		socket_map_t m_utp_sockets;
 
 		using socket_vector_t = std::vector<utp_socket_impl*>;
@@ -165,22 +174,6 @@ namespace libtorrent {
 		int m_new_connection = -1;
 
 		aux::session_settings const& m_sett;
-
-		// this is a copy of the routing table, used
-		// to initialize MTU sizes of uTP sockets
-		mutable std::vector<ip_route> m_routes;
-
-		// the timestamp for the last time we updated
-		// the routing table
-		mutable time_point m_last_route_update = min_time();
-
-		// cache of interfaces
-		mutable std::vector<ip_interface> m_interfaces;
-		mutable time_point m_last_if_update = min_time();
-
-		// the buffer size of the socket. This is used
-		// to now lower the buffer size
-		int m_sock_buf_size = 0;
 
 		// stats counters
 		counters& m_counters;

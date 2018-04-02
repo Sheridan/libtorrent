@@ -112,10 +112,10 @@ namespace libtorrent {
 #if TORRENT_CPP98_DEQUE
 			move_construct_holder_fun move_holder;
 #endif
-			aux::aligned_storage<24>::type holder;
-			char* buf; // the first byte of the buffer
-			int size; // the total size of the buffer
-			int used_size; // this is the number of bytes to send/receive
+			aux::aligned_storage<32>::type holder;
+			char* buf = nullptr; // the first byte of the buffer
+			int size = 0; // the total size of the buffer
+			int used_size = 0; // this is the number of bytes to send/receive
 		};
 
 	public:
@@ -127,23 +127,23 @@ namespace libtorrent {
 		void pop_front(int bytes_to_pop);
 
 		template <typename Holder>
-		void append_buffer(Holder buffer, int s, int used_size)
+		void append_buffer(Holder buffer, int used_size)
 		{
 			TORRENT_ASSERT(is_single_thread());
-			TORRENT_ASSERT(s >= used_size);
+			TORRENT_ASSERT(int(buffer.size()) >= used_size);
 			m_vec.emplace_back();
 			buffer_t& b = m_vec.back();
-			init_buffer_entry<Holder>(b, buffer, s, used_size);
+			init_buffer_entry<Holder>(b, std::move(buffer), used_size);
 		}
 
 		template <typename Holder>
-		void prepend_buffer(Holder buffer, int s, int used_size)
+		void prepend_buffer(Holder buffer, int used_size)
 		{
 			TORRENT_ASSERT(is_single_thread());
-			TORRENT_ASSERT(s >= used_size);
+			TORRENT_ASSERT(int(buffer.size()) >= used_size);
 			m_vec.emplace_front();
 			buffer_t& b = m_vec.front();
-			init_buffer_entry<Holder>(b, buffer, s, used_size);
+			init_buffer_entry<Holder>(b, std::move(buffer), used_size);
 		}
 
 		// returns the number of bytes available at the
@@ -153,7 +153,7 @@ namespace libtorrent {
 		// tries to copy the given buffer to the end of the
 		// last chained buffer. If there's not enough room
 		// it returns nullptr
-		char* append(char const* buf, int s);
+		char* append(span<char const> buf);
 
 		// tries to allocate memory from the end
 		// of the last buffer. If there isn't
@@ -171,12 +171,12 @@ namespace libtorrent {
 	private:
 
 		template <typename Holder>
-		void init_buffer_entry(buffer_t& b, Holder& buffer, int s, int used_size)
+		void init_buffer_entry(buffer_t& b, Holder buf, int used_size)
 		{
 			static_assert(sizeof(Holder) <= sizeof(b.holder), "buffer holder too large");
 
-			b.buf = buffer.get();
-			b.size = s;
+			b.buf = buf.data();
+			b.size = static_cast<int>(buf.size());
 			b.used_size = used_size;
 
 #ifdef _MSC_VER
@@ -196,10 +196,11 @@ namespace libtorrent {
 #pragma warning(pop)
 #endif
 
-			new (&b.holder) Holder(std::move(buffer));
+			new (&b.holder) Holder(std::move(buf));
 
 			m_bytes += used_size;
-			m_capacity += s;
+			TORRENT_ASSERT(m_capacity < (std::numeric_limits<int>::max)() - b.size);
+			m_capacity += b.size;
 			TORRENT_ASSERT(m_bytes <= m_capacity);
 		}
 

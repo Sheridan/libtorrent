@@ -41,6 +41,8 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/disk_interface.hpp"
 #include "libtorrent/aux_/vector.hpp"
 #include "libtorrent/units.hpp"
+#include "libtorrent/session_types.hpp"
+#include "libtorrent/flags.hpp"
 
 #include "libtorrent/aux_/disable_warnings_push.hpp"
 #include <boost/variant/variant.hpp>
@@ -57,6 +59,26 @@ namespace libtorrent {
 	struct cached_piece_entry;
 	class torrent_info;
 	struct add_torrent_params;
+
+	enum class job_action_t : std::uint8_t
+	{
+		read
+		, write
+		, hash
+		, move_storage
+		, release_files
+		, delete_files
+		, check_fastresume
+		, rename_file
+		, stop_torrent
+		, flush_piece
+		, flush_hashed
+		, flush_storage
+		, trim_cache
+		, file_priority
+		, clear_piece
+		, num_job_ids
+	};
 
 	// disk_io_jobs are allocated in a pool allocator in disk_io_thread
 	// they are always allocated from the network thread, posted
@@ -78,51 +100,24 @@ namespace libtorrent {
 
 		void call_callback();
 
-		enum action_t : std::uint8_t
-		{
-			read
-			, write
-			, hash
-			, move_storage
-			, release_files
-			, delete_files
-			, check_fastresume
-			, rename_file
-			, stop_torrent
-			, flush_piece
-			, flush_hashed
-			, flush_storage
-			, trim_cache
-			, file_priority
-			, clear_piece
-			, resolve_links
-			, num_job_ids
-		};
+		// this is set by the storage object when a fence is raised
+		// for this job. It means that this no other jobs on the same
+		// storage will execute in parallel with this one. It's used
+		// to lower the fence when the job has completed
+		static constexpr disk_job_flags_t fence = 1_bit;
 
-		enum flags_t
-		{
-			// force making a copy of the cached block, rather
-			// than getting a reference to the block already in
-			// the cache.
-			force_copy = 0x4,
+		// this job is currently being performed, or it's hanging
+		// on a cache piece that may be flushed soon
+		static constexpr disk_job_flags_t in_progress = 2_bit;
 
-			// this is set by the storage object when a fence is raised
-			// for this job. It means that this no other jobs on the same
-			// storage will execute in parallel with this one. It's used
-			// to lower the fence when the job has completed
-			fence = 0x8,
-
-			// this job is currently being performed, or it's hanging
-			// on a cache piece that may be flushed soon
-			in_progress = 0x20
-		};
+		// this is set for jobs that we're no longer interested in. Any aborted
+		// job that's executed should immediately fail with operation_aborted
+		// instead of executing
+		static constexpr disk_job_flags_t aborted = 6_bit;
 
 		// for write jobs, returns true if its block
 		// is not dirty anymore
-		bool completed(cached_piece_entry const* pe, int block_size);
-
-		// unique identifier for the peer when reading
-		void* requester = nullptr;
+		bool completed(cached_piece_entry const* pe);
 
 		// for read and write, this is the disk_buffer_holder
 		// for other jobs, it may point to other job-specific types
@@ -130,21 +125,22 @@ namespace libtorrent {
 		boost::variant<disk_buffer_holder
 			, std::string
 			, add_torrent_params const*
-			, aux::vector<std::uint8_t, file_index_t>
-			, int> argument;
+			, aux::vector<download_priority_t, file_index_t>
+			, remove_flags_t
+			> argument;
 
 		// the disk storage this job applies to (if applicable)
 		std::shared_ptr<storage_interface> storage;
 
 		// this is called when operation completes
 
-		using read_handler = std::function<void(disk_buffer_holder block, std::uint32_t flags, storage_error const& se)>;
+		using read_handler = std::function<void(disk_buffer_holder block, disk_job_flags_t flags, storage_error const& se)>;
 		using write_handler = std::function<void(storage_error const&)>;
 		using hash_handler = std::function<void(piece_index_t, sha1_hash const&, storage_error const&)>;
-		using move_handler = std::function<void(status_t, std::string const&, storage_error const&)>;
+		using move_handler = std::function<void(status_t, std::string, storage_error const&)>;
 		using release_handler = std::function<void()>;
 		using check_handler = std::function<void(status_t, storage_error const&)>;
-		using rename_handler = std::function<void(std::string const&, file_index_t, storage_error const&)>;
+		using rename_handler = std::function<void(std::string, file_index_t, storage_error const&)>;
 		using clear_piece_handler = std::function<void(piece_index_t)>;
 
 		boost::variant<read_handler
@@ -165,7 +161,7 @@ namespace libtorrent {
 		{
 			un() {}
 			// result for hash jobs
-			char piece_hash[20];
+			sha1_hash piece_hash;
 
 			// this is used for check_fastresume to pass in a vector of hard-links
 			// to create. Each element corresponds to a file in the file_storage.
@@ -196,13 +192,15 @@ namespace libtorrent {
 		};
 
 		// the type of job this is
-		action_t action;
+		job_action_t action = job_action_t::read;
 
 		// return value of operation
 		status_t ret = status_t::no_error;
 
 		// flags controlling this job
-		std::uint8_t flags = 0;
+		disk_job_flags_t flags{};
+
+		move_flags_t move_flags = move_flags_t::always_replace_files;
 
 #if TORRENT_USE_ASSERTS
 		bool in_use = false;

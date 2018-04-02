@@ -36,7 +36,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/gzip.hpp"
 #include "libtorrent/parse_url.hpp"
 #include "libtorrent/socket.hpp"
-#include "libtorrent/socket_type.hpp" // for async_shutdown
+#include "libtorrent/aux_/socket_type.hpp" // for async_shutdown
 #include "libtorrent/resolver_interface.hpp"
 #include "libtorrent/settings_pack.hpp"
 #include "libtorrent/aux_/time.hpp"
@@ -47,6 +47,13 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <functional>
 #include <string>
 #include <algorithm>
+#include <sstream>
+
+#ifdef TORRENT_USE_OPENSSL
+#include "libtorrent/aux_/disable_warnings_push.hpp"
+#include <boost/asio/ssl/context.hpp>
+#include "libtorrent/aux_/disable_warnings_pop.hpp"
+#endif
 
 using namespace std::placeholders;
 
@@ -88,7 +95,7 @@ http_connection::http_connection(io_service& ios
 	, m_rate_limit(0)
 	, m_download_quota(0)
 	, m_priority(0)
-	, m_resolve_flags(0)
+	, m_resolve_flags{}
 	, m_port(0)
 	, m_bottled(bottled)
 	, m_called(false)
@@ -109,7 +116,7 @@ http_connection::~http_connection()
 
 void http_connection::get(std::string const& url, time_duration timeout, int prio
 	, aux::proxy_settings const* ps, int handle_redirects, std::string const& user_agent
-	, address const& bind_addr, int resolve_flags, std::string const& auth_
+	, boost::optional<address> const& bind_addr, resolver_flags const resolve_flags, std::string const& auth_
 #if TORRENT_USE_I2P
 	, i2p_connection* i2p_conn
 #endif
@@ -142,7 +149,7 @@ void http_connection::get(std::string const& url, time_duration timeout, int pri
 	if (ec)
 	{
 		m_timer.get_io_service().post(std::bind(&http_connection::callback
-			, me, ec, static_cast<char*>(nullptr), 0));
+			, me, ec, span<char>{}));
 		return;
 	}
 
@@ -154,7 +161,7 @@ void http_connection::get(std::string const& url, time_duration timeout, int pri
 	{
 		error_code err(errors::unsupported_url_protocol);
 		m_timer.get_io_service().post(std::bind(&http_connection::callback
-			, me, err, static_cast<char*>(nullptr), 0));
+			, me, err, span<char>{}));
 		return;
 	}
 
@@ -163,13 +170,7 @@ void http_connection::get(std::string const& url, time_duration timeout, int pri
 	bool ssl = false;
 	if (protocol == "https") ssl = true;
 
-	char request[4096];
-	char* end = request + sizeof(request);
-	char* ptr = request;
-
-#define APPEND_FMT(fmt) ptr += std::snprintf(ptr, std::size_t(end - ptr), fmt)
-#define APPEND_FMT1(fmt, arg) ptr += std::snprintf(ptr, std::size_t(end - ptr), fmt, arg)
-#define APPEND_FMT2(fmt, arg1, arg2) ptr += std::snprintf(ptr, std::size_t(end - ptr), fmt, arg1, arg2)
+	std::stringstream request;
 
 	// exclude ssl here, because SSL assumes CONNECT support in the
 	// proxy and is handled at the lower layer
@@ -179,40 +180,39 @@ void http_connection::get(std::string const& url, time_duration timeout, int pri
 	{
 		// if we're using an http proxy and not an ssl
 		// connection, just do a regular http proxy request
-		APPEND_FMT1("GET %s HTTP/1.1\r\n", url.c_str());
+		request << "GET " << url << " HTTP/1.1\r\n";
 		if (ps->type == settings_pack::http_pw)
-			APPEND_FMT1("Proxy-Authorization: Basic %s\r\n", base64encode(
-				ps->username + ":" + ps->password).c_str());
+			request << "Proxy-Authorization: Basic " << base64encode(
+				ps->username + ":" + ps->password) << "\r\n";
 
 		hostname = ps->hostname;
 		port = ps->port;
 
-		APPEND_FMT1("Host: %s", hostname.c_str());
-		if (port != default_port) APPEND_FMT1(":%d\r\n", port);
-		else APPEND_FMT("\r\n");
+		request << "Host: " << hostname;
+		if (port != default_port) request << ":" << port << "\r\n";
+		else request << "\r\n";
 	}
 	else
 	{
-		APPEND_FMT2("GET %s HTTP/1.1\r\n"
-			"Host: %s", path.c_str(), hostname.c_str());
-		if (port != default_port) APPEND_FMT1(":%d\r\n", port);
-		else APPEND_FMT("\r\n");
+		request << "GET " << path << " HTTP/1.1\r\nHost: " << hostname;
+		if (port != default_port) request << ":" << port << "\r\n";
+		else request << "\r\n";
 	}
 
-//	APPEND_FMT("Accept: */*\r\n");
+//	request << "Accept: */*\r\n";
 
 	if (!m_user_agent.empty())
-		APPEND_FMT1("User-Agent: %s\r\n", m_user_agent.c_str());
+		request << "User-Agent: " << m_user_agent << "\r\n";
 
 	if (m_bottled)
-		APPEND_FMT("Accept-Encoding: gzip\r\n");
+		request << "Accept-Encoding: gzip\r\n";
 
 	if (!auth.empty())
-		APPEND_FMT1("Authorization: Basic %s\r\n", base64encode(auth).c_str());
+		request << "Authorization: Basic " << base64encode(auth) << "\r\n";
 
-	APPEND_FMT("Connection: close\r\n\r\n");
+	request << "Connection: close\r\n\r\n";
 
-	m_sendbuffer.assign(request);
+	m_sendbuffer.assign(request.str());
 	m_url = url;
 	start(hostname, port, timeout, prio
 		, ps, ssl, handle_redirects, bind_addr, m_resolve_flags
@@ -225,8 +225,8 @@ void http_connection::get(std::string const& url, time_duration timeout, int pri
 void http_connection::start(std::string const& hostname, int port
 	, time_duration timeout, int prio, aux::proxy_settings const* ps, bool ssl
 	, int handle_redirects
-	, address const& bind_addr
-	, int resolve_flags
+	, boost::optional<address> const& bind_addr
+	, resolver_flags const resolve_flags
 #if TORRENT_USE_I2P
 	, i2p_connection* i2p_conn
 #endif
@@ -260,7 +260,7 @@ void http_connection::start(std::string const& hostname, int port
 	if (ec)
 	{
 		m_timer.get_io_service().post(std::bind(&http_connection::callback
-			, me, ec, nullptr, 0));
+			, me, ec, span<char>{}));
 		return;
 	}
 
@@ -278,9 +278,12 @@ void http_connection::start(std::string const& hostname, int port
 		error_code err;
 		if (m_sock.is_open()) m_sock.close(err);
 
+		aux::proxy_settings const* proxy = ps;
+
 #if TORRENT_USE_I2P
 		bool is_i2p = false;
 		char const* top_domain = strrchr(hostname.c_str(), '.');
+		aux::proxy_settings i2p_proxy;
 		if (top_domain && top_domain == ".i2p"_sv && i2p_conn)
 		{
 			// this is an i2p name, we need to use the sam connection
@@ -291,23 +294,16 @@ void http_connection::start(std::string const& hostname, int port
 			// because i2p is sloooooow
 			m_completion_timeout *= 4;
 			m_read_timeout *= 4;
-		}
-#endif
 
 #if TORRENT_USE_I2P
-		if (is_i2p && i2p_conn->proxy().type != settings_pack::i2p_proxy)
-		{
-			m_timer.get_io_service().post(std::bind(&http_connection::callback
-				, me, error_code(errors::no_i2p_router), static_cast<char*>(nullptr), 0));
-			return;
-		}
+			if (is_i2p && i2p_conn->proxy().type != settings_pack::i2p_proxy)
+			{
+				m_timer.get_io_service().post(std::bind(&http_connection::callback
+					, me, error_code(errors::no_i2p_router), span<char>{}));
+				return;
+			}
 #endif
 
-		aux::proxy_settings const* proxy = ps;
-#if TORRENT_USE_I2P
-		aux::proxy_settings i2p_proxy;
-		if (is_i2p)
-		{
 			i2p_proxy = i2p_conn->proxy();
 			proxy = &i2p_proxy;
 		}
@@ -330,8 +326,7 @@ void http_connection::start(std::string const& hostname, int port
 		{
 			if (m_ssl_ctx == nullptr)
 			{
-				m_ssl_ctx = new (std::nothrow) ssl::context(
-					m_timer.get_io_service(), ssl::context::sslv23_client);
+				m_ssl_ctx = new (std::nothrow) ssl::context(ssl::context::sslv23_client);
 				if (m_ssl_ctx)
 				{
 					m_own_ssl_context = true;
@@ -339,7 +334,7 @@ void http_connection::start(std::string const& hostname, int port
 					if (ec)
 					{
 						m_timer.get_io_service().post(std::bind(&http_connection::callback
-								, me, ec, nullptr, 0));
+								, me, ec, span<char>{}));
 						return;
 					}
 				}
@@ -353,14 +348,14 @@ void http_connection::start(std::string const& hostname, int port
 		instantiate_connection(m_timer.get_io_service()
 			, proxy ? *proxy : null_proxy, m_sock, userdata, nullptr, false, false);
 
-		if (m_bind_addr != address_v4::any())
+		if (m_bind_addr)
 		{
-			m_sock.open(m_bind_addr.is_v4() ? tcp::v4() : tcp::v6(), ec);
-			m_sock.bind(tcp::endpoint(m_bind_addr, 0), ec);
+			m_sock.open(m_bind_addr->is_v4() ? tcp::v4() : tcp::v6(), ec);
+			m_sock.bind(tcp::endpoint(*m_bind_addr, 0), ec);
 			if (ec)
 			{
 				m_timer.get_io_service().post(std::bind(&http_connection::callback
-					, me, ec, nullptr, 0));
+					, me, ec, span<char>{}));
 				return;
 			}
 		}
@@ -369,7 +364,7 @@ void http_connection::start(std::string const& hostname, int port
 		if (ec)
 		{
 			m_timer.get_io_service().post(std::bind(&http_connection::callback
-				, me, ec, nullptr, 0));
+				, me, ec, span<char>{}));
 			return;
 		}
 
@@ -396,7 +391,7 @@ void http_connection::start(std::string const& hostname, int port
 		{
 			m_hostname = hostname;
 			m_port = std::uint16_t(port);
-			m_endpoints.push_back({address(), m_port});
+			m_endpoints.emplace_back(address(), m_port);
 			connect();
 		}
 		else
@@ -435,12 +430,14 @@ void http_connection::on_timeout(std::weak_ptr<http_connection> p
 			error_code ec;
 			c->m_sock.close(ec);
 			if (!c->m_connecting) c->connect();
+			c->m_last_receive = now;
+			c->m_start_time = c->m_last_receive;
 		}
 		else
 		{
 			c->callback(boost::asio::error::timed_out);
+			return;
 		}
-		return;
 	}
 	else
 	{
@@ -477,25 +474,21 @@ void http_connection::close(bool force)
 #if TORRENT_USE_I2P
 void http_connection::connect_i2p_tracker(char const* destination)
 {
+	TORRENT_ASSERT(m_sock.get<i2p_stream>());
 #ifdef TORRENT_USE_OPENSSL
 	TORRENT_ASSERT(m_ssl == false);
-	TORRENT_ASSERT(m_sock.get<socket_type>());
-	TORRENT_ASSERT(m_sock.get<socket_type>()->get<i2p_stream>());
-	m_sock.get<socket_type>()->get<i2p_stream>()->set_destination(destination);
-	m_sock.get<socket_type>()->get<i2p_stream>()->set_command(i2p_stream::cmd_connect);
-	m_sock.get<socket_type>()->get<i2p_stream>()->set_session_id(m_i2p_conn->session_id());
-#else
+#endif
 	m_sock.get<i2p_stream>()->set_destination(destination);
 	m_sock.get<i2p_stream>()->set_command(i2p_stream::cmd_connect);
 	m_sock.get<i2p_stream>()->set_session_id(m_i2p_conn->session_id());
-#endif
 	ADD_OUTSTANDING_ASYNC("http_connection::on_connect");
+	TORRENT_ASSERT(!m_connecting);
+	m_connecting = true;
 	m_sock.async_connect(tcp::endpoint(), std::bind(&http_connection::on_connect
 		, shared_from_this(), _1));
 }
 
-void http_connection::on_i2p_resolve(error_code const& e
-	, char const* destination)
+void http_connection::on_i2p_resolve(error_code const& e, char const* destination)
 {
 	COMPLETE_ASYNC("http_connection::on_i2p_resolve");
 	if (e)
@@ -519,7 +512,7 @@ void http_connection::on_resolve(error_code const& e
 	TORRENT_ASSERT(!addresses.empty());
 
 	for (auto const& addr : addresses)
-		m_endpoints.push_back({addr, m_port});
+		m_endpoints.emplace_back(addr, m_port);
 
 	if (m_filter_handler) m_filter_handler(*this, m_endpoints);
 	if (m_endpoints.empty())
@@ -530,13 +523,33 @@ void http_connection::on_resolve(error_code const& e
 
 	aux::random_shuffle(m_endpoints.begin(), m_endpoints.end());
 
-	// sort the endpoints so that the ones with the same IP version as our
-	// bound listen socket are first. So that when contacting a tracker,
-	// we'll talk to it from the same IP that we're listening on
-	if (m_bind_addr != address_v4::any())
-		std::partition(m_endpoints.begin(), m_endpoints.end()
+	// if we have been told to bind to a particular address
+	// only connect to addresses of the same family
+	if (m_bind_addr)
+	{
+		auto new_end = std::partition(m_endpoints.begin(), m_endpoints.end()
 			, [this] (tcp::endpoint const& ep)
-			{ return ep.address().is_v4() == m_bind_addr.is_v4(); });
+		{
+			if (is_v4(ep) != m_bind_addr->is_v4())
+				return false;
+			if (is_v4(ep) && m_bind_addr->is_v4())
+				return true;
+			TORRENT_ASSERT(is_v6(ep) && m_bind_addr->is_v6());
+			// don't try to connect to a global address with a local source address
+			// this is mainly needed to prevent attempting to connect to a global
+			// address using a ULA as the source
+			if (!is_local(ep.address()) && is_local(*m_bind_addr))
+				return false;
+			return ep.address().to_v6().scope_id() == m_bind_addr->to_v6().scope_id();
+		});
+		m_endpoints.erase(new_end, m_endpoints.end());
+		if (m_endpoints.empty())
+		{
+			callback(error_code(boost::system::errc::address_family_not_supported, generic_category()));
+			close();
+			return;
+		}
+	}
 
 	connect();
 }
@@ -555,7 +568,7 @@ void http_connection::connect()
 		// is, ec will be represent "success". If so, don't set it as the socks5
 		// hostname, just connect to the IP
 		error_code ec;
-		address adr = address::from_string(m_hostname, ec);
+		address adr = make_address(m_hostname, ec);
 
 		if (ec)
 		{
@@ -621,29 +634,27 @@ void http_connection::on_connect(error_code const& e)
 	}
 }
 
-// TODO: 3 use span<char> instead of data, size
-void http_connection::callback(error_code e, char* data, int size)
+void http_connection::callback(error_code e, span<char> data)
 {
 	if (m_bottled && m_called) return;
 
 	std::vector<char> buf;
-	if (data && m_bottled && m_parser.header_finished())
+	if (!data.empty() && m_bottled && m_parser.header_finished())
 	{
-		size = m_parser.collapse_chunk_headers(data, size);
+		data = m_parser.collapse_chunk_headers(data);
 
 		std::string const& encoding = m_parser.header("content-encoding");
-		if ((encoding == "gzip" || encoding == "x-gzip") && size > 0 && data)
+		if (encoding == "gzip" || encoding == "x-gzip")
 		{
 			error_code ec;
-			inflate_gzip(data, size, buf, m_max_bottled_buffer_size, ec);
+			inflate_gzip(data, buf, m_max_bottled_buffer_size, ec);
 
 			if (ec)
 			{
-				if (m_handler) m_handler(ec, m_parser, data, size, *this);
+				if (m_handler) m_handler(ec, m_parser, data, *this);
 				return;
 			}
-			size = int(buf.size());
-			data = size == 0 ? nullptr : &buf[0];
+			data = buf;
 		}
 
 		// if we completed the whole response, no need
@@ -654,7 +665,7 @@ void http_connection::callback(error_code e, char* data, int size)
 	m_called = true;
 	error_code ec;
 	m_timer.cancel(ec);
-	if (m_handler) m_handler(e, m_parser, data, size, *this);
+	if (m_handler) m_handler(e, m_parser, data, *this);
 }
 
 void http_connection::on_write(error_code const& e)
@@ -726,7 +737,7 @@ void http_connection::on_read(error_code const& e
 			body = span<char>(m_recvbuffer.data() + m_parser.body_start()
 				, m_parser.get_body().size());
 		}
-		callback(ec, body.data(), int(body.size()));
+		callback(ec, body);
 		return;
 	}
 
@@ -749,7 +760,7 @@ void http_connection::on_read(error_code const& e
 		{
 			// HTTP parse error
 			error_code ec = errors::http_parse_error;
-			callback(ec, nullptr, 0);
+			callback(ec);
 			return;
 		}
 
@@ -792,8 +803,11 @@ void http_connection::on_read(error_code const& e
 		if (!m_bottled && m_parser.header_finished())
 		{
 			if (m_read_pos > m_parser.body_start())
-				callback(e, m_recvbuffer.data() + m_parser.body_start()
-					, m_read_pos - m_parser.body_start());
+			{
+				callback(e, span<char>(m_recvbuffer)
+					.first(static_cast<std::size_t>(m_read_pos))
+					.subspan(static_cast<std::size_t>(m_parser.body_start())));
+			}
 			m_read_pos = 0;
 			m_last_receive = clock_type::now();
 		}
@@ -801,15 +815,15 @@ void http_connection::on_read(error_code const& e
 		{
 			error_code ec;
 			m_timer.cancel(ec);
-			span<char> body(m_recvbuffer.data() + m_parser.body_start()
-				, m_parser.get_body().size());
-			callback(e, body.data(), int(body.size()));
+			callback(e, span<char>(m_recvbuffer)
+				.first(static_cast<std::size_t>(m_read_pos))
+				.subspan(static_cast<std::size_t>(m_parser.body_start())));
 		}
 	}
 	else
 	{
 		TORRENT_ASSERT(!m_bottled);
-		callback(e, m_recvbuffer.data(), m_read_pos);
+		callback(e, span<char>(m_recvbuffer).first(static_cast<std::size_t>(m_read_pos)));
 		m_read_pos = 0;
 		m_last_receive = clock_type::now();
 	}
@@ -858,6 +872,8 @@ void http_connection::on_assign_bandwidth(error_code const& e)
 	}
 	m_limiter_timer_active = false;
 	if (e) return;
+
+	if (m_abort) return;
 
 	if (m_download_quota > 0) return;
 

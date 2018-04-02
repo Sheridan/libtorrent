@@ -46,6 +46,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/session_status.hpp"
 #include "libtorrent/kademlia/node_id.hpp"
 #include "libtorrent/kademlia/dht_observer.hpp"
+#include "libtorrent/kademlia/dht_settings.hpp"
 #include "libtorrent/aux_/time.hpp"
 #include "libtorrent/alert_types.hpp" // for dht_routing_bucket
 #include "libtorrent/socket_io.hpp" // for print_endpoint
@@ -62,7 +63,7 @@ namespace {
 	template <typename T, typename K>
 	void erase_one(T& container, K const& key)
 	{
-		typename T::iterator i = container.find(key);
+		auto const i = container.find(key);
 		TORRENT_ASSERT(i != container.end());
 		container.erase(i);
 	}
@@ -243,27 +244,23 @@ node_entry const* routing_table::next_refresh()
 	node_entry* candidate = nullptr;
 
 	// this will have a bias towards pinging nodes close to us first.
-	// TODO: why idx is never used here?
-	int idx = int(m_buckets.size()) - 1;
-	for (table_t::reverse_iterator i = m_buckets.rbegin()
-		, end(m_buckets.rend()); i != end; ++i, --idx)
+	for (auto i = m_buckets.rbegin(), end(m_buckets.rend()); i != end; ++i)
 	{
-		for (bucket_t::iterator j = i->live_nodes.begin()
-			, end2(i->live_nodes.end()); j != end2; ++j)
+		for (auto& n : i->live_nodes)
 		{
 			// this shouldn't happen
-			TORRENT_ASSERT(m_id != j->id);
-			if (j->id == m_id) continue;
+			TORRENT_ASSERT(m_id != n.id);
+			if (n.id == m_id) continue;
 
-			if (j->last_queried == min_time())
+			if (n.last_queried == min_time())
 			{
-				candidate = &*j;
+				candidate = &n;
 				goto out;
 			}
 
-			if (candidate == nullptr || j->last_queried < candidate->last_queried)
+			if (candidate == nullptr || n.last_queried < candidate->last_queried)
 			{
-				candidate = &*j;
+				candidate = &n;
 			}
 		}
 	}
@@ -292,7 +289,7 @@ routing_table::table_t::iterator routing_table::find_bucket(node_id const& id)
 	TORRENT_ASSERT(bucket_index < int(m_buckets.size()));
 	TORRENT_ASSERT(bucket_index >= 0);
 
-	table_t::iterator i = m_buckets.begin();
+	auto i = m_buckets.begin();
 	std::advance(i, bucket_index);
 	return i;
 }
@@ -332,19 +329,16 @@ bool compare_ip_cidr(address const& lhs, address const& rhs)
 node_entry* routing_table::find_node(udp::endpoint const& ep
 	, routing_table::table_t::iterator* bucket)
 {
-	for (table_t::iterator i = m_buckets.begin()
-		, end(m_buckets.end()); i != end; ++i)
+	for (auto i = m_buckets.begin() , end(m_buckets.end()); i != end; ++i)
 	{
-		for (bucket_t::iterator j = i->replacements.begin();
-			j != i->replacements.end(); ++j)
+		for (auto j = i->replacements.begin(); j != i->replacements.end(); ++j)
 		{
 			if (j->addr() != ep.address()) continue;
 			if (j->port() != ep.port()) continue;
 			*bucket = i;
 			return &*j;
 		}
-		for (bucket_t::iterator j = i->live_nodes.begin();
-			j != i->live_nodes.end(); ++j)
+		for (auto j = i->live_nodes.begin(); j != i->live_nodes.end(); ++j)
 		{
 			if (j->addr() != ep.address()) continue;
 			if (j->port() != ep.port()) continue;
@@ -372,7 +366,7 @@ void routing_table::fill_from_replacements(table_t::iterator bucket)
 
 	while (int(b.size()) < bucket_size && !rb.empty())
 	{
-		bucket_t::iterator j = std::find_if(rb.begin(), rb.end(), std::bind(&node_entry::pinged, _1));
+		auto j = std::find_if(rb.begin(), rb.end(), std::bind(&node_entry::pinged, _1));
 		if (j == rb.end()) j = rb.begin();
 		b.push_back(*j);
 		rb.erase(j);
@@ -394,7 +388,7 @@ void routing_table::remove_node_internal(node_entry* n, bucket_t& b)
 
 void routing_table::remove_node(node_entry* n
 	, routing_table::table_t::iterator bucket)
-	{
+{
 	INVARIANT_CHECK;
 
 	remove_node_internal(n, bucket->replacements);
@@ -542,7 +536,7 @@ routing_table::add_node_status_t routing_table::add_node_impl(node_entry e)
 	// don't add ourself
 	if (e.id == m_id) return failed_to_add;
 
-	table_t::iterator i = find_bucket(e.id);
+	auto const i = find_bucket(e.id);
 	bucket_t& b = i->live_nodes;
 	bucket_t& rb = i->replacements;
 	int const bucket_index = int(std::distance(m_buckets.begin(), i));
@@ -656,7 +650,7 @@ ip_ok:
 		// we may replace other nodes that aren't pinged
 
 		j = std::find_if(b.begin(), b.end()
-			, [](node_entry const& ne) { return ne.pinged() == false; });
+			, [](node_entry const& ne) { return !ne.pinged(); });
 
 		if (j != b.end() && !j->pinged())
 		{
@@ -838,7 +832,7 @@ ip_ok:
 			// but prefer nodes that haven't been pinged, since they are
 			// less reliable than this one, that has been pinged
 			j = std::find_if(rb.begin(), rb.end()
-				, [] (node_entry const& ne) { return ne.pinged() == false; });
+				, [] (node_entry const& ne) { return !ne.pinged(); });
 			if (j == rb.end()) j = rb.begin();
 			m_ips.erase(j->addr());
 			rb.erase(j);
@@ -873,7 +867,7 @@ void routing_table::split_bucket()
 	// move any node whose (160 - distance_exp(m_id, id)) >= (i - m_buckets.begin())
 	// to the new bucket
 	int const new_bucket_size = bucket_limit(bucket_index + 1);
-	for (bucket_t::iterator j = b.begin(); j != b.end();)
+	for (auto j = b.begin(); j != b.end();)
 	{
 		int const d = distance_exp(m_id, j->id);
 		if (d >= 159 - bucket_index)
@@ -973,11 +967,11 @@ void routing_table::node_failed(node_id const& nid, udp::endpoint const& ep)
 	// if messages to ourself fails, ignore it
 	if (nid == m_id) return;
 
-	table_t::iterator i = find_bucket(nid);
+	auto const i = find_bucket(nid);
 	bucket_t& b = i->live_nodes;
 	bucket_t& rb = i->replacements;
 
-	bucket_t::iterator j = std::find_if(b.begin(), b.end()
+	auto j = std::find_if(b.begin(), b.end()
 		, [&nid](node_entry const& ne) { return ne.id == nid; });
 
 	if (j == b.end())
@@ -1075,7 +1069,7 @@ void routing_table::find_node(node_id const& target
 		else
 		{
 			std::remove_copy_if(b.begin(), b.end(), std::back_inserter(l)
-				, [](node_entry const& ne) { return ne.confirmed() == false; });
+				, [](node_entry const& ne) { return !ne.confirmed(); });
 		}
 
 		if (int(l.size()) == count) return;
@@ -1114,7 +1108,7 @@ void routing_table::find_node(node_id const& target
 		else
 		{
 			std::remove_copy_if(b.begin(), b.end(), std::back_inserter(l)
-				, [](node_entry const& ne) { return ne.confirmed() == false; });
+				, [](node_entry const& ne) { return !ne.confirmed(); });
 		}
 
 		if (int(l.size()) == count) return;
@@ -1164,7 +1158,7 @@ bool routing_table::is_full(int const bucket) const
 	if (num_buckets == 0) return false;
 	if (bucket >= num_buckets) return false;
 
-	table_t::const_iterator i = m_buckets.begin();
+	auto i = m_buckets.cbegin();
 	std::advance(i, bucket);
 	return (int(i->live_nodes.size()) >= bucket_limit(bucket)
 		&& int(i->replacements.size()) >= m_bucket_size);

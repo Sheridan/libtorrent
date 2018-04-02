@@ -33,26 +33,20 @@ POSSIBILITY OF SUCH DAMAGE.
 #ifndef TORRENT_HTTP_TRACKER_CONNECTION_HPP_INCLUDED
 #define TORRENT_HTTP_TRACKER_CONNECTION_HPP_INCLUDED
 
-#include <string>
 #include <vector>
 #include <memory>
 
 #include "libtorrent/config.hpp"
-#include "libtorrent/lazy_entry.hpp"
 #include "libtorrent/peer_id.hpp"
-#include "libtorrent/tracker_manager.hpp"
-#include "libtorrent/i2p_stream.hpp"
 #include "libtorrent/error_code.hpp"
 
 namespace libtorrent {
 
+	class tracker_manager;
 	struct http_connection;
-	class entry;
 	class http_parser;
 	struct bdecode_node;
 	struct peer_entry;
-
-	namespace aux { struct session_settings; }
 
 	class TORRENT_EXTRA_EXPORT http_tracker_connection
 		: public tracker_connection
@@ -66,8 +60,8 @@ namespace libtorrent {
 			, tracker_request const& req
 			, std::weak_ptr<request_callback> c);
 
-		void start();
-		void close();
+		void start() override;
+		void close() override;
 
 	private:
 
@@ -80,20 +74,16 @@ namespace libtorrent {
 		void on_filter(http_connection& c, std::vector<tcp::endpoint>& endpoints);
 		void on_connect(http_connection& c);
 		void on_response(error_code const& ec, http_parser const& parser
-			, char const* data, int size);
+			, span<char const> data);
 
-		virtual void on_timeout(error_code const&) {}
+		void on_timeout(error_code const&) override {}
 
-		tracker_manager& m_man;
 		std::shared_ptr<http_connection> m_tracker_connection;
 		address m_tracker_ip;
-#if TORRENT_USE_I2P
-		i2p_connection* m_i2p_conn;
-#endif
 	};
 
 	TORRENT_EXTRA_EXPORT tracker_response parse_tracker_response(
-		char const* data, int size, error_code& ec
+		span<char const> data, error_code& ec
 		, int flags, sha1_hash const& scrape_ih);
 
 	TORRENT_EXTRA_EXPORT bool extract_peer_info(bdecode_node const& info

@@ -34,11 +34,12 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/aux_/escape_string.hpp"
 #include "libtorrent/hex.hpp"
 #include "libtorrent/string_util.hpp"
+#include "libtorrent/aux_/string_ptr.hpp"
 #include <iostream>
 #include <cstring> // for strcmp
 #include "libtorrent/aux_/escape_string.hpp" // for trim
 
-using namespace libtorrent;
+using namespace lt;
 
 TORRENT_TEST(maybe_url_encode)
 {
@@ -58,7 +59,7 @@ TORRENT_TEST(hex)
 	TEST_CHECK(aux::from_hex({str, 40}, bin));
 	char hex[41];
 	aux::to_hex(bin, hex);
-	TEST_CHECK(strcmp(hex, str) == 0);
+	TEST_CHECK(std::strcmp(hex, str) == 0);
 
 	TEST_CHECK(aux::to_hex({"\x55\x73",2}) == "5573");
 	TEST_CHECK(aux::to_hex({"\xaB\xd0",2}) == "abd0");
@@ -67,9 +68,9 @@ TORRENT_TEST(hex)
 
 	for (int i = 1; i < 255; ++i)
 	{
-		bool const hex = strchr(hex_chars, i) != nullptr;
-		char const c = i;
-		TEST_EQUAL(aux::is_hex(c), hex);
+		bool const hex_loop = std::strchr(hex_chars, i) != nullptr;
+		char const c = char(i);
+		TEST_EQUAL(aux::is_hex(c), hex_loop);
 	}
 
 	TEST_EQUAL(aux::hex_to_int('0'), 0);
@@ -91,6 +92,8 @@ TORRENT_TEST(is_space)
 	TEST_CHECK(is_space('\t'));
 	TEST_CHECK(is_space('\n'));
 	TEST_CHECK(is_space('\r'));
+	TEST_CHECK(is_space('\f'));
+	TEST_CHECK(is_space('\v'));
 }
 
 TORRENT_TEST(to_lower)
@@ -128,8 +131,79 @@ TORRENT_TEST(to_string)
 {
 	TEST_CHECK(to_string(345).data() == std::string("345"));
 	TEST_CHECK(to_string(-345).data() == std::string("-345"));
+	TEST_CHECK(to_string(std::numeric_limits<std::int64_t>::max()).data() == std::string("9223372036854775807"));
+	TEST_CHECK(to_string(std::numeric_limits<std::int64_t>::min()).data() == std::string("-9223372036854775808"));
+
 	TEST_CHECK(to_string(0).data() == std::string("0"));
+	TEST_CHECK(to_string(10).data() == std::string("10"));
+	TEST_CHECK(to_string(100).data() == std::string("100"));
+	TEST_CHECK(to_string(1000).data() == std::string("1000"));
+	TEST_CHECK(to_string(10000).data() == std::string("10000"));
+	TEST_CHECK(to_string(100000).data() == std::string("100000"));
+	TEST_CHECK(to_string(1000000).data() == std::string("1000000"));
+	TEST_CHECK(to_string(10000000).data() == std::string("10000000"));
+	TEST_CHECK(to_string(100000000).data() == std::string("100000000"));
 	TEST_CHECK(to_string(1000000000).data() == std::string("1000000000"));
+	TEST_CHECK(to_string(10000000000).data() == std::string("10000000000"));
+	TEST_CHECK(to_string(100000000000).data() == std::string("100000000000"));
+	TEST_CHECK(to_string(1000000000000).data() == std::string("1000000000000"));
+	TEST_CHECK(to_string(10000000000000).data() == std::string("10000000000000"));
+	TEST_CHECK(to_string(100000000000000).data() == std::string("100000000000000"));
+	TEST_CHECK(to_string(1000000000000000).data() == std::string("1000000000000000"));
+
+	TEST_CHECK(to_string(9).data() == std::string("9"));
+	TEST_CHECK(to_string(99).data() == std::string("99"));
+	TEST_CHECK(to_string(999).data() == std::string("999"));
+	TEST_CHECK(to_string(9999).data() == std::string("9999"));
+	TEST_CHECK(to_string(99999).data() == std::string("99999"));
+	TEST_CHECK(to_string(999999).data() == std::string("999999"));
+	TEST_CHECK(to_string(9999999).data() == std::string("9999999"));
+	TEST_CHECK(to_string(99999999).data() == std::string("99999999"));
+	TEST_CHECK(to_string(999999999).data() == std::string("999999999"));
+	TEST_CHECK(to_string(9999999999).data() == std::string("9999999999"));
+	TEST_CHECK(to_string(99999999999).data() == std::string("99999999999"));
+	TEST_CHECK(to_string(999999999999).data() == std::string("999999999999"));
+	TEST_CHECK(to_string(9999999999999).data() == std::string("9999999999999"));
+	TEST_CHECK(to_string(99999999999999).data() == std::string("99999999999999"));
+	TEST_CHECK(to_string(999999999999999).data() == std::string("999999999999999"));
+	TEST_CHECK(to_string(9999999999999999).data() == std::string("9999999999999999"));
+	TEST_CHECK(to_string(99999999999999999).data() == std::string("99999999999999999"));
+	TEST_CHECK(to_string(999999999999999999).data() == std::string("999999999999999999"));
+
+	TEST_CHECK(to_string(-10).data() == std::string("-10"));
+	TEST_CHECK(to_string(-100).data() == std::string("-100"));
+	TEST_CHECK(to_string(-1000).data() == std::string("-1000"));
+	TEST_CHECK(to_string(-10000).data() == std::string("-10000"));
+	TEST_CHECK(to_string(-100000).data() == std::string("-100000"));
+	TEST_CHECK(to_string(-1000000).data() == std::string("-1000000"));
+	TEST_CHECK(to_string(-10000000).data() == std::string("-10000000"));
+	TEST_CHECK(to_string(-100000000).data() == std::string("-100000000"));
+	TEST_CHECK(to_string(-1000000000).data() == std::string("-1000000000"));
+	TEST_CHECK(to_string(-10000000000).data() == std::string("-10000000000"));
+	TEST_CHECK(to_string(-100000000000).data() == std::string("-100000000000"));
+	TEST_CHECK(to_string(-1000000000000).data() == std::string("-1000000000000"));
+	TEST_CHECK(to_string(-10000000000000).data() == std::string("-10000000000000"));
+	TEST_CHECK(to_string(-100000000000000).data() == std::string("-100000000000000"));
+	TEST_CHECK(to_string(-1000000000000000).data() == std::string("-1000000000000000"));
+
+	TEST_CHECK(to_string(-9).data() == std::string("-9"));
+	TEST_CHECK(to_string(-99).data() == std::string("-99"));
+	TEST_CHECK(to_string(-999).data() == std::string("-999"));
+	TEST_CHECK(to_string(-9999).data() == std::string("-9999"));
+	TEST_CHECK(to_string(-99999).data() == std::string("-99999"));
+	TEST_CHECK(to_string(-999999).data() == std::string("-999999"));
+	TEST_CHECK(to_string(-9999999).data() == std::string("-9999999"));
+	TEST_CHECK(to_string(-99999999).data() == std::string("-99999999"));
+	TEST_CHECK(to_string(-999999999).data() == std::string("-999999999"));
+	TEST_CHECK(to_string(-9999999999).data() == std::string("-9999999999"));
+	TEST_CHECK(to_string(-99999999999).data() == std::string("-99999999999"));
+	TEST_CHECK(to_string(-999999999999).data() == std::string("-999999999999"));
+	TEST_CHECK(to_string(-9999999999999).data() == std::string("-9999999999999"));
+	TEST_CHECK(to_string(-99999999999999).data() == std::string("-99999999999999"));
+	TEST_CHECK(to_string(-999999999999999).data() == std::string("-999999999999999"));
+	TEST_CHECK(to_string(-9999999999999999).data() == std::string("-9999999999999999"));
+	TEST_CHECK(to_string(-99999999999999999).data() == std::string("-99999999999999999"));
+	TEST_CHECK(to_string(-999999999999999999).data() == std::string("-999999999999999999"));
 }
 
 TORRENT_TEST(base64)
@@ -281,6 +355,8 @@ TORRENT_TEST(path)
 #endif
 }
 
+namespace {
+
 void test_parse_interface(char const* input
 	, std::vector<listen_interface_t> expected
 	, std::string output)
@@ -296,6 +372,8 @@ void test_parse_interface(char const* input
 	}
 	TEST_EQUAL(print_listen_interfaces(list), output);
 }
+
+} // anonymous namespace
 
 TORRENT_TEST(parse_list)
 {
@@ -354,31 +432,20 @@ TORRENT_TEST(parse_list)
 		, {{"127.0.0.1", 0, false}}, "127.0.0.1:0");
 }
 
-TORRENT_TEST(tokenize)
+TORRENT_TEST(split_string)
 {
-	char test_tokenize[] = "a b c \"foo bar\" d\ne f";
-	char* next = test_tokenize;
-	char* ptr = string_tokenize(next, ' ', &next);
-	TEST_EQUAL(ptr, std::string("a"));
+	TEST_CHECK(split_string("a b"_sv, ' ') == std::make_pair("a"_sv, "b"_sv));
+	TEST_CHECK(split_string("\"a b\" c"_sv, ' ') == std::make_pair("\"a b\""_sv, "c"_sv));
+	TEST_CHECK(split_string("\"a b\"foobar c"_sv, ' ') == std::make_pair("\"a b\"foobar"_sv, "c"_sv));
+	TEST_CHECK(split_string("a\nb foobar"_sv, ' ') == std::make_pair("a\nb"_sv, "foobar"_sv));
+	TEST_CHECK(split_string("a b\"foo\"bar"_sv, '"') == std::make_pair("a b"_sv, "foo\"bar"_sv));
+	TEST_CHECK(split_string("a"_sv, ' ') == std::make_pair("a"_sv, ""_sv));
+	TEST_CHECK(split_string("\"a b"_sv, ' ') == std::make_pair("\"a b"_sv, ""_sv));
+	TEST_CHECK(split_string(""_sv, ' ') == std::make_pair(""_sv, ""_sv));
+}
 
-	ptr = string_tokenize(next, ' ', &next);
-	TEST_EQUAL(ptr, std::string("b"));
-
-	ptr = string_tokenize(next, ' ', &next);
-	TEST_EQUAL(ptr, std::string("c"));
-
-	ptr = string_tokenize(next, ' ', &next);
-	TEST_EQUAL(ptr, std::string("\"foo bar\""));
-
-	ptr = string_tokenize(next, ' ', &next);
-	TEST_EQUAL(ptr, std::string("d\ne"));
-
-	ptr = string_tokenize(next, ' ', &next);
-	TEST_EQUAL(ptr, std::string("f"));
-
-	ptr = string_tokenize(next, ' ', &next);
-	TEST_EQUAL(ptr, static_cast<char*>(nullptr));
-
+TORRENT_TEST(convert_from_native)
+{
 	TEST_EQUAL(std::string("foobar"), convert_from_native(convert_to_native("foobar")));
 	TEST_EQUAL(std::string("foobar")
 		, convert_from_native(convert_to_native("foo"))
@@ -410,3 +477,78 @@ TORRENT_TEST(i2p_url)
 	TEST_CHECK(!is_i2p_url("http://i2p/foo bar"));
 }
 #endif
+
+TORRENT_TEST(string_hash_no_case)
+{
+	string_hash_no_case hsh;
+
+	// make sure different strings yield different hashes
+	TEST_CHECK(hsh("ab") != hsh("ba"));
+
+	// make sure case is ignored
+	TEST_EQUAL(hsh("Ab"), hsh("ab"));
+	TEST_EQUAL(hsh("Ab"), hsh("aB"));
+
+	// make sure zeroes in strings are supported
+	TEST_CHECK(hsh(std::string("\0a", 2)) != hsh(std::string("\0b", 2)));
+	TEST_EQUAL(hsh(std::string("\0a", 2)), hsh(std::string("\0a", 2)));
+}
+
+TORRENT_TEST(string_eq_no_case)
+{
+	string_eq_no_case cmp;
+	TEST_CHECK(cmp("ab", "ba") == false);
+	TEST_CHECK(cmp("", ""));
+	TEST_CHECK(cmp("abc", "abc"));
+
+	// make sure different lengths are correctly treated as different
+	TEST_CHECK(cmp("abc", "ab") == false);
+
+	// make sure case is ignored
+	TEST_CHECK(cmp("Ab", "ab"));
+	TEST_CHECK(cmp("Ab", "aB"));
+
+	// make sure zeros are supported
+	TEST_CHECK(cmp(std::string("\0a", 2), std::string("\0b", 2)) == false);
+	TEST_CHECK(cmp(std::string("\0a", 2), std::string("\0a", 2)));
+}
+
+TORRENT_TEST(string_ptr_zero_termination)
+{
+	char str[] = {'f', 'o', 'o', 'b', 'a', 'r'};
+	aux::string_ptr p(string_view(str, sizeof(str)));
+
+	// make sure it's zero-terminated now
+	TEST_CHECK(strlen(*p) == 6);
+	TEST_CHECK((*p)[6] == '\0');
+	TEST_CHECK(*p == string_view("foobar"));
+}
+
+TORRENT_TEST(string_ptr_move_construct)
+{
+	aux::string_ptr p1("test");
+	TEST_CHECK(*p1 == string_view("test"));
+
+	aux::string_ptr p2(std::move(p1));
+
+	TEST_CHECK(*p2 == string_view("test"));
+
+	// moved-from state is empty
+	TEST_CHECK(*p1 == nullptr);
+}
+
+TORRENT_TEST(string_ptr_move_assign)
+{
+	aux::string_ptr p1("test");
+	TEST_CHECK(*p1 == string_view("test"));
+
+	aux::string_ptr p2("foobar");
+
+	p1 = std::move(p2);
+
+	TEST_CHECK(*p1 == string_view("foobar"));
+
+	// moved-from state is empty
+	TEST_CHECK(*p2 == nullptr);
+}
+

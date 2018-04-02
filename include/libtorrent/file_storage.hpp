@@ -45,6 +45,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/sha1_hash.hpp"
 #include "libtorrent/string_view.hpp"
 #include "libtorrent/aux_/vector.hpp"
+#include "libtorrent/flags.hpp"
 
 namespace libtorrent {
 
@@ -58,6 +59,8 @@ namespace libtorrent {
 		~file_entry();
 		file_entry(file_entry const&) = default;
 		file_entry& operator=(file_entry const&) = default;
+		file_entry(file_entry&&) noexcept = default;
+		file_entry& operator=(file_entry&&) noexcept = default;
 
 		// the full path of this file. The paths are unicode strings
 		// encoded in UTF-8.
@@ -75,18 +78,10 @@ namespace libtorrent {
 		// before it in the list.
 		std::int64_t size;
 
-		// the offset in the file where the storage should start. The normal
-		// case is to have this set to 0, so that the storage starts saving data at the start
-		// if the file. In cases where multiple files are mapped into the same file though,
-		// the ``file_base`` should be set to an offset so that the different regions do
-		// not overlap. This is used when mapping "unselected" files into a so-called part
-		// file.
-		std::int64_t file_base;
-
 		// the modification time of this file specified in posix time.
 		std::time_t mtime;
 
-		// a sha-1 hash of the content of the file, or zeroes, if no
+		// a SHA-1 hash of the content of the file, or zeros, if no
 		// file hash was present in the torrent file. It can be used to potentially
 		// find alternative sources for the file.
 		sha1_hash filehash;
@@ -122,8 +117,8 @@ namespace libtorrent {
 		internal_file_entry();
 		internal_file_entry(internal_file_entry const& fe);
 		internal_file_entry& operator=(internal_file_entry const& fe);
-		internal_file_entry(internal_file_entry&& fe);
-		internal_file_entry& operator=(internal_file_entry&& fe);
+		internal_file_entry(internal_file_entry&& fe) noexcept;
+		internal_file_entry& operator=(internal_file_entry&& fe) noexcept;
 		~internal_file_entry();
 
 		void set_name(char const* n, bool borrow_string = false, int string_len = 0);
@@ -197,6 +192,9 @@ namespace libtorrent {
 		std::int64_t size;
 	};
 
+	// hidden
+	using file_flags_t = flags::bitfield_flag<std::uint8_t, struct file_flags_tag>;
+
 	// The ``file_storage`` class represents a file list and the piece
 	// size. Everything necessary to interpret a regular bittorrent storage
 	// file structure.
@@ -210,8 +208,8 @@ namespace libtorrent {
 		~file_storage();
 		file_storage(file_storage const&);
 		file_storage& operator=(file_storage const&);
-		file_storage(file_storage&&);
-		file_storage& operator=(file_storage&&);
+		file_storage(file_storage&&) noexcept;
+		file_storage& operator=(file_storage&&) = default;
 
 		// returns true if the piece length has been initialized
 		// on the file_storage. This is typically taken as a proxy
@@ -219,25 +217,12 @@ namespace libtorrent {
 		// not.
 		bool is_valid() const { return m_piece_length > 0; }
 
-		// file attribute flags
-		enum flags_t
-		{
-			// the file is a pad file. It's required to contain zeroes
-			// at it will not be saved to disk. Its purpose is to make
-			// the following file start on a piece boundary.
-			pad_file = 1,
-
-			// this file has the hidden attribute set. This is primarily
-			// a windows attribute
-			attribute_hidden = 2,
-
-			// this file has the executable attribute set.
-			attribute_executable = 4,
-
-			// this file is a symbolic link. It should have a link
-			// target string associated with it.
-			attribute_symlink = 8
-		};
+#ifndef TORRENT_NO_DEPRECATE
+		static constexpr file_flags_t TORRENT_DEPRECATED_MEMBER pad_file = 0_bit;
+		static constexpr file_flags_t TORRENT_DEPRECATED_MEMBER attribute_hidden = 1_bit;
+		static constexpr file_flags_t TORRENT_DEPRECATED_MEMBER attribute_executable = 2_bit;
+		static constexpr file_flags_t TORRENT_DEPRECATED_MEMBER attribute_symlink = 3_bit;
+#endif
 
 		// allocates space for ``num_files`` in the internal file list. This can
 		// be used to avoid reallocating the internal file list when the number
@@ -245,16 +230,16 @@ namespace libtorrent {
 		void reserve(int num_files);
 
 		// Adds a file to the file storage. The ``add_file_borrow`` version
-		// expects that ``filename`` points to a string of ``filename_len``
-		// bytes that is the file name (without a path) of the file that's
-		// being added. This memory is *borrowed*, i.e. it is the caller's
+		// expects that ``filename`` is the file name (without a path) of
+		// the file that's being added.
+		// This memory is *borrowed*, i.e. it is the caller's
 		// responsibility to make sure it stays valid throughout the lifetime
 		// of this file_storage object or any copy of it. The same thing applies
 		// to ``filehash``, which is an optional pointer to a 20 byte binary
 		// SHA-1 hash of the file.
 		//
-		// if ``filename`` is nullptr, the filename from ``path`` is used and not
-		// borrowed. In this case ``filename_len`` is ignored.
+		// if ``filename`` is empty, the filename from ``path`` is used and not
+		// borrowed.
 		//
 		// The ``path`` argument is the full path (in the torrent file) to
 		// the file to add. Note that this is not supposed to be an absolute
@@ -281,11 +266,12 @@ namespace libtorrent {
 		// That is, the first path element of all files must be the same.
 		// This shared path element is also set to the name of the torrent. It
 		// can be changed by calling ``set_name``.
-		void add_file_borrow(char const* filename, int filename_len
+		void add_file_borrow(string_view filename
 			, std::string const& path, std::int64_t file_size
-			, std::uint32_t file_flags = 0, char const* filehash = 0
+			, file_flags_t file_flags = {}, char const* filehash = nullptr
 			, std::int64_t mtime = 0, string_view symlink_path = string_view());
-		void add_file(std::string const& path, std::int64_t file_size, std::uint32_t file_flags = 0
+		void add_file(std::string const& path, std::int64_t file_size
+			, file_flags_t file_flags = {}
 			, std::time_t mtime = 0, string_view symlink_path = string_view());
 
 		// renames the file at ``index`` to ``new_filename``. Keep in mind
@@ -294,14 +280,19 @@ namespace libtorrent {
 
 #ifndef TORRENT_NO_DEPRECATE
 		TORRENT_DEPRECATED
+		void add_file_borrow(char const* filename, int filename_len
+			, std::string const& path, std::int64_t file_size
+			, file_flags_t file_flags = {}, char const* filehash = nullptr
+			, std::int64_t mtime = 0, string_view symlink_path = string_view());
+		TORRENT_DEPRECATED
 		void add_file(file_entry const& fe, char const* filehash = nullptr);
 
-#if TORRENT_USE_WSTRING
 		// all wstring APIs are deprecated since 0.16.11
 		// instead, use the wchar -> utf8 conversion functions
 		// and pass in utf8 strings
 		TORRENT_DEPRECATED
-		void add_file(std::wstring const& p, std::int64_t size, std::uint32_t flags = 0
+		void add_file(std::wstring const& p, std::int64_t size
+			, file_flags_t flags = {}
 			, std::time_t mtime = 0, string_view s_p = "");
 		TORRENT_DEPRECATED
 		void rename_file(file_index_t index, std::wstring const& new_filename);
@@ -309,7 +300,6 @@ namespace libtorrent {
 		void set_name(std::wstring const& n);
 
 		void rename_file_deprecated(file_index_t index, std::wstring const& new_filename);
-#endif // TORRENT_USE_WSTRING
 #endif // TORRENT_NO_DEPRECATE
 
 		// returns a list of file_slice objects representing the portions of
@@ -327,7 +317,7 @@ namespace libtorrent {
 
 		// returns a peer_request representing the piece index, byte offset
 		// and size the specified file range overlaps. This is the inverse
-		// mapping ove map_block(). Note that the ``peer_request`` return type
+		// mapping over map_block(). Note that the ``peer_request`` return type
 		// is meant to hold bittorrent block requests, which may not be larger
 		// than 16 kiB. Mapping a range larger than that may return an overflown
 		// integer.
@@ -337,8 +327,8 @@ namespace libtorrent {
 		// all functions depending on internal_file_entry
 		// were deprecated in 1.0. Use the variants that take an
 		// index instead
-		typedef std::vector<internal_file_entry>::const_iterator iterator;
-		typedef std::vector<internal_file_entry>::const_reverse_iterator reverse_iterator;
+		using iterator = std::vector<internal_file_entry>::const_iterator;
+		using reverse_iterator = std::vector<internal_file_entry>::const_reverse_iterator;
 
 		TORRENT_DEPRECATED
 		iterator file_at_offset(std::int64_t offset) const;
@@ -379,10 +369,10 @@ namespace libtorrent {
 
 		// returns the index of the one-past-end file in the file storage
 		file_index_t end_file() const
-		{ return file_index_t(int(m_files.size())); }
+		{ return m_files.end_index(); }
 
 		file_index_t last_file() const
-		{ return file_index_t(int(m_files.size()) - 1); }
+		{ return --m_files.end_index(); }
 
 		// returns the total number of bytes all the files in this torrent spans
 		std::int64_t total_size() const { return m_total_size; }
@@ -399,7 +389,7 @@ namespace libtorrent {
 		{ return piece_index_t(m_num_pieces - 1); }
 
 		// set and get the size of each piece in this torrent. This size is typically an even power
-		// of 2. It doesn't have to be though. It should be divisible by 16kiB however.
+		// of 2. It doesn't have to be though. It should be divisible by 16 kiB however.
 		void set_piece_length(int l)  { m_piece_length = l; }
 		int piece_length() const { TORRENT_ASSERT(m_piece_length > 0); return m_piece_length; }
 
@@ -413,16 +403,13 @@ namespace libtorrent {
 		std::string const& name() const { return m_name; }
 
 		// swap all content of *this* with *ti*.
-		void swap(file_storage& ti)
+		void swap(file_storage& ti) noexcept
 		{
 			using std::swap;
 			swap(ti.m_files, m_files);
 			swap(ti.m_file_hashes, m_file_hashes);
 			swap(ti.m_symlinks, m_symlinks);
 			swap(ti.m_mtime, m_mtime);
-#ifndef TORRENT_NO_DEPRECATE
-			swap(ti.m_file_base, m_file_base);
-#endif
 			swap(ti.m_paths, m_paths);
 			swap(ti.m_name, m_name);
 			swap(ti.m_total_size, m_total_size);
@@ -445,7 +432,7 @@ namespace libtorrent {
 		// These functions are used to query attributes of files at
 		// a given index.
 		//
-		// The ``hash()`` is a sha-1 hash of the file, or 0 if none was
+		// The ``hash()`` is a SHA-1 hash of the file, or 0 if none was
 		// provided in the torrent file. This can potentially be used to
 		// join a bittorrent network with other file sharing networks.
 		//
@@ -487,35 +474,27 @@ namespace libtorrent {
 		// the set.
 		void all_path_hashes(std::unordered_set<std::uint32_t>& table) const;
 
-		// flags indicating various attributes for files in
-		// a file_storage.
-		enum file_flags_t : std::uint32_t
-		{
-			// this file is a pad file. The creator of the
-			// torrent promises the file is entirely filled with
-			// zeroes and does not need to be downloaded. The
-			// purpose is just to align the next file to either
-			// a block or piece boundary.
-			flag_pad_file = 1,
+		// the file is a pad file. It's required to contain zeros
+		// at it will not be saved to disk. Its purpose is to make
+		// the following file start on a piece boundary.
+		static constexpr file_flags_t flag_pad_file = 0_bit;
 
-			// this file is hidden (sets the hidden attribute
-			// on windows)
-			flag_hidden = 2,
+		// this file has the hidden attribute set. This is primarily
+		// a windows attribute
+		static constexpr file_flags_t flag_hidden = 1_bit;
 
-			// this file is executable (sets the executable bit
-			// on posix like systems)
-			flag_executable = 4,
+		// this file has the executable attribute set.
+		static constexpr file_flags_t flag_executable = 2_bit;
 
-			// this file is a symlink. The symlink target is
-			// specified in a separate field
-			flag_symlink = 8
-		};
+		// this file is a symbolic link. It should have a link
+		// target string associated with it.
+		static constexpr file_flags_t flag_symlink = 3_bit;
 
 		std::vector<std::string> const& paths() const { return m_paths; }
 
 		// returns a bitmask of flags from file_flags_t that apply
 		// to file at ``index``.
-		std::uint32_t file_flags(file_index_t index) const;
+		file_flags_t file_flags(file_index_t index) const;
 
 		// returns true if the file at the specified index has been renamed to
 		// have an absolute path, i.e. is not anchored in the save path of the
@@ -528,17 +507,11 @@ namespace libtorrent {
 		// low-level function. returns a pointer to the internal storage for
 		// the filename. This string may not be 0-terminated!
 		// the ``file_name_len()`` function returns the length of the filename.
+		// prefer to use ``file_name()`` instead, which returns a ``string_view``.
 		char const* file_name_ptr(file_index_t index) const;
 		int file_name_len(file_index_t index) const;
 
 #ifndef TORRENT_NO_DEPRECATE
-		// deprecated in 1.1
-		std::int64_t file_base_deprecated(int index) const;
-		TORRENT_DEPRECATED
-		std::int64_t file_base(int index) const;
-		TORRENT_DEPRECATED
-		void set_file_base(int index, std::int64_t off);
-
 		// these were deprecated in 1.0. Use the versions that take an index instead
 		TORRENT_DEPRECATED
 		sha1_hash hash(internal_file_entry const& fe) const;
@@ -548,10 +521,6 @@ namespace libtorrent {
 		std::time_t mtime(internal_file_entry const& fe) const;
 		TORRENT_DEPRECATED
 		int file_index(internal_file_entry const& fe) const;
-		TORRENT_DEPRECATED
-		std::int64_t file_base(internal_file_entry const& fe) const;
-		TORRENT_DEPRECATED
-		void set_file_base(internal_file_entry const& fe, std::int64_t off);
 		TORRENT_DEPRECATED
 		std::string file_path(internal_file_entry const& fe, std::string const& save_path = "") const;
 		TORRENT_DEPRECATED
@@ -569,6 +538,8 @@ namespace libtorrent {
 		void apply_pointer_offset(std::ptrdiff_t off);
 
 	private:
+
+		int get_or_add_path(string_view path);
 
 		void add_pad_file(int size
 			, std::vector<internal_file_entry>::iterator& i
@@ -610,13 +581,6 @@ namespace libtorrent {
 		// each element corresponds to the file with the same
 		// index in m_files
 		aux::vector<std::time_t, file_index_t> m_mtime;
-
-#ifndef TORRENT_NO_DEPRECATE
-		// if any file has a non-zero file base (i.e. multiple
-		// files residing in the same physical file at different
-		// offsets)
-		aux::vector<std::int64_t, file_index_t> m_file_base;
-#endif
 
 		// all unique paths files have. The internal_file_entry::path_index
 		// points into this array. The paths don't include the root directory

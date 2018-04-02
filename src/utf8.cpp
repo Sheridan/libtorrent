@@ -32,10 +32,6 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #include "libtorrent/config.hpp"
 
-// on windows we need these functions for
-// convert_to_native and convert_from_native
-#if TORRENT_USE_WSTRING || defined TORRENT_WINDOWS
-
 #include <iterator>
 #include "libtorrent/utf8.hpp"
 #include "libtorrent/assert.hpp"
@@ -189,7 +185,7 @@ namespace {
 				return "UTF error";
 			}
 
-			std::string message(int ev) const BOOST_SYSTEM_NOEXCEPT override
+			std::string message(int ev) const override
 			{
 				static char const* error_messages[] = {
 					"ok",
@@ -205,9 +201,7 @@ namespace {
 
 			boost::system::error_condition default_error_condition(
 				int ev) const BOOST_SYSTEM_NOEXCEPT override
-			{
-				return boost::system::error_condition(ev, *this);
-			}
+			{ return {ev, *this}; }
 		};
 	} // anonymous namespace
 
@@ -215,7 +209,7 @@ namespace {
 	{
 		boost::system::error_code make_error_code(utf8_errors::error_code_enum e)
 		{
-			return error_code(e, utf8_category());
+			return {e, utf8_category()};
 		}
 	} // utf_errors namespace
 
@@ -268,10 +262,42 @@ namespace {
 		if (ec) aux::throw_ex<system_error>(ec);
 		return ret;
 	}
+
+	// returns the unicode codepoint and the number of bytes of the utf8 sequence
+	// that was parsed. The codepoint is -1 if it's invalid
+	std::pair<std::int32_t, int> parse_utf8_codepoint(string_view str)
+	{
+		int const sequence_len = trailingBytesForUTF8[static_cast<std::uint8_t>(str[0])] + 1;
+		if (sequence_len > int(str.size())) return std::make_pair(-1, static_cast<int>(str.size()));
+
+		if (sequence_len > 4)
+		{
+			return std::make_pair(-1, sequence_len);
+		}
+
+		if (!isLegalUTF8(reinterpret_cast<UTF8 const*>(str.data()), sequence_len))
+		{
+			return std::make_pair(-1, sequence_len);
+		}
+
+		std::uint32_t ch = 0;
+		for (int i = 0; i < sequence_len; ++i)
+		{
+			ch <<= 6;
+			ch += static_cast<std::uint8_t>(str[static_cast<std::size_t>(i)]);
+		}
+		ch -= offsetsFromUTF8[sequence_len-1];
+
+		if (ch > 0x7fffffff)
+		{
+			return std::make_pair(-1, sequence_len);
+		}
+
+		return std::make_pair(static_cast<std::int32_t>(ch), sequence_len);
+	}
 }
 
 #ifdef __clang__
 #pragma clang diagnostic pop
 #endif
 
-#endif

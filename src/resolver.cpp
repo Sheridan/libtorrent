@@ -36,6 +36,10 @@ POSSIBILITY OF SUCH DAMAGE.
 
 namespace libtorrent {
 
+
+	constexpr resolver_flags resolver_interface::cache_only;
+	constexpr resolver_flags resolver_interface::abort_on_shutdown;
+
 	resolver::resolver(io_service& ios)
 		: m_ios(ios)
 		, m_resolver(ios)
@@ -83,31 +87,39 @@ namespace libtorrent {
 		}
 	}
 
-	void resolver::async_resolve(std::string const& host, int const flags
+	void resolver::async_resolve(std::string const& host, resolver_flags const flags
 		, resolver_interface::callback_t const& h)
 	{
-		auto const i = m_cache.find(host);
-		if (i != m_cache.end())
-		{
-			// keep cache entries valid for m_timeout seconds
-			if ((flags & resolver_interface::prefer_cache)
-				|| i->second.last_seen + m_timeout >= aux::time_now())
-			{
-				error_code ec;
-				m_ios.post(std::bind(h, ec, i->second.addresses));
-				return;
-			}
-		}
-
 		// special handling for raw IP addresses. There's no need to get in line
 		// behind actual lookups if we can just resolve it immediately.
 		error_code ec;
-		address const ip = address::from_string(host, ec);
+		address const ip = make_address(host, ec);
 		if (!ec)
 		{
 			std::vector<address> addresses;
 			addresses.push_back(ip);
 			m_ios.post(std::bind(h, ec, addresses));
+			return;
+		}
+		ec.clear();
+
+		auto const i = m_cache.find(host);
+		if (i != m_cache.end())
+		{
+			// keep cache entries valid for m_timeout seconds
+			if ((flags & resolver_interface::cache_only)
+				|| i->second.last_seen + m_timeout >= aux::time_now())
+			{
+				m_ios.post(std::bind(h, ec, i->second.addresses));
+				return;
+			}
+		}
+
+		if (flags & resolver_interface::cache_only)
+		{
+			// we did not find a cache entry, fail the lookup
+			m_ios.post(std::bind(h, boost::asio::error::host_not_found
+					, std::vector<address>()));
 			return;
 		}
 

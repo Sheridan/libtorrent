@@ -37,6 +37,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "setup_transfer.hpp" // for ep()
 #include "libtorrent/config.hpp"
 #include "libtorrent/kademlia/dht_storage.hpp"
+#include "libtorrent/kademlia/dht_settings.hpp"
 
 #include "libtorrent/io_service.hpp"
 #include "libtorrent/address.hpp"
@@ -47,10 +48,10 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <functional>
 #include <sstream>
 
-using namespace libtorrent;
-using namespace libtorrent::dht;
+using namespace lt;
+using namespace lt::dht;
 using namespace sim;
-using namespace sim::chrono;
+using sim::chrono::high_resolution_clock;
 using namespace sim::asio;
 using sim::simulation;
 using sim::default_config;
@@ -59,8 +60,8 @@ using namespace std::placeholders;
 
 namespace
 {
-	dht_settings test_settings() {
-		dht_settings sett;
+	dht::dht_settings test_settings() {
+		dht::dht_settings sett;
 		sett.max_torrents = 2;
 		sett.max_dht_items = 2;
 		sett.item_lifetime = int(seconds(120 * 60).count());
@@ -68,7 +69,7 @@ namespace
 	}
 
 	std::unique_ptr<dht_storage_interface> create_default_dht_storage(
-		dht_settings const& sett)
+		dht::dht_settings const& sett)
 	{
 		std::unique_ptr<dht_storage_interface> s(dht_default_storage_constructor(sett));
 		TEST_CHECK(s.get() != nullptr);
@@ -83,7 +84,7 @@ void timer_tick(dht_storage_interface* s
 	, dht_storage_counters const& c
 	, boost::system::error_code const&)
 {
-	libtorrent::aux::update_time_now();
+	lt::aux::update_time_now();
 	s->tick();
 
 	TEST_EQUAL(s->counters().peers, c.peers);
@@ -110,7 +111,7 @@ void test_expiration(high_resolution_clock::duration const& expiry_time
 
 TORRENT_TEST(dht_storage_counters)
 {
-	dht_settings sett = test_settings();
+	dht::dht_settings sett = test_settings();
 	std::unique_ptr<dht_storage_interface> s(create_default_dht_storage(sett));
 
 	TEST_CHECK(s.get() != nullptr);
@@ -164,7 +165,7 @@ TORRENT_TEST(dht_storage_counters)
 
 TORRENT_TEST(dht_storage_infohashes_sample)
 {
-	dht_settings sett = test_settings();
+	dht::dht_settings sett = test_settings();
 	sett.max_torrents = 5;
 	sett.sample_infohashes_interval = 30;
 	sett.max_infohashes_sample_count = 2;
@@ -199,7 +200,7 @@ TORRENT_TEST(dht_storage_infohashes_sample)
 	timer.expires_from_now(hours(1)); // expiration of torrents
 	timer.async_wait([&s](boost::system::error_code const& ec)
 	{
-		libtorrent::aux::update_time_now();
+		lt::aux::update_time_now();
 		// tick here to trigger the torrents expiration
 		s->tick();
 

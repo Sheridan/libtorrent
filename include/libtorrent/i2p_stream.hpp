@@ -43,9 +43,9 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <functional>
 
 #include "libtorrent/proxy_base.hpp"
-#include "libtorrent/session_settings.hpp"
 #include "libtorrent/string_util.hpp"
 #include "libtorrent/aux_/vector.hpp"
+#include "libtorrent/aux_/proxy_settings.hpp"
 
 namespace libtorrent {
 
@@ -84,7 +84,9 @@ class i2p_stream : public proxy_base
 public:
 
 	explicit i2p_stream(io_service& io_service);
+#if TORRENT_USE_ASSERTS
 	~i2p_stream();
+#endif
 
 	enum command_t
 	{
@@ -100,7 +102,7 @@ public:
 
 	void set_session_id(char const* id) { m_id = id; }
 
-	void set_destination(std::string const& d) { m_dest = d; }
+	void set_destination(string_view d) { m_dest = d.to_string(); }
 	std::string const& destination() { return m_dest; }
 
 	template <class Handler>
@@ -142,7 +144,7 @@ private:
 	// send and receive buffer
 	aux::vector<char> m_buffer;
 	char const* m_id;
-	int m_command; // 0 = connect, 1 = accept
+	command_t m_command;
 	std::string m_dest;
 	std::string m_name_lookup;
 
@@ -155,7 +157,7 @@ private:
 		read_name_lookup_response
 	};
 
-	int m_state;
+	state_t m_state;
 #if TORRENT_USE_ASSERTS
 	int m_magic;
 #endif
@@ -181,7 +183,7 @@ public:
 	char const* session_id() const { return m_session_id.c_str(); }
 	std::string const& local_endpoint() const { return m_i2p_local_endpoint; }
 
-	typedef std::function<void(error_code const&, char const*)> name_lookup_handler;
+	using name_lookup_handler = std::function<void(error_code const&, char const*)>;
 	void async_name_lookup(char const* name, name_lookup_handler handler);
 
 private:

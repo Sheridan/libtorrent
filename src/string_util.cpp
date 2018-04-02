@@ -39,27 +39,24 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/assert.hpp"
 
 #include <cstdlib> // for malloc
-#include <cstring> // for memmov/strcpy/strlen
+#include <cstring> // for strlen
+#include <algorithm> // for search
 
 namespace libtorrent {
 
-	// lexical_cast's result depends on the locale. We need
-	// a well defined result
+	// We need well defined results that don't depend on locale
 	std::array<char, 4 + std::numeric_limits<std::int64_t>::digits10>
 		to_string(std::int64_t const n)
 	{
 		std::array<char, 4 + std::numeric_limits<std::int64_t>::digits10> ret;
 		char *p = &ret.back();
 		*p = '\0';
-		std::uint64_t un = std::uint64_t(n);
-#ifdef _MSC_VER
-#pragma warning(push)
-#pragma warning(disable : 4146 ) /* warning C4146: unary minus operator applied to unsigned type */
-#endif // _MSC_VER
-		if (n < 0)  un = -un;
-#ifdef _MSC_VER
-#pragma warning(pop)
-#endif // _MSC_VER
+		// we want "un" to be the absolute value
+		// since the absolute of INT64_MIN cannot be represented by a signed
+		// int64, we calculate the abs in unsigned space
+		std::uint64_t un = n < 0
+			? std::numeric_limits<std::uint64_t>::max() - std::uint64_t(n) + 1
+			: std::uint64_t(n);
 		do {
 			*--p = '0' + un % 10;
 			un /= 10;
@@ -81,8 +78,7 @@ namespace libtorrent {
 
 	bool is_space(char c)
 	{
-		static const char* ws = " \t\n\r\f\v";
-		return strchr(ws, c) != nullptr;
+		return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
 	}
 
 	char to_lower(char c)
@@ -133,7 +129,7 @@ namespace libtorrent {
 	}
 
 	// generate a url-safe random string
-	void url_random(char* begin, char* end)
+	void url_random(span<char> dest)
 	{
 		// http-accepted characters:
 		// excluding ', since some buggy trackers don't support that
@@ -141,8 +137,8 @@ namespace libtorrent {
 			"abcdefghijklmnopqrstuvwxyz-_.!~*()";
 
 		// the random number
-		while (begin != end)
-			*begin++ = printable[random(sizeof(printable) - 2)];
+		for (char& c : dest)
+			c = printable[random(sizeof(printable) - 2)];
 	}
 
 	bool string_ends_with(string_view s1, string_view s2)
@@ -150,13 +146,26 @@ namespace libtorrent {
 		return s1.size() >= s2.size() && std::equal(s2.rbegin(), s2.rend(), s1.rbegin());
 	}
 
+	int search(span<char const> src, span<char const> target)
+	{
+		TORRENT_ASSERT(!src.empty());
+		TORRENT_ASSERT(!target.empty());
+		TORRENT_ASSERT(target.size() >= src.size());
+		TORRENT_ASSERT(target.size() < std::size_t(std::numeric_limits<int>::max()));
+
+		auto const it = std::search(target.begin(), target.end(), src.begin(), src.end());
+
+		// no complete sync
+		if (it == target.end()) return -1;
+		return static_cast<int>(it - target.begin());
+	}
+
 	char* allocate_string_copy(char const* str)
 	{
 		if (str == nullptr) return nullptr;
 		std::size_t const len = std::strlen(str);
-		char* tmp = static_cast<char*>(std::malloc(len + 1));
-		if (tmp == nullptr) return nullptr;
-		std::memcpy(tmp, str, len);
+		auto* tmp = new char[len + 1];
+		std::copy(str, str + len, tmp);
 		tmp[len] = '\0';
 		return tmp;
 	}
@@ -166,26 +175,26 @@ namespace libtorrent {
 		std::string ret;
 		for (auto const& i : in)
 		{
-			if (!ret.empty()) ret += ",";
+			if (!ret.empty()) ret += ',';
 
 #if TORRENT_USE_IPV6
 			error_code ec;
-			address_v6::from_string(i.device, ec);
+			make_address_v6(i.device, ec);
 			if (!ec)
 			{
 				// IPv6 addresses must be wrapped in square brackets
-				ret += "[";
+				ret += '[';
 				ret += i.device;
-				ret += "]";
+				ret += ']';
 			}
 			else
 #endif
 			{
 				ret += i.device;
 			}
-			ret += ":";
+			ret += ':';
 			ret += to_string(i.port).data();
-			if (i.ssl) ret += "s";
+			if (i.ssl) ret += 's';
 		}
 
 		return ret;
@@ -319,7 +328,7 @@ namespace libtorrent {
 
 			if (colon != std::string::npos && colon > start)
 			{
-				int port = atoi(in.substr(colon + 1, end - colon - 1).c_str());
+				int port = std::atoi(in.substr(colon + 1, end - colon - 1).c_str());
 
 				// skip trailing spaces
 				std::string::size_type soft_end = colon;
@@ -332,7 +341,7 @@ namespace libtorrent {
 				if (in[start] == '[') ++start;
 				if (soft_end > start && in[soft_end-1] == ']') --soft_end;
 
-				out.push_back(std::make_pair(in.substr(start, soft_end - start), port));
+				out.emplace_back(in.substr(start, soft_end - start), port);
 			}
 
 			start = end + 1;
@@ -359,7 +368,7 @@ namespace libtorrent {
 			// skip trailing spaces
 			std::string::size_type soft_end = end;
 			while (soft_end > start
-				&& is_space(in[soft_end-1]))
+				&& is_space(in[soft_end - 1]))
 				--soft_end;
 
 			out.push_back(in.substr(start, soft_end - start));
@@ -367,25 +376,30 @@ namespace libtorrent {
 		}
 	}
 
-	char* string_tokenize(char* last, char sep, char** next)
+	std::pair<string_view, string_view> split_string(string_view last, char const sep)
 	{
-		if (last == nullptr) return nullptr;
-		if (last[0] == '"')
+		if (last.empty()) return {{}, {}};
+
+		std::size_t pos = 0;
+		if (last[0] == '"' && sep != '"')
 		{
-			*next = strchr(last + 1, '"');
-			// consume the actual separator as well.
-			if (*next != nullptr)
-				*next = strchr(*next, sep);
+			for (auto const c : last.substr(1))
+			{
+				++pos;
+				if (c == '"') break;
+			}
 		}
-		else
+		std::size_t found_sep = 0;
+		for (char const c : last.substr(pos))
 		{
-			*next = strchr(last, sep);
+			if (c == sep)
+			{
+				found_sep = 1;
+				break;
+			}
+			++pos;
 		}
-		if (*next == nullptr) return last;
-		**next = 0;
-		++(*next);
-		while (**next == sep && **next) ++(*next);
-		return last;
+		return {last.substr(0, pos), last.substr(pos + found_sep)};
 	}
 
 #if TORRENT_USE_I2P
@@ -402,4 +416,27 @@ namespace libtorrent {
 
 #endif
 
+	std::size_t string_hash_no_case::operator()(std::string const& s) const
+	{
+		std::size_t ret = 5381;
+		for (auto const c : s)
+			ret = (ret * 33) ^ static_cast<std::size_t>(to_lower(c));
+		return ret;
+	}
+
+	bool string_eq_no_case::operator()(std::string const& lhs, std::string const& rhs) const
+	{
+		if (lhs.size() != rhs.size()) return false;
+
+		auto s1 = lhs.cbegin();
+		auto s2 = rhs.cbegin();
+
+		while (s1 != lhs.end() && s2 != rhs.end())
+		{
+			if (to_lower(*s1) != to_lower(*s2)) return false;
+			++s1;
+			++s2;
+		}
+		return true;
+	}
 }

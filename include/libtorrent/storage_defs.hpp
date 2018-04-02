@@ -36,6 +36,8 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/config.hpp"
 #include "libtorrent/units.hpp"
 #include "libtorrent/aux_/vector.hpp"
+#include "libtorrent/sha1_hash.hpp"
+#include "libtorrent/download_priority.hpp"
 #include <functional>
 #include <string>
 
@@ -46,8 +48,7 @@ namespace libtorrent {
 	struct file_pool;
 	class torrent_info;
 
-	struct storage_index_tag_t {};
-	using storage_index_t = aux::strong_typedef<std::uint32_t, storage_index_tag_t>;
+	using storage_index_t = aux::strong_typedef<std::uint32_t, struct storage_index_tag_t>;
 
 	// types of storage allocation used for add_torrent_params::storage_mode.
 	enum storage_mode_t
@@ -72,7 +73,7 @@ namespace libtorrent {
 	};
 
 	// flags for async_move_storage
-	enum move_flags_t
+	enum class move_flags_t : std::uint8_t
 	{
 		// replace any files in the destination when copying
 		// or moving the storage
@@ -92,14 +93,35 @@ namespace libtorrent {
 		dont_replace
 	};
 
+#ifndef TORRENT_NO_DEPRECATE
+	// deprecated in 1.2
+	enum deprecated_move_flags_t
+	{
+		always_replace_files TORRENT_DEPRECATED_ENUM,
+		fail_if_exist TORRENT_DEPRECATED_ENUM,
+		dont_replace TORRENT_DEPRECATED_ENUM
+	};
+#endif
+
 	struct TORRENT_EXPORT storage_params
 	{
-		file_storage const* files = nullptr;
+		storage_params(file_storage const& f, file_storage const* mf
+			, std::string const& sp, storage_mode_t const sm
+			, aux::vector<download_priority_t, file_index_t> const& prio
+			, sha1_hash const& ih)
+			: files(f)
+			, mapped_files(mf)
+			, path(sp)
+			, mode(sm)
+			, priorities(prio)
+			, info_hash(ih)
+		{}
+		file_storage const& files;
 		file_storage const* mapped_files = nullptr; // optional
-		std::string path;
+		std::string const& path;
 		storage_mode_t mode{storage_mode_sparse};
-		aux::vector<std::uint8_t, file_index_t> const* priorities = nullptr; // optional
-		torrent_info const* info = nullptr; // optional
+		aux::vector<download_priority_t, file_index_t> const& priorities;
+		sha1_hash const& info_hash;
 	};
 
 	using storage_constructor_type = std::function<storage_interface*(storage_params const& params, file_pool&)>;

@@ -47,6 +47,8 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <malloc.h>
 #elif defined _MSC_VER
 #include <malloc.h>
+#elif defined __FreeBSD__
+#include <malloc_np.h>
 #elif defined TORRENT_BSD
 #include <malloc/malloc.h>
 #endif
@@ -81,12 +83,12 @@ public:
 
 		// the actual allocation may be larger than we requested. If so, let the
 		// user take advantage of every single byte
-#if defined __GLIBC__
-		m_size = malloc_usable_size(m_begin);
+#if defined __GLIBC__ || defined __FreeBSD__
+		m_size = ::malloc_usable_size(m_begin);
 #elif defined _MSC_VER
-		m_size = _msize(m_begin);
+		m_size = ::_msize(m_begin);
 #elif defined TORRENT_BSD
-		m_size = malloc_size(m_begin);
+		m_size = ::malloc_size(m_begin);
 #else
 		m_size = size;
 #endif
@@ -98,7 +100,7 @@ public:
 		: buffer(size)
 	{
 		TORRENT_ASSERT(initialize.size() <= size);
-		if (initialize.size() > 0)
+		if (!initialize.empty())
 		{
 			std::memcpy(m_begin, initialize.data(), (std::min)(initialize.size(), size));
 		}
@@ -157,4 +159,4 @@ private:
 
 }
 
-#endif // BTORRENT_BUFFER_HPP_INCLUDED
+#endif // TORRENT_BUFFER_HPP_INCLUDED

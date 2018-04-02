@@ -8,19 +8,7 @@
 #include <libtorrent/bitfield.hpp>
 
 using namespace boost::python;
-using namespace libtorrent;
-
-object bitfield_to_list(bitfield const& bf)
-{
-	list ret;
-
-	for (bitfield::const_iterator i(bf.begin()), e(bf.end()); i != e; ++i)
-		ret.append(*i);
-	return ret;
-}
-
-object pieces(torrent_status const& s) { return bitfield_to_list(s.pieces); }
-object verified_pieces(torrent_status const& s) { return bitfield_to_list(s.verified_pieces); }
+using namespace lt;
 
 using by_value = return_value_policy<return_by_value>;
 std::shared_ptr<const torrent_info> get_torrent_file(torrent_status const& st)
@@ -36,10 +24,12 @@ void bind_torrent_status()
         .def_readonly("info_hash", &torrent_status::info_hash)
         .add_property("torrent_file", &get_torrent_file)
         .def_readonly("state", &torrent_status::state)
+#ifndef TORRENT_NO_DEPRECATE
         .def_readonly("paused", &torrent_status::paused)
         .def_readonly("stop_when_ready", &torrent_status::stop_when_ready)
         .def_readonly("auto_managed", &torrent_status::auto_managed)
         .def_readonly("sequential_download", &torrent_status::sequential_download)
+#endif
         .def_readonly("is_seeding", &torrent_status::is_seeding)
         .def_readonly("is_finished", &torrent_status::is_finished)
         .def_readonly("has_metadata", &torrent_status::has_metadata)
@@ -67,8 +57,8 @@ void bind_torrent_status()
         .def_readonly("list_seeds", &torrent_status::list_seeds)
         .def_readonly("list_peers", &torrent_status::list_peers)
         .def_readonly("connect_candidates", &torrent_status::connect_candidates)
-        .add_property("pieces", &pieces)
-        .add_property("verified_pieces", &verified_pieces)
+        .add_property("pieces", make_getter(&torrent_status::pieces, by_value()))
+        .add_property("verified_pieces", make_getter(&torrent_status::verified_pieces, by_value()))
         .def_readonly("num_pieces", &torrent_status::num_pieces)
         .def_readonly("total_done", &torrent_status::total_done)
         .def_readonly("total_wanted_done", &torrent_status::total_wanted_done)
@@ -88,11 +78,11 @@ void bind_torrent_status()
         .def_readonly("all_time_download", &torrent_status::all_time_download)
         .def_readonly("seed_rank", &torrent_status::seed_rank)
         .def_readonly("has_incoming", &torrent_status::has_incoming)
+#ifndef TORRENT_NO_DEPRECATE
         .def_readonly("seed_mode", &torrent_status::seed_mode)
         .def_readonly("upload_mode", &torrent_status::upload_mode)
         .def_readonly("share_mode", &torrent_status::share_mode)
         .def_readonly("super_seeding", &torrent_status::super_seeding)
-#ifndef TORRENT_NO_DEPRECATE
         .def_readonly("active_time", &torrent_status::active_time)
         .def_readonly("finished_time", &torrent_status::finished_time)
         .def_readonly("seeding_time", &torrent_status::seeding_time)
@@ -103,15 +93,17 @@ void bind_torrent_status()
         .def_readonly("time_since_download", &torrent_status::time_since_download)
 #endif
         .def_readonly("errc", &torrent_status::errc)
-        .def_readonly("error_file", &torrent_status::error_file)
+        .add_property("error_file", make_getter(&torrent_status::error_file, by_value()))
         .def_readonly("name", &torrent_status::name)
         .def_readonly("save_path", &torrent_status::save_path)
         .def_readonly("added_time", &torrent_status::added_time)
         .def_readonly("completed_time", &torrent_status::completed_time)
         .def_readonly("last_seen_complete", &torrent_status::last_seen_complete)
-        .def_readonly("queue_position", &torrent_status::queue_position)
+        .add_property("queue_position", make_getter(&torrent_status::queue_position, by_value()))
         .def_readonly("need_save_resume", &torrent_status::need_save_resume)
+#ifndef TORRENT_NO_DEPRECATE
         .def_readonly("ip_filter_applies", &torrent_status::ip_filter_applies)
+#endif
         .def_readonly("moving_storage", &torrent_status::moving_storage)
 #ifndef TORRENT_NO_DEPRECATE
         .def_readonly("is_loaded", &torrent_status::is_loaded)
@@ -125,6 +117,7 @@ void bind_torrent_status()
         .add_property("active_duration", make_getter(&torrent_status::active_duration, by_value()))
         .add_property("finished_duration", make_getter(&torrent_status::finished_duration, by_value()))
         .add_property("seeding_duration", make_getter(&torrent_status::seeding_duration, by_value()))
+        .add_property("flags", make_getter(&torrent_status::flags, by_value()))
         ;
 
     enum_<torrent_status::state_t>("states")

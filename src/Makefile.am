@@ -22,6 +22,8 @@ KADEMLIA_SOURCES = \
   kademlia/get_item.cpp         \
   kademlia/item.cpp             \
   kademlia/ed25519.cpp          \
+  kademlia/sample_infohashes.cpp \
+  kademlia/dht_settings.cpp     \
   ../ed25519/src/add_scalar.cpp \
   ../ed25519/src/fe.cpp         \
   ../ed25519/src/ge.cpp         \
@@ -93,6 +95,7 @@ libtorrent_rasterbar_la_SOURCES = \
   ip_notifier.cpp                 \
   ip_voter.cpp                    \
   lazy_bdecode.cpp                \
+  listen_socket_handle.cpp        \
   lsd.cpp                         \
   magnet_uri.cpp                  \
   merkle.cpp                      \
@@ -123,6 +126,7 @@ libtorrent_rasterbar_la_SOURCES = \
   session_handle.cpp              \
   session_impl.cpp                \
   session_settings.cpp            \
+  session_udp_sockets.cpp         \
   proxy_settings.cpp              \
   settings_pack.cpp               \
   sha1_hash.cpp                   \
@@ -159,16 +163,29 @@ libtorrent_rasterbar_la_SOURCES = \
   version.cpp                     \
   file_progress.cpp               \
   ffs.cpp                         \
+  add_torrent_params.cpp          \
+  peer_info.cpp                   \
+  stack_allocator.cpp             \
   \
   $(KADEMLIA_SOURCES)             \
   \
   $(BUILTIN_CRYPTO_SOURCES)
 
+AM_CFLAGS = -I$(top_srcdir)/ed25519/src -std=c99
+AM_CPPFLAGS = -DTORRENT_BUILDING_LIBRARY -I$(top_srcdir)/include -I$(top_srcdir)/ed25519/src @DEBUGFLAGS@ @OPENSSL_INCLUDES@
+AM_LDFLAGS = @OPENSSL_LDFLAGS@
+
 libtorrent_rasterbar_la_LDFLAGS = -version-info $(INTERFACE_VERSION_INFO)
 libtorrent_rasterbar_la_LIBADD = @OPENSSL_LIBS@
+libtorrent_rasterbar_la_CPPFLAGS = $(AM_CPPFLAGS)
 
-AM_CPPFLAGS = -DTORRENT_BUILDING_LIBRARY -I$(top_srcdir)/include -I$(top_srcdir)/ed25519/src @DEBUGFLAGS@ @OPENSSL_INCLUDES@
-AM_CFLAGS = -I$(top_srcdir)/ed25519/src -std=c99
+if HAVE_ANDROID
+libtorrent_rasterbar_la_LIBADD += -ldl
+endif
 
-AM_LDFLAGS = @OPENSSL_LDFLAGS@
+if HAVE_WINDOWS
+libtorrent_rasterbar_la_LIBADD += -liphlpapi -lws2_32 -lwsock32
+libtorrent_rasterbar_la_CPPFLAGS += -DWIN32_LEAN_AND_MEAN -D__USE_W32_SOCKETS -DWIN32 -D_WIN32
+endif
+
 

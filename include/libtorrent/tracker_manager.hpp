@@ -46,9 +46,14 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <unordered_map>
 
 #ifdef TORRENT_USE_OPENSSL
-#include "libtorrent/aux_/disable_warnings_push.hpp"
-#include <boost/asio/ssl/context.hpp>
-#include "libtorrent/aux_/disable_warnings_pop.hpp"
+// there is no forward declaration header for asio
+namespace boost {
+namespace asio {
+namespace ssl {
+	class context;
+}
+}
+}
 #endif
 
 #include "libtorrent/socket.hpp"
@@ -62,6 +67,8 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/time.hpp"
 #include "libtorrent/debug.hpp"
 #include "libtorrent/error_code.hpp"
+#include "libtorrent/aux_/listen_socket_handle.hpp"
+#include "libtorrent/udp_socket.hpp"
 
 namespace libtorrent {
 
@@ -78,9 +85,6 @@ namespace libtorrent {
 #endif
 	namespace aux { struct session_logger; struct session_settings; }
 
-	// returns -1 if gzip header is invalid or the header size in bytes
-	TORRENT_EXTRA_EXPORT int gzip_header(const char* buf, int size);
-
 	struct TORRENT_EXTRA_EXPORT tracker_request
 	{
 		tracker_request()
@@ -96,12 +100,6 @@ namespace libtorrent {
 			, num_want(0)
 			, private_torrent(false)
 			, triggered_manually(false)
-#ifdef TORRENT_USE_OPENSSL
-			, ssl_ctx(0)
-#endif
-#if TORRENT_USE_I2P
-			, i2pconn(0)
-#endif
 		{}
 
 		enum event_t
@@ -147,11 +145,12 @@ namespace libtorrent {
 		std::uint32_t key;
 		int num_want;
 #if TORRENT_USE_IPV6
-		address_v6 ipv6;
+		std::vector<address_v6> ipv6;
 #endif
 		sha1_hash info_hash;
 		peer_id pid;
-		address bind_ip;
+
+		aux::listen_socket_handle outgoing_socket;
 
 		// set to true if the .torrent file this tracker announce is for is marked
 		// as private (i.e. has the "priv": 1 key)
@@ -162,10 +161,10 @@ namespace libtorrent {
 		bool triggered_manually;
 
 #ifdef TORRENT_USE_OPENSSL
-		boost::asio::ssl::context* ssl_ctx;
+		boost::asio::ssl::context* ssl_ctx = nullptr;
 #endif
 #if TORRENT_USE_I2P
-		i2p_connection* i2pconn;
+		i2p_connection* i2pconn = nullptr;
 #endif
 	};
 
@@ -238,22 +237,23 @@ namespace libtorrent {
 			, struct tracker_response const& response) = 0;
 		virtual void tracker_request_error(
 			tracker_request const& req
-			, int response_code
 			, error_code const& ec
 			, const std::string& msg
 			, seconds32 retry_interval) = 0;
 
 #ifndef TORRENT_DISABLE_LOGGING
 		virtual bool should_log() const = 0;
-		virtual void debug_log(const char* fmt, ...) const TORRENT_FORMAT(2,3) = 0;
+		virtual void debug_log(const char* fmt, ...) const noexcept TORRENT_FORMAT(2,3) = 0;
 #endif
 	};
 
 	struct TORRENT_EXTRA_EXPORT timeout_handler
 		: std::enable_shared_from_this<timeout_handler>
-		, boost::noncopyable
 	{
 		explicit timeout_handler(io_service& str);
+
+		timeout_handler(timeout_handler const&) = delete;
+		timeout_handler& operator=(timeout_handler const&) = delete;
 
 		void set_timeout(int completion_timeout, int read_timeout);
 		void restart_read_timeout();
@@ -298,15 +298,16 @@ namespace libtorrent {
 			, std::weak_ptr<request_callback> r);
 
 		std::shared_ptr<request_callback> requester() const;
-		virtual ~tracker_connection() {}
+		~tracker_connection() override {}
 
 		tracker_request const& tracker_req() const { return m_req; }
 
-		void fail(error_code const& ec, int code = -1, char const* msg = ""
+		void fail(error_code const& ec, char const* msg = ""
 			, seconds32 interval = seconds32(0), seconds32 min_interval = seconds32(0));
 		virtual void start() = 0;
 		virtual void close() = 0;
-		address const& bind_interface() const { return m_req.bind_ip; }
+		address bind_interface() const;
+		aux::listen_socket_handle const& bind_socket() const { return m_req.outgoing_socket; }
 		void sent_bytes(int bytes);
 		void received_bytes(int bytes);
 
@@ -322,7 +323,7 @@ namespace libtorrent {
 
 	protected:
 
-		void fail_impl(error_code const& ec, int code = -1, std::string msg = std::string()
+		void fail_impl(error_code const& ec, std::string msg = std::string()
 			, seconds32 interval = seconds32(0), seconds32 min_interval = seconds32(0));
 
 		std::weak_ptr<request_callback> m_requester;
@@ -331,17 +332,18 @@ namespace libtorrent {
 	};
 
 	class TORRENT_EXTRA_EXPORT tracker_manager final
-		: boost::noncopyable
-		, single_threaded
+		: single_threaded
 	{
 	public:
 
-		typedef std::function<void(udp::endpoint const&
+		using send_fun_t = std::function<void(aux::listen_socket_handle const&
+			, udp::endpoint const&
 			, span<char const>
-			, error_code&, int)> send_fun_t;
-		typedef std::function<void(char const*, int
+			, error_code&, udp_send_flags_t)>;
+		using send_fun_hostname_t = std::function<void(aux::listen_socket_handle const&
+			, char const*, int
 			, span<char const>
-			, error_code&, int)> send_fun_hostname_t;
+			, error_code&, udp_send_flags_t)>;
 
 		tracker_manager(send_fun_t const& send_fun
 			, send_fun_hostname_t const& send_fun_hostname
@@ -352,7 +354,11 @@ namespace libtorrent {
 			, aux::session_logger& ses
 #endif
 			);
-		virtual ~tracker_manager();
+
+		~tracker_manager();
+
+		tracker_manager(tracker_manager const&) = delete;
+		tracker_manager& operator=(tracker_manager const&) = delete;
 
 		void queue_request(
 			io_service& ios
@@ -385,11 +391,13 @@ namespace libtorrent {
 		aux::session_settings const& settings() const { return m_settings; }
 		resolver_interface& host_resolver() { return m_host_resolver; }
 
-		void send_hostname(char const* hostname, int port, span<char const> p
-			, error_code& ec, int flags = 0);
+		void send_hostname(aux::listen_socket_handle const& sock
+			, char const* hostname, int port, span<char const> p
+			, error_code& ec, udp_send_flags_t flags = {});
 
-		void send(udp::endpoint const& ep, span<char const> p
-			, error_code& ec, int flags = 0);
+		void send(aux::listen_socket_handle const& sock
+			, udp::endpoint const& ep, span<char const> p
+			, error_code& ec, udp_send_flags_t flags = {});
 
 	private:
 

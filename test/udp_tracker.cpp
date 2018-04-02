@@ -39,6 +39,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/socket_io.hpp"
 #include "libtorrent/io.hpp"
 #include "libtorrent/aux_/time.hpp"
+#include "libtorrent/broadcast_socket.hpp" // for is_v6
 #include "udp_tracker.hpp"
 #include "test_utils.hpp"
 
@@ -47,13 +48,13 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <atomic>
 #include <memory>
 
-using namespace libtorrent;
+using namespace lt;
 using namespace std::placeholders;
 
 struct udp_tracker
 {
 
-	libtorrent::io_service m_ios;
+	lt::io_service m_ios;
 	std::atomic<int> m_udp_announces{0};
 	udp::socket m_socket{m_ios};
 	int m_port = 0;
@@ -133,7 +134,7 @@ struct udp_tracker
 				detail::write_uint32(1, ptr); // complete
 				// 1 peers
 #if TORRENT_USE_IPV6
-				if (from->address().is_v6())
+				if (is_v6(*from))
 				{
 					detail::write_uint32(0, ptr);
 					detail::write_uint32(0, ptr);

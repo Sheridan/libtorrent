@@ -31,15 +31,19 @@ POSSIBILITY OF SUCH DAMAGE.
 */
 
 #include <cctype>
+#include <cstring>
 #include <algorithm>
 #include <cstdlib>
+#include <cinttypes>
 
 #include "libtorrent/config.hpp"
 #include "libtorrent/http_parser.hpp"
+#include "libtorrent/hex.hpp" // for hex_to_int
 #include "libtorrent/assert.hpp"
 #include "libtorrent/parse_url.hpp" // for parse_url_components
-#include "libtorrent/string_util.hpp" // for allocate_string_copy
+#include "libtorrent/string_util.hpp" // for ensure_trailing_slash, to_lower
 #include "libtorrent/aux_/escape_string.hpp" // for read_until
+#include "libtorrent/time.hpp" // for seconds32
 
 namespace libtorrent {
 
@@ -121,11 +125,29 @@ namespace libtorrent {
 			// however, we may still need to insert a '/' in case neither side
 			// has one. We know the location doesn't start with a / already.
 			// so, if the referrer doesn't end with one, add it.
-			if (url.empty() || url[url.size() - 1] != '/')
-				url += '/';
+			ensure_trailing_slash(url);
 			url += location;
 		}
 		return url;
+	}
+
+	std::string const& http_parser::header(string_view const key) const
+	{
+		static std::string const empty;
+		// TODO: remove to_string() if we're in C++14
+		auto const i = m_header.find(key.to_string());
+		if (i == m_header.end()) return empty;
+		return i->second;
+	}
+
+	boost::optional<seconds32> http_parser::header_duration(string_view const key) const
+	{
+		// TODO: remove to_string() if we're in C++14
+		auto const i = m_header.find(key.to_string());
+		if (i == m_header.end()) return boost::none;
+		auto const val = std::atol(i->second.c_str());
+		if (val <= 0) return boost::none;
+		return seconds32(val);
 	}
 
 	http_parser::~http_parser() = default;
@@ -368,15 +390,13 @@ restart_response:
 						if (chunk_size == 0)
 						{
 							m_finished = true;
-							TORRENT_ASSERT(m_content_length < 0 || m_recv_pos - m_body_start_pos
-								- m_chunk_header_size == m_content_length);
 						}
 						header_size -= m_partial_chunk_header;
 						m_partial_chunk_header = 0;
-//						std::fprintf(stderr, "parse_chunk_header(%d, -> %d, -> %d) -> %d\n"
-//							"  incoming = %d\n  m_recv_pos = %d\n  m_cur_chunk_end = %d\n"
+//						std::fprintf(stderr, "parse_chunk_header(%d, -> %" PRId64 ", -> %d) -> %d\n"
+//							"  incoming = %d\n  m_recv_pos = %d\n  m_cur_chunk_end = %" PRId64 "\n"
 //							"  content-length = %d\n"
-//							, buf.size(), int(chunk_size), header_size, 1, incoming, int(m_recv_pos)
+//							, int(buf.size()), chunk_size, header_size, 1, incoming, int(m_recv_pos)
 //							, m_cur_chunk_end, int(m_content_length));
 					}
 					else
@@ -384,10 +404,10 @@ restart_response:
 						m_partial_chunk_header += incoming;
 						header_size = incoming;
 
-//						std::fprintf(stderr, "parse_chunk_header(%d, -> %d, -> %d) -> %d\n"
-//							"  incoming = %d\n  m_recv_pos = %d\n  m_cur_chunk_end = %d\n"
+//						std::fprintf(stderr, "parse_chunk_header(%d, -> %" PRId64 ", -> %d) -> %d\n"
+//							"  incoming = %d\n  m_recv_pos = %d\n  m_cur_chunk_end = %" PRId64 "\n"
 //							"  content-length = %d\n"
-//							, buf.size(), int(chunk_size), header_size, 0, incoming, int(m_recv_pos)
+//							, int(buf.size()), chunk_size, header_size, 0, incoming, int(m_recv_pos)
 //							, m_cur_chunk_end, int(m_content_length));
 					}
 					m_chunk_header_size += header_size;
@@ -428,6 +448,9 @@ restart_response:
 		return ret;
 	}
 
+	// this function signals error by assigning a negative value to "chunk_size"
+	// the return value indicates whether enough data is available in "buf" to
+	// completely parse the chunk header. Returning false means we need more data
 	bool http_parser::parse_chunk_header(span<char const> buf
 		, std::int64_t* chunk_size, int* header_size)
 	{
@@ -452,15 +475,36 @@ restart_response:
 		// there are extra tail headers, which is terminated by an
 		// empty line
 
+		*header_size = int(newline - buf.data());
+
 		// first, read the chunk length
-		*chunk_size = std::strtoll(pos, nullptr, 16);
-		if (*chunk_size < 0) return true;
+		std::int64_t size = 0;
+		for (char const* i = pos; i != newline; ++i)
+		{
+			if (*i == '\r') continue;
+			if (*i == '\n') continue;
+			if (*i == ';') break;
+			int const digit = aux::hex_to_int(*i);
+			if (digit < 0)
+			{
+				*chunk_size = -1;
+				return true;
+			}
+			if (size >= std::numeric_limits<std::int64_t>::max() / 16)
+			{
+				*chunk_size = -1;
+				return true;
+			}
+			size *= 16;
+			size += digit;
+		}
+		*chunk_size = size;
 
 		if (*chunk_size != 0)
 		{
-			*header_size = int(newline - buf.data());
-			// the newline alone is two bytes
-			TORRENT_ASSERT(newline - buf.data() > 2);
+			// the newline is at least 1 byte, and the length-prefix is at least 1
+			// byte
+			TORRENT_ASSERT(newline - buf.data() >= 2);
 			return true;
 		}
 
@@ -547,28 +591,28 @@ restart_response:
 		m_partial_chunk_header = 0;
 	}
 
-	int http_parser::collapse_chunk_headers(char* buffer, int size) const
+	span<char> http_parser::collapse_chunk_headers(span<char> buffer) const
 	{
-		if (!chunked_encoding()) return size;
+		if (!chunked_encoding()) return buffer;
 
 		// go through all chunks and compact them
 		// since we're bottled, and the buffer is our after all
 		// it's OK to mutate it
-		char* write_ptr = buffer;
+		char* write_ptr = buffer.data();
 		// the offsets in the array are from the start of the
 		// buffer, not start of the body, so subtract the size
 		// of the HTTP header from them
-		int const offset = body_start();
+		std::size_t const offset = static_cast<std::size_t>(body_start());
 		for (auto const& i : chunks())
 		{
-			TORRENT_ASSERT(i.second - i.first < (std::numeric_limits<int>::max)());
-			TORRENT_ASSERT(i.second - offset <= size);
-			int len = int(i.second - i.first);
-			if (i.first - offset + len > size) len = size - int(i.first) + offset;
-			std::memmove(write_ptr, buffer + i.first - offset, std::size_t(len));
-			write_ptr += len;
+			size_t const chunk_start = static_cast<std::size_t>(i.first);
+			size_t const chunk_end = static_cast<std::size_t>(i.second);
+			TORRENT_ASSERT(i.second - i.first < std::numeric_limits<int>::max());
+			TORRENT_ASSERT(chunk_end - offset <= buffer.size());
+			span<char> chunk = buffer.subspan(chunk_start - offset, chunk_end - chunk_start);
+			std::memmove(write_ptr, chunk.data(), chunk.size());
+			write_ptr += chunk.size();
 		}
-		size = int(write_ptr - buffer);
-		return size;
+		return buffer.first(static_cast<std::size_t>(write_ptr - buffer.data()));
 	}
 }

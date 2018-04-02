@@ -40,6 +40,7 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #include <libtorrent/config.hpp>
 #include <libtorrent/kademlia/dht_storage.hpp>
+#include <libtorrent/kademlia/dht_settings.hpp>
 #include <libtorrent/kademlia/routing_table.hpp>
 #include <libtorrent/kademlia/rpc_manager.hpp>
 #include <libtorrent/kademlia/node_id.hpp>
@@ -48,12 +49,12 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #include <libtorrent/socket.hpp> // for udp::endpoint
 #include <libtorrent/string_view.hpp>
+#include <libtorrent/aux_/listen_socket_handle.hpp>
 
 namespace libtorrent {
 
 	struct counters;
 	struct dht_routing_bucket;
-	struct dht_settings;
 }
 
 namespace libtorrent { namespace dht {
@@ -67,33 +68,39 @@ TORRENT_EXTRA_EXPORT entry write_nodes_entry(std::vector<node_entry> const& node
 class announce_observer : public observer
 {
 public:
-	announce_observer(std::shared_ptr<traversal_algorithm> const& algo
+	announce_observer(std::shared_ptr<traversal_algorithm> algo
 		, udp::endpoint const& ep, node_id const& id)
-		: observer(algo, ep, id)
+		: observer(std::move(algo), ep, id)
 	{}
 
-	void reply(msg const&) { flags |= flag_done; }
+	void reply(msg const&) override { flags |= flag_done; }
 };
 
-struct udp_socket_interface
+struct socket_manager
 {
 	virtual bool has_quota() = 0;
-	virtual bool send_packet(entry& e, udp::endpoint const& addr) = 0;
+	virtual bool send_packet(aux::listen_socket_handle const& s, entry& e, udp::endpoint const& addr) = 0;
 protected:
-	~udp_socket_interface() {}
+	~socket_manager() = default;
 };
 
-class TORRENT_EXTRA_EXPORT node : boost::noncopyable
+// get the closest node to the id with the given family_name
+using get_foreign_node_t = std::function<node*(node_id const&, std::string const&)>;
+
+class TORRENT_EXTRA_EXPORT node
 {
 public:
-	node(udp proto, udp_socket_interface* sock
-		, libtorrent::dht_settings const& settings
+	node(aux::listen_socket_handle const& sock, socket_manager* sock_man
+		, dht_settings const& settings
 		, node_id const& nid
 		, dht_observer* observer, counters& cnt
-		, std::map<std::string, node*> const& nodes
+		, get_foreign_node_t get_foreign_node
 		, dht_storage_interface& storage);
 
 	~node();
+
+	node(node const&) = delete;
+	node& operator=(node const&) = delete;
 
 	void update_node_id();
 
@@ -103,7 +110,7 @@ public:
 	void add_router_node(udp::endpoint const& router);
 
 	void unreachable(udp::endpoint const& ep);
-	void incoming(msg const& m);
+	void incoming(aux::listen_socket_handle const& s, msg const& m);
 
 #ifndef TORRENT_NO_DEPRECATE
 	int num_torrents() const { return int(m_storage.num_torrents()); }
@@ -145,6 +152,11 @@ public:
 		, std::function<void(item const&, int)> f
 		, std::function<void(item&)> data_cb);
 
+	void sample_infohashes(udp::endpoint const& ep, sha1_hash const& target
+		, std::function<void(time_duration
+			, int, std::vector<sha1_hash>
+			, std::vector<std::pair<sha1_hash, udp::endpoint>>)> f);
+
 	bool verify_token(string_view token, sha1_hash const& info_hash
 		, udp::endpoint const& addr) const;
 
@@ -185,7 +197,7 @@ public:
 	void status(libtorrent::session_status& s);
 #endif
 
-	libtorrent::dht_settings const& settings() const { return m_settings; }
+	dht_settings const& settings() const { return m_settings; }
 	counters& stats_counters() const { return m_counters; }
 
 	dht_observer* observer() const { return m_observer; }
@@ -211,7 +223,7 @@ private:
 	bool lookup_peers(sha1_hash const& info_hash, entry& reply
 		, bool noseed, bool scrape, address const& requester) const;
 
-	libtorrent::dht_settings const& m_settings;
+	dht_settings const& m_settings;
 
 	std::mutex m_mutex;
 
@@ -229,6 +241,7 @@ private:
 public:
 	routing_table m_table;
 	rpc_manager m_rpc;
+	aux::listen_socket_handle const m_sock;
 
 private:
 
@@ -241,7 +254,9 @@ private:
 
 	static protocol_descriptor const& map_protocol_to_descriptor(udp protocol);
 
-	std::map<std::string, node*> const& m_nodes;
+	socket_manager* m_sock_man;
+
+	get_foreign_node_t m_get_foreign_node;
 
 	dht_observer* m_observer;
 
@@ -256,7 +271,6 @@ private:
 	// secret random numbers used to create write tokens
 	std::uint32_t m_secret[2];
 
-	udp_socket_interface* m_sock;
 	counters& m_counters;
 
 	dht_storage_interface& m_storage;

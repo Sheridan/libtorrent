@@ -102,6 +102,7 @@ namespace {
 
 	struct stack_frame
 	{
+		stack_frame() : token(0), state(0) {}
 		explicit stack_frame(int const t): token(std::uint32_t(t)), state(0) {}
 		// this is an index into m_tokens
 		std::uint32_t token:31;
@@ -120,10 +121,12 @@ namespace {
 	} // anonymous namespace
 
 
-	// fills in 'val' with what the string between start and the
-	// first occurrence of the delimiter is interpreted as an int.
-	// return the pointer to the delimiter, or 0 if there is a
-	// parse error. val should be initialized to zero
+	// reads the string between start and end, or up to the first occurrance of
+	// 'delimiter', whichever comes first. This string is interpreted as an
+	// integer which is assigned to 'val'. If there's a non-delimiter and
+	// non-digit in the range, a parse error is reported in 'ec'. If the value
+	// cannot be represented by the variable 'val' and overflow error is reported
+	// by 'ec'.
 	char const* parse_int(char const* start, char const* end, char delimiter
 		, std::int64_t& val, bdecode_errors::error_code_enum& ec)
 	{
@@ -134,14 +137,14 @@ namespace {
 				ec = bdecode_errors::expected_digit;
 				return start;
 			}
-			if (val > (std::numeric_limits<std::int64_t>::max)() / 10)
+			if (val > std::numeric_limits<std::int64_t>::max() / 10)
 			{
 				ec = bdecode_errors::overflow;
 				return start;
 			}
 			val *= 10;
 			int digit = *start - '0';
-			if (val > (std::numeric_limits<std::int64_t>::max)() - digit)
+			if (val > std::numeric_limits<std::int64_t>::max() - digit)
 			{
 				ec = bdecode_errors::overflow;
 				return start;
@@ -149,8 +152,6 @@ namespace {
 			val += digit;
 			++start;
 		}
-		if (*start != delimiter)
-			ec = bdecode_errors::expected_colon;
 		return start;
 	}
 
@@ -158,10 +159,10 @@ namespace {
 	struct bdecode_error_category : boost::system::error_category
 	{
 		const char* name() const BOOST_SYSTEM_NOEXCEPT override;
-		std::string message(int ev) const BOOST_SYSTEM_NOEXCEPT override;
+		std::string message(int ev) const override;
 		boost::system::error_condition default_error_condition(
 			int ev) const BOOST_SYSTEM_NOEXCEPT override
-		{ return boost::system::error_condition(ev, *this); }
+		{ return {ev, *this}; }
 	};
 
 	const char* bdecode_error_category::name() const BOOST_SYSTEM_NOEXCEPT
@@ -169,7 +170,7 @@ namespace {
 		return "bdecode error";
 	}
 
-	std::string bdecode_error_category::message(int ev) const BOOST_SYSTEM_NOEXCEPT
+	std::string bdecode_error_category::message(int ev) const
 	{
 		static char const* msgs[] =
 		{
@@ -197,19 +198,9 @@ namespace {
 	{
 		boost::system::error_code make_error_code(error_code_enum e)
 		{
-			return boost::system::error_code(e, bdecode_category());
+			return {e, bdecode_category()};
 		}
 	}
-
-	bdecode_node::bdecode_node()
-		: m_root_tokens(nullptr)
-		, m_buffer(nullptr)
-		, m_buffer_size(0)
-		, m_token_idx(-1)
-		, m_last_index(-1)
-		, m_last_token(-1)
-		, m_size(-1)
-	{}
 
 	bdecode_node::bdecode_node(bdecode_node const& n)
 		: m_tokens(n.m_tokens)
@@ -226,6 +217,7 @@ namespace {
 
 	bdecode_node& bdecode_node::operator=(bdecode_node const& n)
 	{
+		if (&n == this) return *this;
 		m_tokens = n.m_tokens;
 		m_root_tokens = n.m_root_tokens;
 		m_buffer = n.m_buffer;
@@ -243,8 +235,7 @@ namespace {
 		return *this;
 	}
 
-	bdecode_node::bdecode_node(bdecode_node&&) = default;
-	bdecode_node& bdecode_node::operator=(bdecode_node&&) = default;
+	bdecode_node::bdecode_node(bdecode_node&&) noexcept = default;
 
 	bdecode_node::bdecode_node(bdecode_token const* tokens, char const* buf
 		, int len, int idx)
@@ -280,7 +271,7 @@ namespace {
 		m_last_token = -1;
 	}
 
-	void bdecode_node::switch_underlying_buffer(char const* buf)
+	void bdecode_node::switch_underlying_buffer(char const* buf) noexcept
 	{
 		TORRENT_ASSERT(!m_tokens.empty());
 		if (m_tokens.empty()) return;
@@ -288,16 +279,105 @@ namespace {
 		m_buffer = buf;
 	}
 
-	bdecode_node::type_t bdecode_node::type() const
+	bool bdecode_node::has_soft_error(span<char> error) const
+	{
+		if (type() == none_t) return false;
+
+		bdecode_token const* tokens = m_root_tokens;
+		int token = m_token_idx;
+
+		// we don't know what the original depth_limit was
+		// so this has to go on the heap
+		std::vector<int> stack;
+		// make the initial allocation the default depth_limit
+		stack.reserve(100);
+
+		do
+		{
+			switch (tokens[token].type)
+			{
+			case bdecode_token::integer:
+				if (m_buffer[tokens[token].offset + 1] == '0'
+					&& m_buffer[tokens[token].offset + 2] != 'e')
+				{
+					std::snprintf(error.data(), error.size(), "leading zero in integer");
+					return true;
+				}
+				break;
+			case bdecode_token::string:
+				if (m_buffer[tokens[token].offset] == '0'
+					&& m_buffer[tokens[token].offset + 1] != ':')
+				{
+					std::snprintf(error.data(), error.size(), "leading zero in string length");
+					return true;
+				}
+				break;
+			case bdecode_token::dict:
+			case bdecode_token::list:
+				stack.push_back(token);
+				break;
+			case bdecode_token::end:
+				auto const parent = stack.back();
+				stack.pop_back();
+				if (tokens[parent].type == bdecode_token::dict
+					&& token != parent + 1)
+				{
+					// this is the end of a non-empty dict
+					// check the sort order of the keys
+					int k1 = parent + 1;
+					for (;;)
+					{
+						// skip to the first key's value
+						int const v1 = k1 + tokens[k1].next_item;
+						// then to the next key
+						int const k2 = v1 + tokens[v1].next_item;
+
+						// check if k1 was the last key in the dict
+						if (k2 == token)
+							break;
+
+						int const v2 = k2 + tokens[k2].next_item;
+
+						int const k1_start = tokens[k1].offset + tokens[k1].start_offset();
+						int const k1_len = tokens[v1].offset - k1_start;
+						int const k2_start = tokens[k2].offset + tokens[k2].start_offset();
+						int const k2_len = tokens[v2].offset - k2_start;
+
+						int const min_len = std::min(k1_len, k2_len);
+
+						int cmp = std::memcmp(m_buffer + k1_start, m_buffer + k2_start, std::size_t(min_len));
+						if (cmp > 0 || (cmp == 0 && k1_len > k2_len))
+						{
+							std::snprintf(error.data(), error.size(), "unsorted dictionary key");
+							return true;
+						}
+						else if (cmp == 0 && k1_len == k2_len)
+						{
+							std::snprintf(error.data(), error.size(), "duplicate dictionary key");
+							return true;
+						}
+
+						k1 = k2;
+					}
+				}
+				break;
+			}
+
+			++token;
+		} while (!stack.empty());
+		return false;
+	}
+
+	bdecode_node::type_t bdecode_node::type() const noexcept
 	{
 		if (m_token_idx == -1) return none_t;
 		return static_cast<bdecode_node::type_t>(m_root_tokens[m_token_idx].type);
 	}
 
-	bdecode_node::operator bool() const
+	bdecode_node::operator bool() const noexcept
 	{ return m_token_idx != -1; }
 
-	span<char const> bdecode_node::data_section() const
+	span<char const> bdecode_node::data_section() const noexcept
 	{
 		if (m_token_idx == -1) return {};
 
@@ -570,12 +650,13 @@ namespace {
 		// +1 is to skip the 'i'
 		char const* ptr = m_buffer + t.offset + 1;
 		std::int64_t val = 0;
-		bool negative = false;
-		if (*ptr == '-') negative = true;
+		bool const negative = (*ptr == '-');
 		bdecode_errors::error_code_enum ec = bdecode_errors::no_error;
-		parse_int(ptr + negative
+		char const* end = parse_int(ptr + int(negative)
 			, ptr + size, 'e', val, ec);
 		if (ec) return 0;
+		TORRENT_UNUSED(end);
+		TORRENT_ASSERT(end < ptr + size);
 		if (negative) val = -val;
 		return val;
 	}
@@ -795,10 +876,13 @@ namespace {
 					std::int64_t len = t - '0';
 					char const* const str_start = start;
 					++start;
+					if (start >= end) TORRENT_FAIL_BDECODE(bdecode_errors::unexpected_eof);
 					bdecode_errors::error_code_enum e = bdecode_errors::no_error;
 					start = parse_int(start, end, ':', len, e);
 					if (e)
 						TORRENT_FAIL_BDECODE(e);
+					if (start == end)
+						TORRENT_FAIL_BDECODE(bdecode_errors::expected_colon);
 
 					// remaining buffer size excluding ':'
 					ptrdiff_t const buff_size = end - start - 1;
@@ -809,7 +893,9 @@ namespace {
 
 					// skip ':'
 					++start;
-					if (start >= end) TORRENT_FAIL_BDECODE(bdecode_errors::unexpected_eof);
+					// no need to range check start here
+					// the check above ensures that the buffer is long enough to hold
+					// the string's length which guarantees that start <= end
 
 					// the bdecode_token only has 8 bits to keep the header size
 					// in. If it overflows, fail!
@@ -1011,23 +1097,23 @@ done:
 				if (!one_liner) ret += indent_str + 1;
 				for (int i = 0; i < e.list_size(); ++i)
 				{
-					if (i == 0 && one_liner) ret += " ";
+					if (i == 0 && one_liner) ret += ' ';
 					ret += print_entry(e.list_at(i), single_line, indent + 2);
 					if (i < e.list_size() - 1) ret += (one_liner ? ", " : indent_str);
 					else ret += (one_liner ? " " : indent_str + 1);
 				}
-				ret += "]";
+				ret += ']';
 				return ret;
 			}
 			case bdecode_node::dict_t:
 			{
-				ret += "{";
+				ret += '{';
 				bool one_liner = line_longer_than(e, 200) != -1 || single_line;
 
 				if (!one_liner) ret += indent_str + 1;
 				for (int i = 0; i < e.dict_size(); ++i)
 				{
-					if (i == 0 && one_liner) ret += " ";
+					if (i == 0 && one_liner) ret += ' ';
 					std::pair<string_view, bdecode_node> ent = e.dict_at(i);
 					print_string(ret, ent.first, true);
 					ret += ": ";
@@ -1035,7 +1121,7 @@ done:
 					if (i < e.dict_size() - 1) ret += (one_liner ? ", " : indent_str);
 					else ret += (one_liner ? " " : indent_str + 1);
 				}
-				ret += "}";
+				ret += '}';
 				return ret;
 			}
 		}

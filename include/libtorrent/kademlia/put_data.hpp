@@ -47,12 +47,12 @@ class node;
 
 struct put_data: traversal_algorithm
 {
-	typedef std::function<void(item const&, int)> put_callback;
+	using put_callback = std::function<void(item const&, int)>;
 
 	put_data(node& node, put_callback const& callback);
 
-	virtual char const* name() const override;
-	virtual void start() override;
+	char const* name() const override;
+	void start() override;
 
 	void set_data(item const& data) { m_data = data; }
 
@@ -60,8 +60,8 @@ struct put_data: traversal_algorithm
 
 protected:
 
-	virtual void done() override;
-	virtual bool invoke(observer_ptr o) override;
+	void done() override;
+	bool invoke(observer_ptr o) override;
 
 	put_callback m_put_callback;
 	item m_data;
@@ -71,14 +71,14 @@ protected:
 struct put_data_observer : traversal_observer
 {
 	put_data_observer(
-		std::shared_ptr<traversal_algorithm> const& algorithm
-		, udp::endpoint const& ep, node_id const& id, std::string const& token)
-		: traversal_observer(algorithm, ep, id)
-		, m_token(token)
+		std::shared_ptr<traversal_algorithm> algorithm
+		, udp::endpoint const& ep, node_id const& id, std::string token)
+		: traversal_observer(std::move(algorithm), ep, id)
+		, m_token(std::move(token))
 	{
 	}
 
-	virtual void reply(msg const&) { done(); }
+	void reply(msg const&) override { done(); }
 
 	std::string m_token;
 };

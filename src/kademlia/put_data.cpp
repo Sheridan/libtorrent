@@ -39,7 +39,7 @@ POSSIBILITY OF SUCH DAMAGE.
 namespace libtorrent { namespace dht {
 
 put_data::put_data(node& dht_node, put_callback const& callback)
-	: traversal_algorithm(dht_node, (node_id::min)())
+	: traversal_algorithm(dht_node, {})
 	, m_put_callback(callback)
 {}
 
@@ -61,9 +61,9 @@ void put_data::set_targets(std::vector<std::pair<node_entry, std::string>> const
 			, p.first.id, p.second);
 		if (!o) return;
 
-	#if TORRENT_USE_ASSERTS
+#if TORRENT_USE_ASSERTS
 		o->m_in_constructor = false;
-	#endif
+#endif
 		m_results.push_back(std::move(o));
 	}
 }
@@ -87,7 +87,7 @@ bool put_data::invoke(observer_ptr o)
 
 	// TODO: what if o is not an instance of put_data_observer? This need to be
 	// redesigned for better type safety.
-	put_data_observer* po = static_cast<put_data_observer*>(o.get());
+	auto* po = static_cast<put_data_observer*>(o.get());
 
 	entry e;
 	e["y"] = "q";

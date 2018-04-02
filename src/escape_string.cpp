@@ -55,7 +55,6 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #include "libtorrent/utf8.hpp"
 #include "libtorrent/aux_/escape_string.hpp"
-#include "libtorrent/aux_/max_path.hpp" // for TORRENT_MAX_PATH
 #include "libtorrent/string_util.hpp" // for to_string
 #include "libtorrent/aux_/array.hpp"
 
@@ -140,7 +139,7 @@ namespace libtorrent {
 	namespace {
 
 	// the offset is used to ignore the first characters in the unreserved_chars table.
-	std::string escape_string_impl(const char* str, int len, int offset)
+	std::string escape_string_impl(const char* str, int const len, int const offset)
 	{
 		TORRENT_ASSERT(str != nullptr);
 		TORRENT_ASSERT(len >= 0);
@@ -177,7 +176,7 @@ namespace libtorrent {
 		return escape_string_impl(str.data(), int(str.size()), 10);
 	}
 
-	bool need_encoding(char const* str, int len)
+	bool need_encoding(char const* str, int const len)
 	{
 		for (int i = 0; i < len; ++i)
 		{
@@ -190,22 +189,20 @@ namespace libtorrent {
 
 	void convert_path_to_posix(std::string& path)
 	{
-		for (std::string::iterator i = path.begin()
-			, end(path.end()); i != end; ++i)
-			if (*i == '\\') *i = '/';
+		for (char& c : path)
+			if (c == '\\') c = '/';
 	}
 
 #ifdef TORRENT_WINDOWS
 	void convert_path_to_windows(std::string& path)
 	{
-		for (std::string::iterator i = path.begin()
-			, end(path.end()); i != end; ++i)
-			if (*i == '/') *i = '\\';
+		for (char& c : path)
+			if (c == '/') c = '\\';
 	}
 #endif
 
 	// TODO: 2 this should probably be moved into string_util.cpp
-	std::string read_until(char const*& str, char delim, char const* end)
+	std::string read_until(char const*& str, char const delim, char const* end)
 	{
 		TORRENT_ASSERT(str <= end);
 
@@ -305,7 +302,7 @@ namespace libtorrent {
 		aux::array<std::uint8_t, 4> outbuf;
 
 		std::string ret;
-		for (std::string::const_iterator i = s.begin(); i != s.end();)
+		for (auto i = s.cbegin(); i != s.cend();)
 		{
 			// available input is 1,2 or 3 bytes
 			// since we read 3 bytes at a time at most
@@ -340,7 +337,7 @@ namespace libtorrent {
 	}
 
 #if TORRENT_USE_I2P
-	std::string base32encode(string_view s, int flags)
+	std::string base32encode(string_view s, encode_string_flags_t const flags)
 	{
 		static char const base32_table_canonical[] =
 		{
@@ -356,7 +353,7 @@ namespace libtorrent {
 			'q', 'r', 's', 't', 'u', 'v', 'w', 'x',
 			'y', 'z', '2', '3', '4', '5', '6', '7'
 		};
-		char const *base32_table = 0 != (flags & string::lowercase) ? base32_table_lowercase : base32_table_canonical;
+		char const *base32_table = (flags & string::lowercase) ? base32_table_lowercase : base32_table_canonical;
 
 		static aux::array<int, 6> const input_output_mapping{{{0, 2, 4, 5, 7, 8}}};
 
@@ -366,7 +363,7 @@ namespace libtorrent {
 		std::string ret;
 		for (auto i = s.begin(); i != s.end();)
 		{
-			int available_input = std::min(int(inbuf.size()), int(s.end()-i));
+			int available_input = std::min(int(inbuf.size()), int(s.end() - i));
 
 			// clear input buffer
 			inbuf.fill(0);
@@ -392,7 +389,7 @@ namespace libtorrent {
 				ret += base32_table[outbuf[j]];
 			}
 
-			if (0 == (flags & string::no_padding))
+			if (!(flags & string::no_padding))
 			{
 				// write pad
 				for (int j = 0; j < int(outbuf.size()) - num_out; ++j)
@@ -453,7 +450,7 @@ namespace libtorrent {
 			outbuf[4] = ((inbuf[6] & 0x07) << 5) & 0xff;
 			outbuf[4] |= inbuf[7];
 
-			int input_output_mapping[] = {5, 1, 1, 2, 2, 3, 4, 4, 5};
+			static int const input_output_mapping[] = {5, 1, 1, 2, 2, 3, 4, 4, 5};
 			int num_out = input_output_mapping[pad_start];
 
 			// write output
@@ -487,19 +484,19 @@ namespace libtorrent {
 
 		if (url.substr(i, argument.size()) == argument)
 		{
-			auto pos = i + argument.size();
+			auto const pos = i + argument.size();
 			if (out_pos) *out_pos = pos;
 			return url.substr(pos, url.substr(pos).find('&'));
 		}
 		argument.insert(0, "&");
 		i = find(url, argument, i);
 		if (i == std::string::npos) return {};
-		auto pos = i + argument.size();
+		auto const pos = i + argument.size();
 		if (out_pos) *out_pos = pos;
 		return url.substr(pos, find(url, "&", pos) - pos);
 	}
 
-#if defined TORRENT_WINDOWS && TORRENT_USE_WSTRING
+#if defined TORRENT_WINDOWS
 	std::wstring convert_to_wstring(std::string const& s)
 	{
 		error_code ec;
@@ -548,6 +545,18 @@ namespace libtorrent {
 #endif
 
 #if TORRENT_USE_ICONV
+namespace {
+
+	// this is a helper function to deduce the type of the second argument to
+	// the iconv() function.
+
+	template <typename Input>
+	size_t call_iconv(size_t (&fun)(iconv_t, Input**, size_t*, char**, size_t*)
+		, iconv_t cd, char const** in, size_t* insize, char** out, size_t* outsize)
+	{
+		return fun(cd, const_cast<Input**>(in), insize, out, outsize);
+	}
+
 	std::string iconv_convert_impl(std::string const& s, iconv_t h)
 	{
 		std::string ret;
@@ -556,12 +565,11 @@ namespace libtorrent {
 		ret.resize(outsize);
 		char const* in = s.c_str();
 		char* out = &ret[0];
-		// posix has a weird iconv signature. implementations
-		// differ on what this signature should be, so we use
-		// a macro to let config.hpp determine it
-		size_t retval = iconv(h, TORRENT_ICONV_ARG &in, &insize,
-			&out, &outsize);
-		if (retval == (size_t)-1) return s;
+		// posix has a weird iconv() signature. implementations
+		// differ on the type of the second parameter. We use a helper template
+		// to deduce what we need to cast to.
+		std::size_t const retval = call_iconv(::iconv, h, &in, &insize, &out, &outsize);
+		if (retval == size_t(-1)) return s;
 		// if this string has an invalid utf-8 sequence in it, don't touch it
 		if (insize != 0) return s;
 		// not sure why this would happen, but it seems to be possible
@@ -571,6 +579,7 @@ namespace libtorrent {
 		ret.resize(ret.size() - outsize);
 		return ret;
 	}
+} // anonymous namespace
 
 	std::string convert_to_native(std::string const& s)
 	{
@@ -579,7 +588,7 @@ namespace libtorrent {
 		std::lock_guard<std::mutex> l(iconv_mutex);
 
 		// the empty string represents the local dependent encoding
-		static iconv_t iconv_handle = iconv_open("", "UTF-8");
+		static iconv_t iconv_handle = ::iconv_open("", "UTF-8");
 		if (iconv_handle == iconv_t(-1)) return s;
 		return iconv_convert_impl(s, iconv_handle);
 	}
@@ -591,7 +600,7 @@ namespace libtorrent {
 		std::lock_guard<std::mutex> l(iconv_mutex);
 
 		// the empty string represents the local dependent encoding
-		static iconv_t iconv_handle = iconv_open("UTF-8", "");
+		static iconv_t iconv_handle = ::iconv_open("UTF-8", "");
 		if (iconv_handle == iconv_t(-1)) return s;
 		return iconv_convert_impl(s, iconv_handle);
 	}

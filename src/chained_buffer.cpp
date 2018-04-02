@@ -83,14 +83,14 @@ namespace libtorrent {
 
 	// tries to copy the given buffer to the end of the
 	// last chained buffer. If there's not enough room
-	// it returns false
-	char* chained_buffer::append(char const* buf, int const s)
+	// it returns nullptr
+	char* chained_buffer::append(span<char const> buf)
 	{
 		TORRENT_ASSERT(is_single_thread());
 		TORRENT_ASSERT(!m_destructed);
-		char* const insert = allocate_appendix(s);
+		char* const insert = allocate_appendix(static_cast<int>(buf.size()));
 		if (insert == nullptr) return nullptr;
-		std::memcpy(insert, buf, std::size_t(s));
+		std::memcpy(insert, buf.data(), buf.size());
 		return insert;
 	}
 
@@ -137,11 +137,11 @@ namespace libtorrent {
 			if (i->used_size > bytes)
 			{
 				TORRENT_ASSERT(bytes > 0);
-				vec.push_back(Buffer(i->buf, std::size_t(bytes)));
+				vec.emplace_back(i->buf, std::size_t(bytes));
 				break;
 			}
 			TORRENT_ASSERT(i->used_size > 0);
-			vec.push_back(Buffer(i->buf, std::size_t(i->used_size)));
+			vec.emplace_back(i->buf, std::size_t(i->used_size));
 			bytes -= i->used_size;
 		}
 	}

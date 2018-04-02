@@ -34,6 +34,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #define TORRENT_DISK_IO_THREAD
 
 #include "libtorrent/config.hpp"
+#include "libtorrent/debug.hpp"
 #include "libtorrent/storage.hpp"
 #include "libtorrent/allocator.hpp"
 #include "libtorrent/io_service.hpp"
@@ -94,7 +95,7 @@ namespace aux {
 		bool need_readback;
 	};
 
-	typedef tailqueue<disk_io_job> jobqueue_t;
+	using jobqueue_t = tailqueue<disk_io_job>;
 
 	// this struct holds a number of statistics counters
 	// relevant for the disk io thread and disk cache.
@@ -273,7 +274,7 @@ namespace aux {
 
 		// counts only fence jobs that are currently blocking jobs
 		// not fences that are themself blocked
-		int num_fence_jobs[disk_io_job::num_job_ids];
+		int num_fence_jobs[static_cast<int>(job_action_t::num_job_ids)];
 #endif
 	};
 
@@ -284,10 +285,10 @@ namespace aux {
 		, disk_interface
 		, buffer_allocator_interface
 	{
-		disk_io_thread(io_service& ios
-			, counters& cnt
-			, int block_size = 16 * 1024);
+		disk_io_thread(io_service& ios, counters& cnt);
+#if TORRENT_USE_ASSERTS
 		~disk_io_thread();
+#endif
 
 		void set_settings(settings_pack const* sett);
 
@@ -299,18 +300,18 @@ namespace aux {
 
 		void async_read(storage_index_t storage, peer_request const& r
 			, std::function<void(disk_buffer_holder block
-				, std::uint32_t flags, storage_error const& se)> handler, void* requester, std::uint8_t flags = 0) override;
+				, disk_job_flags_t flags, storage_error const& se)> handler, disk_job_flags_t flags = {}) override;
 		bool async_write(storage_index_t storage, peer_request const& r
 			, char const* buf, std::shared_ptr<disk_observer> o
 			, std::function<void(storage_error const&)> handler
-			, std::uint8_t flags = 0) override;
-		void async_hash(storage_index_t storage, piece_index_t piece, std::uint8_t flags
-			, std::function<void(piece_index_t, sha1_hash const&, storage_error const&)> handler, void* requester) override;
-		void async_move_storage(storage_index_t storage, std::string p, std::uint8_t flags
+			, disk_job_flags_t flags = {}) override;
+		void async_hash(storage_index_t storage, piece_index_t piece, disk_job_flags_t flags
+			, std::function<void(piece_index_t, sha1_hash const&, storage_error const&)> handler) override;
+		void async_move_storage(storage_index_t storage, std::string p, move_flags_t flags
 			, std::function<void(status_t, std::string const&, storage_error const&)> handler) override;
 		void async_release_files(storage_index_t storage
 			, std::function<void()> handler = std::function<void()>()) override;
-		void async_delete_files(storage_index_t storage, int options
+		void async_delete_files(storage_index_t storage, remove_flags_t options
 			, std::function<void(storage_error const&)> handler) override;
 		void async_check_files(storage_index_t storage
 			, add_torrent_params const* resume_data
@@ -323,7 +324,7 @@ namespace aux {
 		void async_flush_piece(storage_index_t storage, piece_index_t piece
 			, std::function<void()> handler = std::function<void()>()) override;
 		void async_set_file_priority(storage_index_t storage
-			, aux::vector<std::uint8_t, file_index_t> prio
+			, aux::vector<download_priority_t, file_index_t> prio
 			, std::function<void(storage_error const&)> handler) override;
 
 		void async_clear_piece(storage_index_t storage, piece_index_t index
@@ -347,7 +348,7 @@ namespace aux {
 		std::vector<open_file_state> get_status(storage_index_t) const override;
 
 		// this submits all queued up jobs to the thread
-		void submit_jobs();
+		void submit_jobs() override;
 
 		block_cache* cache() { return &m_disk_cache; }
 
@@ -375,14 +376,12 @@ namespace aux {
 		status_t do_check_fastresume(disk_io_job* j, jobqueue_t& completed_jobs);
 		status_t do_rename_file(disk_io_job* j, jobqueue_t& completed_jobs);
 		status_t do_stop_torrent(disk_io_job* j, jobqueue_t& completed_jobs);
-		status_t do_read_and_hash(disk_io_job* j, jobqueue_t& completed_jobs);
 		status_t do_flush_piece(disk_io_job* j, jobqueue_t& completed_jobs);
 		status_t do_flush_hashed(disk_io_job* j, jobqueue_t& completed_jobs);
 		status_t do_flush_storage(disk_io_job* j, jobqueue_t& completed_jobs);
 		status_t do_trim_cache(disk_io_job* j, jobqueue_t& completed_jobs);
 		status_t do_file_priority(disk_io_job* j, jobqueue_t& completed_jobs);
 		status_t do_clear_piece(disk_io_job* j, jobqueue_t& completed_jobs);
-		status_t do_resolve_links(disk_io_job* j, jobqueue_t& completed_jobs);
 
 		void call_job_handlers();
 
@@ -392,19 +391,21 @@ namespace aux {
 		{
 			explicit job_queue(disk_io_thread& owner) : m_owner(owner) {}
 
-			virtual void notify_all() override
+			void notify_all() override
 			{
 				m_job_cond.notify_all();
 			}
 
 			void thread_fun(disk_io_thread_pool& pool, io_service::work work) override
 			{
+				ADD_OUTSTANDING_ASYNC("disk_io_thread::work");
 				m_owner.thread_fun(*this, pool);
 
 				// w's dtor releases the io_service to allow the run() call to return
 				// we do this once we stop posting new callbacks to it.
 				// after the dtor has been called, the disk_io_thread object may be destructed
 				TORRENT_UNUSED(work);
+				COMPLETE_ASYNC("disk_io_thread::work");
 			}
 
 			disk_io_thread& m_owner;
@@ -516,10 +517,6 @@ namespace aux {
 
 		aux::session_settings m_settings;
 
-		// userdata pointer for the complete_job function, which
-		// is posted to the network thread when jobs complete
-		void* m_userdata;
-
 		// the last time we expired write blocks from the cache
 		time_point m_last_cache_expiry = min_time();
 
@@ -547,18 +544,6 @@ namespace aux {
 
 		counters& m_stats_counters;
 
-		// average read time for cache misses (in microseconds)
-		average_accumulator m_read_time;
-
-		// average write time (in microseconds)
-		average_accumulator m_write_time;
-
-		// average hash time (in microseconds)
-		average_accumulator m_hash_time;
-
-		// average time to serve a job (any job) in microseconds
-		average_accumulator m_job_time;
-
 		// this is the main thread io_service. Callbacks are
 		// posted on this in order to have them execute in
 		// the main thread.
@@ -575,6 +560,7 @@ namespace aux {
 		// storages that have had write activity recently and will get ticked
 		// soon, for deferred actions (say, flushing partfile metadata)
 		std::vector<std::pair<time_point, std::weak_ptr<storage_interface>>> m_need_tick;
+		std::mutex m_need_tick_mutex;
 
 		// this is protected by the completed_jobs_mutex. It's true whenever
 		// there's a call_job_handlers message in-flight to the network thread. We

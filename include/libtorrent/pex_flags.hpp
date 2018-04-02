@@ -1,6 +1,6 @@
 /*
 
-Copyright (c) 2016, Arvid Norberg
+Copyright (c) 2017, Arvid Norberg
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -30,20 +30,22 @@ POSSIBILITY OF SUCH DAMAGE.
 
 */
 
-#ifndef TORRENT_NON_OWNING_HANDLE_HPP_INCLUDED
-#define TORRENT_NON_OWNING_HANDLE_HPP_INCLUDED
+#ifndef TORRENT_PEX_FLAGS_HPP_INCLUDE
+#define TORRENT_PEX_FLAGS_HPP_INCLUDE
 
-namespace libtorrent { namespace aux {
+#include "libtorrent/flags.hpp"
 
-	// internal
-	struct non_owning_handle
-	{
-		explicit non_owning_handle(char* b) : m_buf(b) {}
-		char* get() const { return m_buf; }
-	private:
-		char* m_buf;
-	};
+namespace libtorrent {
 
-}}
+	using pex_flags_t = flags::bitfield_flag<std::uint8_t, struct pex_flags_tag>;
+
+	// these flags match the flags passed in ut_pex
+	// messages
+	constexpr pex_flags_t pex_encryption = 1_bit;
+	constexpr pex_flags_t pex_seed = 2_bit;
+	constexpr pex_flags_t pex_utp = 3_bit;
+	constexpr pex_flags_t pex_holepunch = 4_bit;
+}
 
 #endif
+

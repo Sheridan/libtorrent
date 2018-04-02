@@ -58,6 +58,9 @@ static const UTF32 halfMask = 0x3FFUL;
 
 /* --------------------------------------------------------------------- */
 
+// TODO: 3 replace this implementation with something maintained and/or robust.
+// Perhaps std::codecvt<>
+
 ConversionResult ConvertUTF32toUTF16 (
 	const UTF32** sourceStart, const UTF32* sourceEnd,
 	UTF16** targetStart, UTF16* targetEnd, ConversionFlags flags) {
@@ -171,7 +174,7 @@ if (result == sourceIllegal) {
  * left as-is for anyone who may want to do such conversion, which was
  * allowed in earlier algorithms.
  */
-static const char trailingBytesForUTF8[256] = {
+const char trailingBytesForUTF8[256] = {
 	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
 	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
 	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
@@ -187,7 +190,7 @@ static const char trailingBytesForUTF8[256] = {
  * This table contains as many values as there might be trailing bytes
  * in a UTF-8 sequence.
  */
-static const UTF32 offsetsFromUTF8[6] = { 0x00000000UL, 0x00003080UL, 0x000E2080UL,
+const UTF32 offsetsFromUTF8[6] = { 0x00000000UL, 0x00003080UL, 0x000E2080UL,
 	0x03C82080UL, 0xFA082080UL, 0x82082080UL };
 
 /*
@@ -292,7 +295,7 @@ ConversionResult ConvertUTF16toUTF8 (
  * definition of UTF-8 goes up to 4-byte sequences.
  */
 
-static Boolean isLegalUTF8(const UTF8 *source, int length) {
+Boolean isLegalUTF8(const UTF8 *source, int length) {
 	UTF8 a;
 	const UTF8 *srcptr = source+length;
 	switch (length) {
@@ -300,7 +303,7 @@ static Boolean isLegalUTF8(const UTF8 *source, int length) {
 	/* Everything else falls through when "true"... */
 	case 4: if ((a = (*--srcptr)) < 0x80 || a > 0xBF) return false;
 	case 3: if ((a = (*--srcptr)) < 0x80 || a > 0xBF) return false;
-	case 2: if ((a = (*--srcptr)) > 0xBF) return false;
+	case 2: if ((a = (*--srcptr)) < 0x80 || a > 0xBF) return false;
 
 	switch (*source) {
 		/* no fall-through in this inner switch */
@@ -308,7 +311,7 @@ static Boolean isLegalUTF8(const UTF8 *source, int length) {
 		case 0xED: if (a > 0x9F) return false; break;
 		case 0xF0: if (a < 0x90) return false; break;
 		case 0xF4: if (a > 0x8F) return false; break;
-		default:   if (a < 0x80) return false;
+		default:   break;
 	}
 
 	case 1: if (*source >= 0x80 && *source < 0xC2) return false;

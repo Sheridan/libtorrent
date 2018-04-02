@@ -11,6 +11,7 @@
 * examples_
 * overview_
 * documentation_
+* `libtorrent 1.2`_
 * contributing_
 * building_
 * troubleshooting_
@@ -67,6 +68,7 @@ libtorrent
 .. _examples: examples.html
 .. _overview: manual-ref.html
 .. _documentation: reference.html
+.. _`libtorrent 1.2`: upgrade_to_1.2-ref.html
 .. _troubleshooting: troubleshooting.html
 .. _`tuning`: tuning.html
 .. _screenshot: client_test.png
@@ -81,7 +83,7 @@ libtorrent
 .. _`HTTP seed`: http://www.getright.com/seedtorrent.html
 .. _multitracker: http://bittorrent.org/beps/bep_0012.html
 .. _mailing list: http://lists.sourceforge.net/lists/listinfo/libtorrent-discuss
-.. _archive: http://dir.gmane.org/gmane.network.bit-torrent.libtorrent
+.. _archive: https://sourceforge.net/p/libtorrent/mailman/libtorrent-discuss/
 .. _`who's using libtorrent?`: projects.html
 .. _`report bugs`: https://github.com/arvidn/libtorrent/issues
 .. _`github page`: https://github.com/arvidn/libtorrent
@@ -124,6 +126,12 @@ See the contribute_ page for other ways to help out.
 
 .. raw:: html
 
+	<span style="display:block;text-align:center;">
+	<img src="bitcoin.png" style="display:inline"><br/>
+	<a href="bitcoin:373ZDeQgQSQNuxdinNAPnQ63CRNn4iEXzg">bitcoin:373ZDeQgQSQNuxdinNAPnQ63CRNn4iEXzg</a>
+	</span>
+	
+	<span style="display:block;text-align:center;margin-top:1em">
 	<span style="display:inline-block">
 	<a class="FlattrButton" style="display:none;" href="http://libtorrent.org"></a>
 	<noscript><a href="https://flattr.com/thing/95662/libtorrent" target="_blank">
@@ -141,6 +149,7 @@ See the contribute_ page for other ways to help out.
 	<input type="image" src="https://www.paypalobjects.com/webstatic/en_US/i/buttons/pp-acceptance-medium.png" border="0" name="submit" alt="PayPal - The safer, easier way to pay online!">
 	<img alt="" border="0" src="https://www.paypalobjects.com/en_US/i/scr/pixel.gif" width="1" height="1">
 	</form>
+	</span>
 	</span>
 
 

@@ -35,12 +35,11 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #include <set>
 #include <vector>
-#include <unordered_set>
+#include <unordered_map>
 
 #include "libtorrent/fwd.hpp"
 #include "libtorrent/torrent_status.hpp"
 
-namespace lt = libtorrent;
 
 struct torrent_view
 {
@@ -68,7 +67,9 @@ struct torrent_view
 	lt::torrent_status const& get_active_torrent() const;
 	lt::torrent_handle get_active_handle() const;
 
+	void remove_torrent(lt::torrent_handle st);
 	void update_torrents(std::vector<lt::torrent_status> st);
+	int num_visible_torrents() const { return int(m_filtered_handles.size()); }
 
 	int height() const;
 
@@ -94,7 +95,7 @@ private:
 	void update_filtered_torrents();
 
 	// all torrents
-	std::unordered_set<lt::torrent_status> m_all_handles;
+	std::unordered_map<lt::torrent_handle, lt::torrent_status> m_all_handles;
 
 	// pointers into m_all_handles of the remaining torrents after filtering
 	std::vector<lt::torrent_status const*> m_filtered_handles;

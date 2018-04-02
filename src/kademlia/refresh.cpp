@@ -31,12 +31,9 @@ POSSIBILITY OF SUCH DAMAGE.
 */
 
 #include <libtorrent/kademlia/refresh.hpp>
-#include <libtorrent/kademlia/rpc_manager.hpp>
 #include <libtorrent/kademlia/node.hpp>
 #include <libtorrent/kademlia/dht_observer.hpp>
 #include <libtorrent/performance_counters.hpp>
-
-#include <libtorrent/io.hpp>
 
 namespace libtorrent { namespace dht {
 

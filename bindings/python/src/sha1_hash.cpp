@@ -2,10 +2,10 @@
 // subject to the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 
+#include "boost_python.hpp"
 #include <libtorrent/sha1_hash.hpp>
 #include <iostream>
 
-#include "boost_python.hpp"
 #include "bytes.hpp"
 
 long get_hash(boost::python::object o)
@@ -14,7 +14,7 @@ long get_hash(boost::python::object o)
     return long(PyObject_Hash(str(o).ptr()));
 }
 
-using namespace libtorrent;
+using namespace lt;
 
 bytes sha1_hash_bytes(const sha1_hash& bn) {
     return bytes(bn.to_string());
@@ -23,7 +23,7 @@ bytes sha1_hash_bytes(const sha1_hash& bn) {
 void bind_sha1_hash()
 {
     using namespace boost::python;
-    using namespace libtorrent;
+    using namespace lt;
 
     class_<sha1_hash>("sha1_hash")
         .def(self == self)

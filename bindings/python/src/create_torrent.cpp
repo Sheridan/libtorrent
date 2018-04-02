@@ -10,7 +10,7 @@
 #include "bytes.hpp"
 
 using namespace boost::python;
-using namespace libtorrent;
+using namespace lt;
 
 #ifdef _MSC_VER
 #pragma warning(push)
@@ -65,16 +65,16 @@ namespace
 
     struct FileIter
     {
-        typedef libtorrent::file_entry value_type;
-        typedef libtorrent::file_entry reference;
-        typedef libtorrent::file_entry* pointer;
-        typedef int difference_type;
-        typedef std::forward_iterator_tag iterator_category;
+        using value_type = lt::file_entry;
+        using reference = lt::file_entry;
+        using pointer = lt::file_entry*;
+        using difference_type = int;
+        using iterator_category = std::forward_iterator_tag;
 
         FileIter(file_storage const& fs, file_index_t i) : m_fs(&fs), m_i(i) {}
         FileIter(FileIter const&) = default;
         FileIter() : m_fs(nullptr), m_i(0) {}
-        libtorrent::file_entry operator*() const
+        lt::file_entry operator*() const
         { return m_fs->at(m_i); }
 
         FileIter operator++() { m_i++; return *this; }
@@ -101,23 +101,21 @@ namespace
     FileIter end_files(file_storage const& self)
     { return FileIter(self, self.end_file()); }
 
-#if TORRENT_USE_WSTRING
     void add_file_wstring(file_storage& fs, std::wstring const& file, std::int64_t size
-       , int flags, std::time_t md, std::string link)
+       , file_flags_t const flags, std::time_t md, std::string link)
     {
        fs.add_file(file, size, flags, md, link);
     }
-#endif // TORRENT_USE_WSTRING
 #endif // TORRENT_NO_DEPRECATE
 
     void add_files_callback(file_storage& fs, std::string const& file
-       , boost::python::object cb, std::uint32_t flags)
+       , boost::python::object cb, create_flags_t const flags)
     {
         add_files(fs, file, [&](std::string const& i) { return cb(i); }, flags);
     }
 
     void add_file(file_storage& fs, std::string const& file, std::int64_t size
-       , int flags, std::time_t md, std::string link)
+       , file_flags_t const flags, std::time_t md, std::string link)
     {
        fs.add_file(file, size, flags, md, link);
     }
@@ -126,13 +124,16 @@ namespace
     {
       ct.add_tracker(url, tier);
     }
+
+    struct dummy13 {};
+    struct dummy14 {};
 }
 
 void bind_create_torrent()
 {
     void (file_storage::*set_name0)(std::string const&) = &file_storage::set_name;
     void (file_storage::*rename_file0)(file_index_t, std::string const&) = &file_storage::rename_file;
-#if TORRENT_USE_WSTRING && !defined TORRENT_NO_DEPRECATE
+#if !defined TORRENT_NO_DEPRECATE
     void (file_storage::*set_name1)(std::wstring const&) = &file_storage::set_name;
     void (file_storage::*rename_file1)(file_index_t, std::wstring const&) = &file_storage::rename_file;
 #endif
@@ -140,21 +141,23 @@ void bind_create_torrent()
 #ifndef BOOST_NO_EXCEPTIONS
     void (*set_piece_hashes0)(create_torrent&, std::string const&) = &set_piece_hashes;
 #endif
-    void (*add_files0)(file_storage&, std::string const&, std::uint32_t) = add_files;
+    void (*add_files0)(file_storage&, std::string const&, create_flags_t) = add_files;
 
     std::string const& (file_storage::*file_storage_symlink)(file_index_t) const = &file_storage::symlink;
     sha1_hash (file_storage::*file_storage_hash)(file_index_t) const = &file_storage::hash;
     std::string (file_storage::*file_storage_file_path)(file_index_t, std::string const&) const = &file_storage::file_path;
+    string_view (file_storage::*file_storage_file_name)(file_index_t) const = &file_storage::file_name;
     std::int64_t (file_storage::*file_storage_file_size)(file_index_t) const = &file_storage::file_size;
     std::int64_t (file_storage::*file_storage_file_offset)(file_index_t) const = &file_storage::file_offset;
-    std::uint32_t (file_storage::*file_storage_file_flags)(file_index_t) const = &file_storage::file_flags;
+    file_flags_t (file_storage::*file_storage_file_flags)(file_index_t) const = &file_storage::file_flags;
 
 #ifndef TORRENT_NO_DEPRECATE
     file_entry (file_storage::*at)(int) const = &file_storage::at;
 #endif
 
     // TODO: 3 move this to its own file
-    class_<file_storage>("file_storage")
+    {
+    scope s = class_<file_storage>("file_storage")
         .def("is_valid", &file_storage::is_valid)
         .def("add_file", add_file, (arg("path"), arg("size"), arg("flags") = 0, arg("mtime") = 0, arg("linkpath") = ""))
         .def("num_files", &file_storage::num_files)
@@ -163,13 +166,12 @@ void bind_create_torrent()
         .def("add_file", add_file_deprecated, arg("entry"))
         .def("__iter__", boost::python::range(&begin_files, &end_files))
         .def("__len__", &file_storage::num_files)
-#if TORRENT_USE_WSTRING
         .def("add_file", add_file_wstring, (arg("path"), arg("size"), arg("flags") = 0, arg("mtime") = 0, arg("linkpath") = ""))
-#endif
 #endif // TORRENT_NO_DEPRECATE
         .def("hash", file_storage_hash)
         .def("symlink", file_storage_symlink, return_value_policy<copy_const_reference>())
         .def("file_path", file_storage_file_path, (arg("idx"), arg("save_path") = ""))
+        .def("file_name", file_storage_file_name)
         .def("file_size", file_storage_file_size)
         .def("file_offset", file_storage_file_offset)
         .def("file_flags", file_storage_file_flags)
@@ -182,25 +184,33 @@ void bind_create_torrent()
         .def("piece_size", &file_storage::piece_size)
         .def("set_name", set_name0)
         .def("rename_file", rename_file0)
-#if TORRENT_USE_WSTRING && !defined TORRENT_NO_DEPRECATE
+#if !defined TORRENT_NO_DEPRECATE
         .def("set_name", set_name1)
         .def("rename_file", rename_file1)
 #endif
         .def("name", &file_storage::name, return_value_policy<copy_const_reference>())
         ;
 
-    enum_<file_storage::file_flags_t>("file_flags_t")
-        .value("flag_pad_file", file_storage::flag_pad_file)
-        .value("flag_hidden", file_storage::flag_hidden)
-        .value("flag_executable", file_storage::flag_executable)
-        .value("flag_symlink", file_storage::flag_symlink)
-        ;
+     s.attr("flag_pad_file") = file_storage::flag_pad_file;
+     s.attr("flag_hidden") = file_storage::flag_hidden;
+     s.attr("flag_executable") = file_storage::flag_executable;
+     s.attr("flag_symlink") = file_storage::flag_symlink;
+     }
 
-    class_<create_torrent>("create_torrent", no_init)
+    {
+       scope s = class_<dummy13>("file_flags_t");
+       s.attr("flag_pad_file") = file_storage::flag_pad_file;
+       s.attr("flag_hidden") = file_storage::flag_hidden;
+       s.attr("flag_executable") = file_storage::flag_executable;
+       s.attr("flag_symlink") = file_storage::flag_symlink;
+    }
+
+    {
+    scope s = class_<create_torrent>("create_torrent", no_init)
         .def(init<file_storage&>())
         .def(init<torrent_info const&>(arg("ti")))
-        .def(init<file_storage&, int, int, int>((arg("storage"), arg("piece_size") = 0
-            , arg("pad_file_limit") = -1, arg("flags") = int(libtorrent::create_torrent::optimize_alignment))))
+        .def(init<file_storage&, int, int, create_flags_t>((arg("storage"), arg("piece_size") = 0
+            , arg("pad_file_limit") = -1, arg("flags") = lt::create_torrent::optimize_alignment)))
 
         .def("generate", &create_torrent::generate)
 
@@ -221,15 +231,22 @@ void bind_create_torrent()
         .def("set_root_cert", &create_torrent::set_root_cert, (arg("pem")))
         ;
 
-    enum_<create_torrent::flags_t>("create_torrent_flags_t")
+        s.attr("optimize_alignment") = create_torrent::optimize_alignment;
+        s.attr("merkle") = create_torrent::merkle;
+        s.attr("modification_time") = create_torrent::modification_time;
+        s.attr("symlinks") = create_torrent::symlinks;
+    }
+
+    {
+        scope s = class_<dummy14>("create_torrent_flags_t");
 #ifndef TORRENT_NO_DEPRECATE
-        .value("optimize", create_torrent::optimize)
+        s.attr("optimize") = create_torrent::optimize;
 #endif
-        .value("optimize_alignment", create_torrent::optimize_alignment)
-        .value("merkle", create_torrent::merkle)
-        .value("modification_time", create_torrent::modification_time)
-        .value("symlinks", create_torrent::symlinks)
-    ;
+        s.attr("optimize_alignment") = create_torrent::optimize_alignment;
+        s.attr("merkle") = create_torrent::merkle;
+        s.attr("modification_time") = create_torrent::modification_time;
+        s.attr("symlinks") = create_torrent::symlinks;
+    }
 
     def("add_files", add_files0, (arg("fs"), arg("path"), arg("flags") = 0));
     def("add_files", add_files_callback, (arg("fs"), arg("path")

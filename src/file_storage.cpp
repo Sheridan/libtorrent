@@ -46,15 +46,25 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #if defined(TORRENT_WINDOWS) || defined(TORRENT_OS2)
 #define TORRENT_SEPARATOR '\\'
-#define TORRENT_SEPARATOR_STR "\\"
 #else
 #define TORRENT_SEPARATOR '/'
-#define TORRENT_SEPARATOR_STR "/"
 #endif
 
 using namespace std::placeholders;
 
 namespace libtorrent {
+
+	constexpr file_flags_t file_storage::flag_pad_file;
+	constexpr file_flags_t file_storage::flag_hidden;
+	constexpr file_flags_t file_storage::flag_executable;
+	constexpr file_flags_t file_storage::flag_symlink;
+
+#ifndef TORRENT_NO_DEPRECATE
+	constexpr file_flags_t file_storage::pad_file;
+	constexpr file_flags_t file_storage::attribute_hidden;
+	constexpr file_flags_t file_storage::attribute_executable;
+	constexpr file_flags_t file_storage::attribute_symlink;
+#endif
 
 	file_storage::file_storage()
 		: m_piece_length(0)
@@ -70,6 +80,7 @@ namespace libtorrent {
 	// of libtorrent and properly exported by the .dll.
 	file_storage::file_storage(file_storage const&) = default;
 	file_storage& file_storage::operator=(file_storage const&) = default;
+	file_storage::file_storage(file_storage&&) noexcept = default;
 
 	void file_storage::reserve(int num_files)
 	{
@@ -94,12 +105,13 @@ namespace libtorrent {
 
 namespace {
 
-		bool compare_file_offset(internal_file_entry const& lhs
-			, internal_file_entry const& rhs)
-		{
-			return lhs.offset < rhs.offset;
-		}
+	bool compare_file_offset(internal_file_entry const& lhs
+		, internal_file_entry const& rhs)
+	{
+		return lhs.offset < rhs.offset;
 	}
+
+}
 
 	// path is not supposed to include the name of the torrent itself.
 	void file_storage::update_path_index(internal_file_entry& e
@@ -118,34 +130,37 @@ namespace {
 		// sorry about this messy string handling, but I did
 		// profile it, and it was expensive
 		char const* leaf = filename_cstr(path.c_str());
-		char const* branch_path = "";
-		int branch_len = 0;
+		string_view branch_path;
 		if (leaf > path.c_str())
 		{
 			// split the string into the leaf filename
 			// and the branch path
-			branch_path = path.c_str();
-			branch_len = int(leaf - path.c_str());
+			branch_path = path;
+			branch_path = branch_path.substr(0
+				, static_cast<std::size_t>(leaf - path.c_str()));
 
 			// trim trailing slashes
-			if (branch_len > 0 && branch_path[branch_len - 1] == TORRENT_SEPARATOR)
-				--branch_len;
+			while (!branch_path.empty() && branch_path.back() == TORRENT_SEPARATOR)
+			{
+				branch_path.remove_suffix(1);
+			}
 		}
-		if (branch_len <= 0)
+		if (branch_path.empty())
 		{
 			if (set_name) e.set_name(leaf);
 			e.path_index = -1;
 			return;
 		}
 
-		if (branch_len >= int(m_name.size())
-			&& std::memcmp(branch_path, m_name.c_str(), m_name.size()) == 0
+		if (branch_path.size() >= m_name.size()
+			&& branch_path.substr(0, m_name.size()) == m_name
 			&& branch_path[m_name.size()] == TORRENT_SEPARATOR)
 		{
-			int const offset = int(m_name.size())
-				+ (int(m_name.size()) == branch_len ? 0 : 1);
-			branch_path += offset;
-			branch_len -= offset;
+			branch_path.remove_prefix(m_name.size());
+			while (!branch_path.empty() && branch_path.front() == TORRENT_SEPARATOR)
+			{
+				branch_path.remove_prefix(1);
+			}
 			e.no_root_dir = false;
 		}
 		else
@@ -153,34 +168,32 @@ namespace {
 			e.no_root_dir = true;
 		}
 
+		e.path_index = get_or_add_path(branch_path);
+		if (set_name) e.set_name(leaf);
+	}
+
+	int file_storage::get_or_add_path(string_view const path)
+	{
 		// do we already have this path in the path list?
-		auto p = std::find_if(m_paths.rbegin(), m_paths.rend()
-			, [&] (std::string const& str)
-			{
-				if (int(str.size()) != branch_len) return false;
-				return std::memcmp(str.c_str(), branch_path, aux::numeric_cast<std::size_t>(branch_len)) == 0;
-			});
+		auto const p = std::find(m_paths.rbegin(), m_paths.rend(), path);
 
 		if (p == m_paths.rend())
 		{
 			// no, we don't. add it
-			e.path_index = int(m_paths.size());
-			TORRENT_ASSERT(branch_len == 0 || branch_path[0] != '/');
-
-			// poor man's emplace back
-			m_paths.resize(m_paths.size() + 1);
-			m_paths.back().assign(branch_path, aux::numeric_cast<std::size_t>(branch_len));
+			int const ret = int(m_paths.size());
+			TORRENT_ASSERT(path.size() == 0 || path[0] != '/');
+			m_paths.emplace_back(path.data(), path.size());
+			return ret;
 		}
 		else
 		{
 			// yes we do. use it
-			e.path_index = int(p.base() - m_paths.begin() - 1);
+			return int(p.base() - m_paths.begin() - 1);
 		}
-		if (set_name) e.set_name(leaf);
 	}
 
 #ifndef TORRENT_NO_DEPRECATE
-	file_entry::file_entry(): offset(0), size(0), file_base(0)
+	file_entry::file_entry(): offset(0), size(0)
 		, mtime(0), pad_file(false), hidden_attribute(false)
 		, executable_attribute(false)
 		, symlink_attribute(false)
@@ -205,7 +218,7 @@ namespace {
 
 	internal_file_entry::~internal_file_entry()
 	{
-		if (name_len == name_is_owned) free(const_cast<char*>(name));
+		if (name_len == name_is_owned) delete[] name;
 	}
 
 	internal_file_entry::internal_file_entry(internal_file_entry const& fe)
@@ -229,6 +242,7 @@ namespace {
 
 	internal_file_entry& internal_file_entry::operator=(internal_file_entry const& fe)
 	{
+		if (&fe == this) return *this;
 		offset = fe.offset;
 		size = fe.size;
 		path_index = fe.path_index;
@@ -242,7 +256,7 @@ namespace {
 		return *this;
 	}
 
-	internal_file_entry::internal_file_entry(internal_file_entry&& fe)
+	internal_file_entry::internal_file_entry(internal_file_entry&& fe) noexcept
 		: offset(fe.offset)
 		, symlink_index(fe.symlink_index)
 		, no_root_dir(fe.no_root_dir)
@@ -259,8 +273,9 @@ namespace {
 		fe.name = nullptr;
 	}
 
-	internal_file_entry& internal_file_entry::operator=(internal_file_entry&& fe)
+	internal_file_entry& internal_file_entry::operator=(internal_file_entry&& fe) noexcept
 	{
+		if (&fe == this) return *this;
 		offset = fe.offset;
 		size = fe.size;
 		path_index = fe.path_index;
@@ -278,9 +293,6 @@ namespace {
 		return *this;
 	}
 
-	file_storage::file_storage(file_storage&&) = default;
-	file_storage& file_storage::operator=(file_storage&&) = default;
-
 	// if borrow_chars >= 0, don't take ownership over n, just
 	// point to it. It points to borrow_chars number of characters.
 	// if borrow_chars == -1, n is a 0-terminated string that
@@ -295,7 +307,7 @@ namespace {
 		if (string_len >= name_is_owned) string_len = name_is_owned - 1;
 
 		// free the current string, before assigning the new one
-		if (name_len == name_is_owned) free(const_cast<char*>(name));
+		if (name_len == name_is_owned) delete[] name;
 		if (n == nullptr)
 		{
 			TORRENT_ASSERT(borrow_string == false);
@@ -336,19 +348,27 @@ namespace {
 
 #ifndef TORRENT_NO_DEPRECATE
 
+	void file_storage::add_file_borrow(char const* filename, int filename_len
+		, std::string const& path, std::int64_t file_size, file_flags_t file_flags
+		, char const* filehash, std::int64_t mtime, string_view symlink_path)
+	{
+		TORRENT_ASSERT(filename_len >= 0);
+		add_file_borrow({filename, std::size_t(filename_len)}, path, file_size
+			, file_flags, filehash, mtime, symlink_path);
+	}
+
 	void file_storage::add_file(file_entry const& fe, char const* filehash)
 	{
-		std::uint32_t flags = 0;
+		file_flags_t flags = {};
 		if (fe.pad_file) flags |= file_storage::flag_pad_file;
 		if (fe.hidden_attribute) flags |= file_storage::flag_hidden;
 		if (fe.executable_attribute) flags |= file_storage::flag_executable;
 		if (fe.symlink_attribute) flags |= file_storage::flag_symlink;
 
-		add_file_borrow(nullptr, 0, fe.path, fe.size, flags, filehash, fe.mtime
+		add_file_borrow({}, fe.path, fe.size, flags, filehash, fe.mtime
 			, fe.symlink_path);
 	}
 
-#if TORRENT_USE_WSTRING
 	void file_storage::set_name(std::wstring const& n)
 	{
 		m_name = wchar_utf8(n);
@@ -361,7 +381,7 @@ namespace {
 	}
 
 	void file_storage::add_file(std::wstring const& file, std::int64_t file_size
-		, std::uint32_t file_flags, std::time_t mtime, string_view symlink_path)
+		, file_flags_t const file_flags, std::time_t mtime, string_view symlink_path)
 	{
 		add_file(wchar_utf8(file), file_size, file_flags, mtime, symlink_path);
 	}
@@ -370,7 +390,6 @@ namespace {
 	{
 		rename_file_deprecated(index, new_filename);
 	}
-#endif // TORRENT_USE_WSTRING
 #endif // TORRENT_NO_DEPRECATE
 
 	void file_storage::rename_file(file_index_t const index
@@ -404,6 +423,8 @@ namespace {
 
 	file_index_t file_storage::file_index_at_offset(std::int64_t const offset) const
 	{
+		TORRENT_ASSERT_PRECOND(offset >= 0);
+		TORRENT_ASSERT_PRECOND(offset < m_total_size);
 		// find the file iterator and file offset
 		internal_file_entry target;
 		target.offset = aux::numeric_cast<std::uint64_t>(offset);
@@ -432,6 +453,8 @@ namespace {
 	std::vector<file_slice> file_storage::map_block(piece_index_t const piece
 		, std::int64_t const offset, int size) const
 	{
+		TORRENT_ASSERT_PRECOND(piece >= piece_index_t{0});
+		TORRENT_ASSERT_PRECOND(piece < end_piece());
 		TORRENT_ASSERT_PRECOND(num_files() > 0);
 		std::vector<file_slice> ret;
 
@@ -459,13 +482,9 @@ namespace {
 			TORRENT_ASSERT(file_iter != m_files.end());
 			if (file_offset < std::int64_t(file_iter->size))
 			{
-				file_slice f;
+				file_slice f{};
 				f.file_index = file_index_t(int(file_iter - m_files.begin()));
-				f.offset = file_offset
-#ifndef TORRENT_NO_DEPRECATE
-					+ file_base_deprecated(f.file_index)
-#endif
-					;
+				f.offset = file_offset;
 				f.size = std::min(std::int64_t(file_iter->size) - file_offset, std::int64_t(size));
 				TORRENT_ASSERT(f.size <= size);
 				size -= int(f.size);
@@ -492,7 +511,6 @@ namespace {
 		ret.path = file_path(index);
 		ret.offset = ife.offset;
 		ret.size = ife.size;
-		ret.file_base = file_base(index);
 		ret.mtime = mtime(index);
 		ret.pad_file = ife.pad_file;
 		ret.hidden_attribute = ife.hidden_attribute;
@@ -506,12 +524,12 @@ namespace {
 #endif // TORRENT_NO_DEPRECATE
 
 	peer_request file_storage::map_file(file_index_t const file_index
-		, std::int64_t const file_offset, int size) const
+		, std::int64_t const file_offset, int const size) const
 	{
 		TORRENT_ASSERT_PRECOND(file_index < end_file());
 		TORRENT_ASSERT(m_num_pieces >= 0);
 
-		peer_request ret;
+		peer_request ret{};
 		if (file_index >= end_file())
 		{
 			ret.piece = piece_index_t{m_num_pieces};
@@ -540,18 +558,19 @@ namespace {
 	}
 
 	void file_storage::add_file(std::string const& path, std::int64_t file_size
-		, std::uint32_t file_flags, std::time_t mtime, string_view symlink_path)
+		, file_flags_t const file_flags, std::time_t mtime, string_view symlink_path)
 	{
-		add_file_borrow(nullptr, 0, path, file_size, file_flags, nullptr, mtime
+		add_file_borrow({}, path, file_size, file_flags, nullptr, mtime
 			, symlink_path);
 	}
 
-	void file_storage::add_file_borrow(char const* filename, int const filename_len
+	void file_storage::add_file_borrow(string_view filename
 		, std::string const& path, std::int64_t const file_size
-		, std::uint32_t const file_flags, char const* filehash
+		, file_flags_t const file_flags, char const* filehash
 		, std::int64_t const mtime, string_view symlink_path)
 	{
 		TORRENT_ASSERT_PRECOND(file_size >= 0);
+		TORRENT_ASSERT_PRECOND(!is_complete(filename));
 		if (!has_parent_path(path))
 		{
 			// you have already added at least one file with a
@@ -576,18 +595,18 @@ namespace {
 		// if filename is nullptr, we should copy it. If it isn't, we're borrowing
 		// it and we can save the copy by setting it after this call to
 		// update_path_index().
-		update_path_index(e, path, filename == nullptr);
+		update_path_index(e, path, filename.empty());
 
 		// filename is allowed to be nullptr, in which case we just use path
-		if (filename)
-			e.set_name(filename, true, filename_len);
+		if (!filename.empty())
+			e.set_name(filename.data(), true, int(filename.size()));
 
 		e.size = aux::numeric_cast<std::uint64_t>(file_size);
 		e.offset = aux::numeric_cast<std::uint64_t>(m_total_size);
-		e.pad_file = (file_flags & file_storage::flag_pad_file) != 0;
-		e.hidden_attribute = (file_flags & file_storage::flag_hidden) != 0;
-		e.executable_attribute = (file_flags & file_storage::flag_executable) != 0;
-		e.symlink_attribute = (file_flags & file_storage::flag_symlink) != 0;
+		e.pad_file = bool(file_flags & file_storage::flag_pad_file);
+		e.hidden_attribute = bool(file_flags & file_storage::flag_hidden);
+		e.executable_attribute = bool(file_flags & file_storage::flag_executable);
+		e.symlink_attribute = bool(file_flags & file_storage::flag_symlink);
 
 		if (filehash)
 		{
@@ -813,14 +832,14 @@ namespace {
 		return m_files[index].offset;
 	}
 
-	std::uint32_t file_storage::file_flags(file_index_t const index) const
+	file_flags_t file_storage::file_flags(file_index_t const index) const
 	{
 		TORRENT_ASSERT_PRECOND(index >= file_index_t(0) && index < end_file());
 		internal_file_entry const& fe = m_files[index];
-		return (fe.pad_file ? flag_pad_file : 0u)
-			| (fe.hidden_attribute ? flag_hidden : 0u)
-			| (fe.executable_attribute ? flag_executable : 0u)
-			| (fe.symlink_attribute ? flag_symlink : 0u);
+		return (fe.pad_file ? file_storage::flag_pad_file : file_flags_t{})
+			| (fe.hidden_attribute ? file_storage::flag_hidden : file_flags_t{})
+			| (fe.executable_attribute ? file_storage::flag_executable : file_flags_t{})
+			| (fe.symlink_attribute ? file_storage::flag_symlink : file_flags_t{});
 	}
 
 	bool file_storage::file_absolute_path(file_index_t const index) const
@@ -831,25 +850,6 @@ namespace {
 	}
 
 #ifndef TORRENT_NO_DEPRECATE
-	void file_storage::set_file_base(int index, std::int64_t off)
-	{
-		TORRENT_ASSERT_PRECOND(index >= file_index_t(0) && index < end_file());
-		if (int(m_file_base.size()) <= index) m_file_base.resize(index + 1, 0);
-		m_file_base[index] = off;
-	}
-
-	std::int64_t file_storage::file_base_deprecated(int index) const
-	{
-		if (index >= int(m_file_base.size())) return 0;
-		return m_file_base[index];
-	}
-
-	std::int64_t file_storage::file_base(int index) const
-	{
-		if (index >= int(m_file_base.size())) return 0;
-		return m_file_base[index];
-	}
-
 	sha1_hash file_storage::hash(internal_file_entry const& fe) const
 	{
 		int index = int(&fe - &m_files[0]);
@@ -875,21 +875,6 @@ namespace {
 		int index = int(&fe - &m_files[0]);
 		TORRENT_ASSERT_PRECOND(index >= 0 && index < int(m_files.size()));
 		return index;
-	}
-
-	void file_storage::set_file_base(internal_file_entry const& fe, std::int64_t off)
-	{
-		int index = int(&fe - &m_files[0]);
-		TORRENT_ASSERT_PRECOND(index >= 0 && index < int(m_files.size()));
-		if (int(m_file_base.size()) <= index) m_file_base.resize(index + 1, 0);
-		m_file_base[index] = off;
-	}
-
-	std::int64_t file_storage::file_base(internal_file_entry const& fe) const
-	{
-		int index = int(&fe - &m_files[0]);
-		if (index >= int(m_file_base.size())) return 0;
-		return m_file_base[index];
 	}
 
 	std::string file_storage::file_path(internal_file_entry const& fe
@@ -942,14 +927,6 @@ namespace {
 			if (int(m_file_hashes.size()) < index) m_file_hashes.resize(index + 1, nullptr);
 			std::iter_swap(m_file_hashes.begin() + dst, m_file_hashes.begin() + index);
 		}
-#ifndef TORRENT_NO_DEPRECATE
-		if (!m_file_base.empty())
-		{
-			TORRENT_ASSERT(m_file_base.size() == m_files.size());
-			if (int(m_file_base.size()) < index) m_file_base.resize(index + 1, 0);
-			std::iter_swap(m_file_base.begin() + dst, m_file_base.begin() + index);
-		}
-#endif // TORRENT_DEPRECATED
 	}
 
 	void file_storage::optimize(int const pad_file_limit, int alignment
@@ -1087,20 +1064,16 @@ namespace {
 		i = m_files.begin() + cur_index;
 		e.size = aux::numeric_cast<std::uint64_t>(size);
 		e.offset = aux::numeric_cast<std::uint64_t>(offset);
-		char name[30];
-		std::snprintf(name, sizeof(name), ".pad" TORRENT_SEPARATOR_STR "%d"
-			, pad_file_counter);
-		std::string path = combine_path(m_name, name);
-		e.set_name(path.c_str());
+		e.path_index = get_or_add_path(".pad");
+		char name[15];
+		std::snprintf(name, sizeof(name), "%d", pad_file_counter);
+		e.set_name(name);
 		e.pad_file = true;
 		offset += size;
 		++pad_file_counter;
 
 		if (!m_mtime.empty()) m_mtime.resize(index + 1, 0);
 		if (!m_file_hashes.empty()) m_file_hashes.resize(index + 1, nullptr);
-#ifndef TORRENT_NO_DEPRECATE
-		if (!m_file_base.empty()) m_file_base.resize(index + 1, 0);
-#endif
 
 		if (index != cur_index) reorder_file(index, cur_index);
 	}

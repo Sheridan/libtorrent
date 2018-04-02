@@ -129,7 +129,7 @@ namespace libtorrent {
 		return ret;
 	}
 
-	void bitfield::resize(int bits, bool val)
+	void bitfield::resize(int const bits, bool const val)
 	{
 		if (bits == size()) return;
 
@@ -141,7 +141,7 @@ namespace libtorrent {
 		int const new_size_words = num_words();
 		if (val)
 		{
-			if (old_size_words && b) buf()[old_size_words - 1] |= aux::host_to_network((0xffffffff >> b));
+			if (old_size_words && b) buf()[old_size_words - 1] |= aux::host_to_network(0xffffffff >> b);
 			if (old_size_words < new_size_words)
 				std::memset(buf() + old_size_words, 0xff
 					, std::size_t((new_size_words - old_size_words) * 4));
@@ -213,4 +213,18 @@ namespace libtorrent {
 			? (num - 1) * 32 + ext
 			: size - (aux::count_trailing_ones({&m_buf[1], std::size_t(num - 1)}) + ext);
 	}
+
+	static_assert(std::is_nothrow_move_constructible<bitfield>::value
+		, "should be nothrow move constructible");
+	static_assert(std::is_nothrow_move_assignable<bitfield>::value
+		, "should be nothrow move assignable");
+	static_assert(std::is_nothrow_default_constructible<bitfield>::value
+		, "should be nothrow default constructible");
+
+	static_assert(std::is_nothrow_move_constructible<typed_bitfield<int>>::value
+		, "should be nothrow move constructible");
+	static_assert(std::is_nothrow_move_assignable<typed_bitfield<int>>::value
+		, "should be nothrow move assignable");
+	static_assert(std::is_nothrow_default_constructible<typed_bitfield<int>>::value
+		, "should be nothrow default constructible");
 }

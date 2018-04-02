@@ -39,8 +39,9 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <mutex>
 #include <condition_variable>
 
-namespace lt = libtorrent;
-using namespace libtorrent;
+using namespace lt;
+
+namespace {
 
 void check_timer_loop(std::mutex& m, time_point& last, std::condition_variable& cv)
 {
@@ -50,12 +51,14 @@ void check_timer_loop(std::mutex& m, time_point& last, std::condition_variable& 
 
 	for (int i = 0; i < 10000; ++i)
 	{
-		std::lock_guard<std::mutex> l(m);
+		std::lock_guard<std::mutex> ll(m);
 		time_point now = clock_type::now();
 		TEST_CHECK(now >= last);
 		last = now;
 	}
 }
+
+} // anonymous namespace
 
 TORRENT_TEST(time)
 {

@@ -60,6 +60,12 @@ struct ip_range
 	Addr first;
 	Addr last;
 	std::uint32_t flags;
+	friend bool operator==(ip_range const& lhs, ip_range const& rhs)
+	{
+		return lhs.first == rhs.first
+			&& lhs.last == rhs.last
+			&& lhs.flags == rhs.flags;
+	}
 };
 
 namespace detail {
@@ -68,7 +74,7 @@ namespace detail {
 	Addr zero()
 	{
 		Addr zero;
-		std::fill(zero.begin(), zero.end(), 0);
+		std::fill(zero.begin(), zero.end(), static_cast<typename Addr::value_type>(0));
 		return zero;
 	}
 
@@ -171,7 +177,9 @@ namespace detail {
 			if (i != j) m_access_list.erase(std::next(i), j);
 			if (i->start == first)
 			{
-				// we can do this const-cast because we know that the new
+				// This is an optimization over erasing and inserting a new element
+				// here.
+				// this const-cast is OK because we know that the new
 				// start address will keep the set correctly ordered
 				const_cast<Addr&>(i->start) = first;
 				const_cast<std::uint32_t&>(i->access) = flags;

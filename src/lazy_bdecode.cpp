@@ -36,7 +36,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/lazy_entry.hpp"
 #include "libtorrent/bdecode.hpp" // for error codes
 #include "libtorrent/string_util.hpp" // for is_digit
-#include <cstring>
+#include <cstring> // for memset
 #include <limits> // for numeric_limits
 #include <cstdio> // for snprintf
 #include <cinttypes> // for PRId64 et.al.
@@ -131,6 +131,8 @@ namespace {
 					start = parse_int(start, end, ':', len, e);
 					if (e)
 						TORRENT_FAIL_BDECODE(e);
+					if (start == end)
+						TORRENT_FAIL_BDECODE(bdecode_errors::expected_colon);
 
 					// remaining buffer size excluding ':'
 					const ptrdiff_t buff_size = end - start - 1;
@@ -203,6 +205,8 @@ namespace {
 					start = parse_int(start, end, ':', len, e);
 					if (e)
 						TORRENT_FAIL_BDECODE(e);
+					if (start == end)
+						TORRENT_FAIL_BDECODE(bdecode_errors::expected_colon);
 
 					// remaining buffer size excluding ':'
 					const ptrdiff_t buff_size = end - start - 1;
@@ -237,10 +241,9 @@ namespace {
 	{
 		TORRENT_ASSERT(m_type == int_t);
 		std::int64_t val = 0;
-		bool negative = false;
-		if (*m_data.start == '-') negative = true;
+		bool const negative = (*m_data.start == '-');
 		bdecode_errors::error_code_enum ec = bdecode_errors::no_error;
-		parse_int(m_data.start + negative
+		parse_int(m_data.start + int(negative)
 			, m_data.start + m_size, 'e', val, ec);
 		if (ec) return 0;
 		if (negative) val = -val;
@@ -261,7 +264,7 @@ namespace {
 		else if (int(m_size) == this->capacity())
 		{
 			int const capacity = this->capacity() * lazy_entry_grow_factor / 100;
-			lazy_dict_entry* tmp = new (std::nothrow) lazy_dict_entry[capacity + 1];
+			auto* tmp = new (std::nothrow) lazy_dict_entry[capacity + 1];
 			if (tmp == nullptr) return nullptr;
 			std::memcpy(tmp, m_data.dict, sizeof(lazy_dict_entry) * (m_size + 1));
 			for (int i = 0; i < int(m_size); ++i) m_data.dict[i + 1].val.release();
@@ -346,7 +349,7 @@ namespace {
 	pascal_string lazy_entry::dict_find_pstr(char const* name) const
 	{
 		lazy_entry const* e = dict_find(name);
-		if (e == nullptr || e->type() != lazy_entry::string_t) return pascal_string(nullptr, 0);
+		if (e == nullptr || e->type() != lazy_entry::string_t) return {nullptr, 0};
 		return e->string_pstr();
 	}
 
@@ -456,7 +459,7 @@ namespace {
 	pascal_string lazy_entry::list_pstr_at(int i) const
 	{
 		lazy_entry const* e = list_at(i);
-		if (e == nullptr || e->type() != lazy_entry::string_t) return pascal_string(nullptr, 0);
+		if (e == nullptr || e->type() != lazy_entry::string_t) return {nullptr, 0};
 		return e->string_pstr();
 	}
 
@@ -486,8 +489,7 @@ namespace {
 
 	std::pair<char const*, int> lazy_entry::data_section() const
 	{
-		typedef std::pair<char const*, int> return_t;
-		return return_t(m_begin, m_len);
+		return {m_begin, m_len};
 	}
 
 	namespace {
@@ -601,7 +603,7 @@ namespace {
 	std::string print_entry(lazy_entry const& e, bool single_line, int indent)
 	{
 		char indent_str[200];
-		memset(indent_str, ' ', 200);
+		std::memset(indent_str, ' ', 200);
 		indent_str[0] = ',';
 		indent_str[1] = '\n';
 		indent_str[199] = 0;
@@ -634,18 +636,18 @@ namespace {
 					if (i < e.list_size() - 1) ret += (one_liner?", ":indent_str);
 					else ret += (one_liner?" ":indent_str+1);
 				}
-				ret += "]";
+				ret += ']';
 				return ret;
 			}
 			case lazy_entry::dict_t:
 			{
-				ret += "{";
+				ret += '{';
 				bool one_liner = line_longer_than(e, 200) != -1 || single_line;
 
 				if (!one_liner) ret += indent_str+1;
 				for (int i = 0; i < e.dict_size(); ++i)
 				{
-					if (i == 0 && one_liner) ret += " ";
+					if (i == 0 && one_liner) ret += ' ';
 					std::pair<std::string, lazy_entry const*> ent = e.dict_at(i);
 					print_string(ret, ent.first.c_str(), int(ent.first.size()), true);
 					ret += ": ";

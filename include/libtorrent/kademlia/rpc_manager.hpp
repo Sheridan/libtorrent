@@ -44,19 +44,23 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <libtorrent/time.hpp>
 #include <libtorrent/kademlia/node_id.hpp>
 #include <libtorrent/kademlia/observer.hpp>
+#include <libtorrent/aux_/listen_socket_handle.hpp>
 
-namespace libtorrent { struct dht_settings; class entry; }
+namespace libtorrent { class entry; }
 
-namespace libtorrent { namespace dht {
+namespace libtorrent {
+namespace dht {
 
+struct dht_settings;
 struct dht_logger;
-struct udp_socket_interface;
+struct socket_manager;
 
-struct TORRENT_EXTRA_EXPORT null_observer : public observer
+struct TORRENT_EXTRA_EXPORT null_observer : observer
 {
-	null_observer(std::shared_ptr<traversal_algorithm> const& a
-		, udp::endpoint const& ep, node_id const& id): observer(a, ep, id) {}
-	virtual void reply(msg const&) { flags |= flag_done; }
+	null_observer(std::shared_ptr<traversal_algorithm> a
+		, udp::endpoint const& ep, node_id const& id)
+		: observer(std::move(a), ep, id) {}
+	void reply(msg const&) override { flags |= flag_done; }
 };
 
 class routing_table;
@@ -68,7 +72,8 @@ public:
 	rpc_manager(node_id const& our_id
 		, dht_settings const& settings
 		, routing_table& table
-		, udp_socket_interface* sock
+		, aux::listen_socket_handle const& sock
+		, socket_manager* sock_man
 		, dht_logger* log);
 	~rpc_manager();
 
@@ -118,7 +123,8 @@ private:
 
 	std::unordered_multimap<int, observer_ptr> m_transactions;
 
-	udp_socket_interface* m_sock;
+	aux::listen_socket_handle m_sock;
+	socket_manager* m_sock_man;
 #ifndef TORRENT_DISABLE_LOGGING
 	dht_logger* m_log;
 #endif

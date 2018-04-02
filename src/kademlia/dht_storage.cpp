@@ -31,6 +31,7 @@ POSSIBILITY OF SUCH DAMAGE.
 */
 
 #include "libtorrent/kademlia/dht_storage.hpp"
+#include "libtorrent/kademlia/dht_settings.hpp"
 
 #include <tuple>
 #include <algorithm>
@@ -43,10 +44,10 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <libtorrent/aux_/time.hpp>
 #include <libtorrent/config.hpp>
 #include <libtorrent/bloom_filter.hpp>
-#include <libtorrent/session_settings.hpp>
 #include <libtorrent/random.hpp>
 #include <libtorrent/aux_/vector.hpp>
 #include <libtorrent/aux_/numeric_cast.hpp>
+#include <libtorrent/broadcast_socket.hpp> // for ip_v4
 
 namespace libtorrent { namespace dht {
 namespace {
@@ -58,7 +59,7 @@ namespace {
 	{
 		time_point added;
 		tcp::endpoint addr;
-		bool seed;
+		bool seed = 0;
 	};
 
 	// internal
@@ -78,7 +79,7 @@ namespace {
 	};
 
 	// TODO: 2 make this configurable in dht_settings
-	enum { announce_interval = 30 };
+	constexpr time_duration announce_interval = minutes(30);
 
 	struct dht_immutable_item
 	{
@@ -100,9 +101,9 @@ namespace {
 
 	struct dht_mutable_item : dht_immutable_item
 	{
-		signature sig;
-		sequence_number seq;
-		public_key key;
+		signature sig{};
+		sequence_number seq{};
+		public_key key{};
 		std::string salt;
 	};
 
@@ -156,7 +157,7 @@ namespace {
 	private:
 
 		// explicitly disallow assignment, to silence msvc warning
-		immutable_item_comparator& operator=(immutable_item_comparator const&);
+		immutable_item_comparator& operator=(immutable_item_comparator const&) = delete;
 
 		std::vector<node_id> const& m_node_ids;
 	};
@@ -183,7 +184,7 @@ namespace {
 		int count() const { return int(samples.size()); }
 	};
 
-	class dht_default_storage final : public dht_storage_interface, boost::noncopyable
+	class dht_default_storage final : public dht_storage_interface
 	{
 	public:
 
@@ -194,6 +195,9 @@ namespace {
 		}
 
 		~dht_default_storage() override = default;
+
+		dht_default_storage(dht_default_storage const&) = delete;
+		dht_default_storage& operator=(dht_default_storage const&) = delete;
 
 #ifndef TORRENT_NO_DEPRECATE
 		size_t num_torrents() const override { return m_map.size(); }
@@ -267,7 +271,7 @@ namespace {
 					if (random(std::uint32_t(candidates--)) > std::uint32_t(to_pick))
 						continue;
 
-					pe.push_back(entry());
+					pe.emplace_back();
 					std::string& str = pe.back().string();
 
 					str.resize(18);
@@ -322,7 +326,7 @@ namespace {
 				v->name = name.substr(0, 100).to_string();
 			}
 
-			auto& peersv = endp.protocol() == tcp::v4() ? v->peers4 : v->peers6;
+			auto& peersv = is_v4(endp) ? v->peers4 : v->peers6;
 
 			peer_entry peer;
 			peer.addr = endp;
@@ -552,13 +556,13 @@ namespace {
 			auto new_end = std::remove_if(peers.begin(), peers.end()
 				, [=](peer_entry const& e)
 			{
-				return e.added + minutes(int(announce_interval * 3 / 2)) < now;
+				return e.added + announce_interval * 3 / 2 < now;
 			});
 
 			m_counters.peers -= std::int32_t(std::distance(new_end, peers.end()));
 			peers.erase(new_end, peers.end());
 			// if we're using less than 1/4 of the capacity free up the excess
-			if (!peers.empty() && peers.capacity() / peers.size() >= 4u)
+			if (!peers.empty() && peers.capacity() / peers.size() >= 4U)
 				peers.shrink_to_fit();
 		}
 

@@ -7,11 +7,14 @@
 #include <libtorrent/alert_types.hpp>
 #include <libtorrent/piece_picker.hpp> // for piece_block
 #include <libtorrent/session_stats.hpp>
+#include <libtorrent/operations.hpp>
 #include <memory>
 #include "bytes.hpp"
 
+#include <boost/type_traits/is_polymorphic.hpp>
+
 using namespace boost::python;
-using namespace libtorrent;
+using namespace lt;
 
 #ifdef _MSC_VER
 #pragma warning(push)
@@ -123,11 +126,11 @@ dict session_stats_values(session_stats_alert const& alert)
 {
     std::vector<stats_metric> map = session_stats_metrics();
     dict d;
+    auto counters = alert.counters();
 
-    for (std::vector<stats_metric>::const_iterator i = map.begin();
-       i != map.end(); ++i)
+    for (stats_metric const& m : map)
     {
-        d[i->name] = alert.values[i->value_index];
+        d[m.name] = counters[m.value_index];
     }
     return d;
 }
@@ -143,7 +146,7 @@ namespace boost
 	// types are indeed polymorphic, no need to derive from
 	// them.
 #define POLY(x) template<> \
-	struct is_polymorphic<libtorrent:: x > : boost::mpl::true_ {};
+	struct is_polymorphic<lt:: x > : boost::mpl::true_ {};
 
 	POLY(torrent_alert)
 	POLY(tracker_alert)
@@ -234,11 +237,13 @@ namespace boost
 #undef POLY
 }
 
+struct dummy3 {};
+
 void bind_alert()
 {
     using boost::noncopyable;
 
-    typedef return_value_policy<return_by_value> by_value;
+    using by_value = return_value_policy<return_by_value>;
 
     {
         scope alert_scope = class_<alert, noncopyable >("alert", no_init)
@@ -262,36 +267,78 @@ void bind_alert()
             ;
 #endif
 
-        enum_<alert::category_t>("category_t")
-            .value("error_notification", alert::error_notification)
-            .value("peer_notification", alert::peer_notification)
-            .value("port_mapping_notification", alert::port_mapping_notification)
-            .value("storage_notification", alert::storage_notification)
-            .value("tracker_notification", alert::tracker_notification)
-            .value("debug_notification", alert::debug_notification)
-            .value("status_notification", alert::status_notification)
-            .value("progress_notification", alert::progress_notification)
-            .value("ip_block_notification", alert::ip_block_notification)
-            .value("performance_warning", alert::performance_warning)
-            .value("dht_notification", alert::dht_notification)
-            .value("stats_notification", alert::stats_notification)
-            .value("session_log_notification", alert::session_log_notification)
-            .value("torrent_log_notification", alert::torrent_log_notification)
-            .value("peer_log_notification", alert::peer_log_notification)
-            .value("incoming_request_notification", alert::incoming_request_notification)
-            .value("dht_log_notification", alert::dht_log_notification)
-            .value("dht_operation_notification", alert::dht_operation_notification)
-            .value("port_mapping_log_notification", alert::port_mapping_log_notification)
-            .value("picker_log_notification", alert::picker_log_notification)
-            // deliberately not INT_MAX. Arch linux crash while throwing an exception
-            .value("all_categories", (alert::category_t)0xfffffff)
-            ;
-
+        scope s = class_<dummy3>("category_t");
+        s.attr("error_notification") = alert::error_notification;
+        s.attr("peer_notification") = alert::peer_notification;
+        s.attr("port_mapping_notification") = alert::port_mapping_notification;
+        s.attr("storage_notification") = alert::storage_notification;
+        s.attr("tracker_notification") = alert::tracker_notification;
+        s.attr("debug_notification") = alert::debug_notification;
+        s.attr("status_notification") = alert::status_notification;
+        s.attr("progress_notification") = alert::progress_notification;
+        s.attr("ip_block_notification") = alert::ip_block_notification;
+        s.attr("performance_warning") = alert::performance_warning;
+        s.attr("dht_notification") = alert::dht_notification;
+        s.attr("stats_notification") = alert::stats_notification;
+        s.attr("session_log_notification") = alert::session_log_notification;
+        s.attr("torrent_log_notification") = alert::torrent_log_notification;
+        s.attr("peer_log_notification") = alert::peer_log_notification;
+        s.attr("incoming_request_notification") = alert::incoming_request_notification;
+        s.attr("dht_log_notification") = alert::dht_log_notification;
+        s.attr("dht_operation_notification") = alert::dht_operation_notification;
+        s.attr("port_mapping_log_notification") = alert::port_mapping_log_notification;
+        s.attr("picker_log_notification") = alert::picker_log_notification;
+        s.attr("all_categories") = alert::all_categories;
     }
+
+    enum_<operation_t>("operation_t")
+       .value("unknown", operation_t::unknown)
+       .value("bittorrent", operation_t::bittorrent)
+       .value("iocontrol", operation_t::iocontrol)
+       .value("getpeername", operation_t::getpeername)
+       .value("getname", operation_t::getname)
+       .value("alloc_recvbuf", operation_t::alloc_recvbuf)
+       .value("alloc_sndbuf", operation_t::alloc_sndbuf)
+       .value("file_write", operation_t::file_write)
+       .value("file_read", operation_t::file_read)
+       .value("file", operation_t::file)
+       .value("sock_write", operation_t::sock_write)
+       .value("sock_read", operation_t::sock_read)
+       .value("sock_open", operation_t::sock_open)
+       .value("sock_bind", operation_t::sock_bind)
+       .value("available", operation_t::available)
+       .value("encryption", operation_t::encryption)
+       .value("connect", operation_t::connect)
+       .value("ssl_handshake", operation_t::ssl_handshake)
+       .value("get_interface", operation_t::get_interface)
+       .value("sock_listen", operation_t::sock_listen)
+       .value("sock_bind_to_device", operation_t::sock_bind_to_device)
+       .value("sock_accept", operation_t::sock_accept)
+       .value("parse_address", operation_t::parse_address)
+       .value("enum_if", operation_t::enum_if)
+       .value("file_stat", operation_t::file_stat)
+       .value("file_copy", operation_t::file_copy)
+       .value("file_fallocate", operation_t::file_fallocate)
+       .value("file_hard_link", operation_t::file_hard_link)
+       .value("file_remove", operation_t::file_remove)
+       .value("file_rename", operation_t::file_rename)
+       .value("file_open", operation_t::file_open)
+       .value("mkdir", operation_t::mkdir)
+       .value("check_resume", operation_t::check_resume)
+       .value("exception", operation_t::exception)
+       .value("alloc_cache_piece", operation_t::alloc_cache_piece)
+       .value("partfile_move", operation_t::partfile_move)
+       .value("partfile_read", operation_t::partfile_read)
+       .value("partfile_write", operation_t::partfile_write)
+       .value("hostname_lookup", operation_t::hostname_lookup)
+       ;
+
+    def("operation_name", static_cast<char const*(*)(operation_t)>(&lt::operation_name));
 
     class_<torrent_alert, bases<alert>, noncopyable>(
         "torrent_alert", no_init)
-        .def_readonly("handle", &torrent_alert::handle)
+        .add_property("handle", make_getter(&torrent_alert::handle, by_value()))
+        .add_property("torrent_name", &torrent_alert::torrent_name)
         ;
 
     class_<tracker_alert, bases<torrent_alert>, noncopyable>(
@@ -320,7 +367,7 @@ void bind_alert()
         .def_readonly("ec", &read_piece_alert::ec)
 #endif
         .add_property("buffer", get_buffer)
-        .def_readonly("piece", &read_piece_alert::piece)
+        .add_property("piece", make_getter(&read_piece_alert::piece, by_value()))
         .def_readonly("size", &read_piece_alert::size)
         ;
 
@@ -336,10 +383,10 @@ void bind_alert()
         "tracker_error_alert", no_init)
 #ifndef TORRENT_NO_DEPRECATE
         .def_readonly("msg", &tracker_error_alert::msg)
+        .def_readonly("status_code", &tracker_error_alert::status_code)
 #endif
         .def("error_message", &tracker_error_alert::error_message)
         .def_readonly("times_in_row", &tracker_error_alert::times_in_row)
-        .def_readonly("status_code", &tracker_error_alert::status_code)
         .def_readonly("error", &tracker_error_alert::error)
         ;
 
@@ -367,6 +414,7 @@ void bind_alert()
     class_<peer_error_alert, bases<peer_alert>, noncopyable>(
         "peer_error_alert", no_init)
         .def_readonly("error", &peer_error_alert::error)
+        .def_readonly("op", &peer_error_alert::op)
         ;
 
     class_<invalid_request_alert, bases<peer_alert>, noncopyable>(
@@ -421,7 +469,10 @@ void bind_alert()
         "storage_moved_failed_alert", no_init)
         .def_readonly("error", &storage_moved_failed_alert::error)
         .def("file_path", &storage_moved_failed_alert::file_path)
+        .def_readonly("op", &storage_moved_failed_alert::op)
+#ifndef TORRENT_NO_DEPRECATE
         .def_readonly("operation", &storage_moved_failed_alert::operation)
+#endif
         ;
 
     class_<torrent_deleted_alert, bases<torrent_alert>, noncopyable>(
@@ -473,8 +524,9 @@ void bind_alert()
         .def_readonly("port", &listen_failed_alert::port)
         .def("listen_interface", &listen_failed_alert::listen_interface)
         .def_readonly("error", &listen_failed_alert::error)
-        .def_readonly("operation", &listen_failed_alert::operation)
+        .def_readonly("op", &listen_failed_alert::op)
 #ifndef TORRENT_NO_DEPRECATE
+        .def_readonly("operation", &listen_failed_alert::operation)
         .def_readonly("sock_type", &listen_failed_alert::sock_type)
 #endif
         .def_readonly("socket_type", &listen_failed_alert::socket_type)
@@ -524,33 +576,35 @@ void bind_alert()
 
     class_<portmap_error_alert, bases<alert>, noncopyable>(
         "portmap_error_alert", no_init)
-        .def_readonly("mapping", &portmap_error_alert::mapping)
-        .def_readonly("map_type", &portmap_error_alert::map_type)
+        .add_property("mapping", make_getter(&portmap_error_alert::mapping, by_value()))
         .def_readonly("error", &portmap_error_alert::error)
+        .def_readonly("map_transport", &portmap_error_alert::map_transport)
 #ifndef TORRENT_NO_DEPRECATE
+        .def_readonly("map_type", &portmap_error_alert::map_type)
         .def_readonly("type", &portmap_error_alert::map_type)
         .def_readonly("msg", &portmap_error_alert::msg)
 #endif
         ;
 
-    class_<portmap_alert, bases<alert>, noncopyable>(
-        "portmap_alert", no_init)
-        .def_readonly("mapping", &portmap_alert::mapping)
+    class_<portmap_alert, bases<alert>, noncopyable>("portmap_alert", no_init)
+        .add_property("mapping", make_getter(&portmap_alert::mapping, by_value()))
         .def_readonly("external_port", &portmap_alert::external_port)
+        .def_readonly("map_protocol", &portmap_alert::map_protocol)
+        .def_readonly("map_transport", &portmap_alert::map_transport)
 #ifndef TORRENT_NO_DEPRECATE
         .def_readonly("type", &portmap_alert::map_type)
-#endif
         .def_readonly("map_type", &portmap_alert::map_type)
+#endif
         ;
 
 #ifndef TORRENT_DISABLE_LOGGING
 
-    class_<portmap_log_alert, bases<alert>, noncopyable>(
-        "portmap_log_alert", no_init)
-        .def_readonly("map_type", &portmap_log_alert::map_type)
+    class_<portmap_log_alert, bases<alert>, noncopyable>("portmap_log_alert", no_init)
+        .def_readonly("map_transport", &portmap_log_alert::map_transport)
 #ifndef TORRENT_NO_DEPRECATE
         .def_readonly("type", &portmap_log_alert::map_type)
         .def_readonly("msg", &portmap_log_alert::msg)
+        .def_readonly("map_type", &portmap_log_alert::map_type)
 #endif
         ;
 
@@ -559,11 +613,12 @@ void bind_alert()
     class_<fastresume_rejected_alert, bases<torrent_alert>, noncopyable>(
         "fastresume_rejected_alert", no_init)
         .def_readonly("error", &fastresume_rejected_alert::error)
+        .def("file_path", &fastresume_rejected_alert::file_path)
+        .def_readonly("op", &fastresume_rejected_alert::op)
 #ifndef TORRENT_NO_DEPRECATE
+        .def_readonly("operation", &fastresume_rejected_alert::operation)
         .def_readonly("msg", &fastresume_rejected_alert::msg)
 #endif
-        .def("file_path", &fastresume_rejected_alert::file_path)
-        .def_readonly("operation", &fastresume_rejected_alert::operation)
         ;
 
     class_<peer_blocked_alert, bases<peer_alert>, noncopyable>(
@@ -620,12 +675,12 @@ void bind_alert()
 
     class_<file_completed_alert, bases<torrent_alert>, noncopyable>(
         "file_completed_alert", no_init)
-        .def_readonly("index", &file_completed_alert::index)
+        .add_property("index", make_getter(&file_completed_alert::index, by_value()))
         ;
 
     class_<file_renamed_alert, bases<torrent_alert>, noncopyable>(
         "file_renamed_alert", no_init)
-        .def_readonly("index", &file_renamed_alert::index)
+        .add_property("index", make_getter(&file_renamed_alert::index, by_value()))
 #ifndef TORRENT_NO_DEPRECATE
         .def_readonly("name", &file_renamed_alert::name)
 #endif
@@ -634,7 +689,7 @@ void bind_alert()
 
     class_<file_rename_failed_alert, bases<torrent_alert>, noncopyable>(
         "file_rename_failed_alert", no_init)
-        .def_readonly("index", &file_rename_failed_alert::index)
+        .add_property("index", make_getter(&file_rename_failed_alert::index, by_value()))
         .def_readonly("error", &file_rename_failed_alert::error)
         ;
 
@@ -690,7 +745,10 @@ void bind_alert()
 
     class_<peer_disconnected_alert, bases<peer_alert>, noncopyable>(
         "peer_disconnected_alert", no_init)
+        .def_readonly("socket_type", &peer_disconnected_alert::socket_type)
+        .def_readonly("op", &peer_disconnected_alert::op)
         .def_readonly("error", &peer_disconnected_alert::error)
+        .def_readonly("reason", &peer_disconnected_alert::reason)
 #ifndef TORRENT_NO_DEPRECATE
         .def_readonly("msg", &peer_disconnected_alert::msg)
 #endif
@@ -795,7 +853,9 @@ void bind_alert()
         ;
     class_<torrent_need_cert_alert, bases<torrent_alert>, noncopyable>(
         "torrent_need_cert_alert", no_init)
+#ifndef TORRENT_NO_DEPRECATE
         .def_readonly("error", &torrent_need_cert_alert::error)
+#endif
         ;
 
     class_<add_torrent_alert, bases<torrent_alert>, noncopyable>(
@@ -894,6 +954,10 @@ void bind_alert()
         .add_property("values", &session_stats_values)
         ;
 
+    class_<session_stats_header_alert, bases<alert>, noncopyable>(
+        "session_stats_header_alert", no_init)
+        ;
+
     std::vector<tcp::endpoint> (dht_get_peers_reply_alert::*peers)() const = &dht_get_peers_reply_alert::peers;
 
     class_<dht_get_peers_reply_alert, bases<alert>, noncopyable>(
@@ -908,4 +972,3 @@ void bind_alert()
 #ifdef _MSC_VER
 #pragma warning(pop)
 #endif
-

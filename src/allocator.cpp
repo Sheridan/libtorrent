@@ -35,10 +35,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/assert.hpp" // for print_backtrace
 #include <cstdint>
 
-#if defined TORRENT_BEOS
-#include <kernel/OS.h>
-#include <stdlib.h> // malloc/free
-#elif !defined TORRENT_WINDOWS
+#if !defined TORRENT_WINDOWS
 #include <cstdlib> // posix_memalign/free
 #include <unistd.h> // _SC_PAGESIZE
 #endif
@@ -88,7 +85,7 @@ namespace libtorrent {
 #elif defined TORRENT_BEOS
 		s = B_PAGE_SIZE;
 #else
-		s = int(sysconf(_SC_PAGESIZE));
+		s = int(::sysconf(_SC_PAGESIZE));
 #endif
 		// assume the page size is 4 kiB if we
 		// fail to query it
@@ -96,7 +93,7 @@ namespace libtorrent {
 		return s;
 	}
 
-	char* page_aligned_allocator::malloc(page_aligned_allocator::size_type bytes)
+	char* page_malloc(std::size_t bytes)
 	{
 		TORRENT_ASSERT(bytes > 0);
 		// just sanity check (this needs to be pretty high
@@ -113,16 +110,12 @@ namespace libtorrent {
 
 		void* ret;
 #if TORRENT_USE_POSIX_MEMALIGN
-		if (posix_memalign(&ret, std::size_t(page_size()), std::size_t(bytes))
+		if (::posix_memalign(&ret, std::size_t(page_size()), std::size_t(bytes))
 			!= 0) ret = nullptr;
 #elif TORRENT_USE_MEMALIGN
-		ret = memalign(std::size_t(page_size()), std::size_t(bytes));
+		ret = ::memalign(std::size_t(page_size()), std::size_t(bytes));
 #elif defined TORRENT_WINDOWS
-		ret = _aligned_malloc(std::size_t(bytes), std::size_t(page_size()));
-#elif defined TORRENT_BEOS
-		area_id id = create_area("", &ret, B_ANY_ADDRESS
-			, (bytes + page_size() - 1) & (page_size() - 1), B_NO_LOCK, B_READ_AREA | B_WRITE_AREA);
-		if (id < B_OK) return nullptr;
+		ret = ::_aligned_malloc(std::size_t(bytes), std::size_t(page_size()));
 #else
 		ret = valloc(std::size_t(bytes));
 #endif
@@ -154,7 +147,7 @@ namespace libtorrent {
 #endif // TORRENT_DEBUG_BUFFERS
 	}
 
-	void page_aligned_allocator::free(char* block)
+	void page_free(char* block)
 	{
 		if (block == nullptr) return;
 
@@ -188,17 +181,13 @@ namespace libtorrent {
 
 #ifdef TORRENT_WINDOWS
 		_aligned_free(block);
-#elif defined TORRENT_BEOS
-		area_id id = area_for(block);
-		if (id < B_OK) return;
-		delete_area(id);
 #else
 		::free(block);
 #endif // TORRENT_WINDOWS
 	}
 
 #ifdef TORRENT_DEBUG_BUFFERS
-	bool page_aligned_allocator::in_use(char const* block)
+	bool page_in_use(char const* block)
 	{
 		const int page = page_size();
 		alloc_header const* h = reinterpret_cast<alloc_header const*>(block - page);

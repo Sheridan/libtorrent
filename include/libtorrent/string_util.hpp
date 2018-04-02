@@ -35,6 +35,7 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #include "libtorrent/config.hpp"
 #include "libtorrent/string_view.hpp"
+#include "libtorrent/span.hpp"
 
 #include <vector>
 #include <string>
@@ -53,6 +54,11 @@ namespace libtorrent {
 	// internal
 	inline bool is_digit(char c)
 	{ return c >= '0' && c <= '9'; }
+	inline void ensure_trailing_slash(std::string& url)
+	{
+		if (url.empty() || url[url.size() - 1] != '/')
+			url += '/';
+	}
 
 	TORRENT_EXTRA_EXPORT bool is_print(char c);
 	TORRENT_EXTRA_EXPORT bool is_space(char c);
@@ -62,9 +68,13 @@ namespace libtorrent {
 	TORRENT_EXTRA_EXPORT bool string_begins_no_case(char const* s1, char const* s2);
 	TORRENT_EXTRA_EXPORT bool string_equal_no_case(string_view s1, string_view s2);
 
-	TORRENT_EXTRA_EXPORT void url_random(char* begin, char* end);
+	TORRENT_EXTRA_EXPORT void url_random(span<char> dest);
 
 	TORRENT_EXTRA_EXPORT bool string_ends_with(string_view s1, string_view s2);
+
+	// Returns offset at which src matches target.
+	// If no sync found, return -1
+	TORRENT_EXTRA_EXPORT int search(span<char const> src, span<char const> target);
 
 	struct listen_interface_t
 	{
@@ -99,21 +109,28 @@ namespace libtorrent {
 	// in strict ansi mode
 	char* allocate_string_copy(char const* str);
 
-	// searches for separator in the string 'last'. the pointer last points to
-	// is set to point to the first character following the separator.
-	// returns a pointer to a 0-terminated string starting at last, ending
-	// at the separator (the string is mutated to replace the separator with
-	// a '\0' character). If there is no separator, but the end of the string,
-	// the pointer next points to is set to the last 0-terminator, which will
-	// make the following invocation return nullptr, to indicate the end of the
-	// string.
-	TORRENT_EXTRA_EXPORT char* string_tokenize(char* last, char sep, char** next);
+	// searches for separator ('sep') in the string 'last'.
+	// if found, returns the string_view representing the range from the start of
+	// `last` up to (but not including) the separator. The second return value is
+	// the remainder of the string, starting one character after the separator.
+	// if no separator is found, the whole string is returned and the second
+	// return value is an empty string_view.
+	TORRENT_EXTRA_EXPORT std::pair<string_view, string_view> split_string(string_view last, char sep);
 
 #if TORRENT_USE_I2P
 
 	TORRENT_EXTRA_EXPORT bool is_i2p_url(std::string const& url);
 
 #endif
+
+	// this can be used as the hash function in std::unordered_*
+	struct TORRENT_EXTRA_EXPORT string_hash_no_case
+	{ size_t operator()(std::string const& s) const; };
+
+	// these can be used as the comparison functions in std::map and std::set
+	struct TORRENT_EXTRA_EXPORT string_eq_no_case
+	{ bool operator()(std::string const& lhs, std::string const& rhs) const; };
+
 }
 
 #endif

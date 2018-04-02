@@ -34,15 +34,14 @@ POSSIBILITY OF SUCH DAMAGE.
 #define TORRENT_STORAGE_UTILS_HPP_INCLUDE
 
 #include <cstdint>
+#include <string>
 
 #include "libtorrent/config.hpp"
 #include "libtorrent/span.hpp"
+#include "libtorrent/aux_/typed_span.hpp"
 #include "libtorrent/units.hpp"
 #include "libtorrent/storage_defs.hpp" // for status_t
-
-#ifndef TORRENT_WINDOWS
-#include <sys/uio.h> // for iovec
-#endif
+#include "libtorrent/session_types.hpp"
 
 namespace libtorrent {
 
@@ -52,38 +51,27 @@ namespace libtorrent {
 	struct stat_cache;
 	struct add_torrent_params;
 
-#ifdef TORRENT_WINDOWS
-	struct iovec_t
-	{
-		void* iov_base;
-		size_t iov_len;
-	};
-#else
-	using iovec_t = ::iovec;
-#endif
+	// TODO: 3 remove this typedef, and use span<char const> for disk write
+	// operations
+	using iovec_t = span<char>;
 
-	namespace aux {
+namespace aux {
 
-	TORRENT_EXTRA_EXPORT int copy_bufs(span<iovec_t const> bufs, int bytes, span<iovec_t> target);
-	TORRENT_EXTRA_EXPORT span<iovec_t> advance_bufs(span<iovec_t> bufs, int bytes);
+	TORRENT_EXTRA_EXPORT int copy_bufs(span<iovec_t const> bufs
+		, int bytes, span<iovec_t> target);
+	TORRENT_EXTRA_EXPORT typed_span<iovec_t> advance_bufs(typed_span<iovec_t> bufs, int bytes);
+	TORRENT_EXTRA_EXPORT void clear_bufs(span<iovec_t const> bufs);
 
-	// this identifies a read or write operation so that readwritev() knows
+	// this is a read or write operation so that readwritev() knows
 	// what to do when it's actually touching the file
-	struct fileop
-	{
-		virtual int file_op(file_index_t const file_index, std::int64_t const file_offset
-			, span<iovec_t const> bufs, storage_error& ec) = 0;
-
-	protected:
-		~fileop() {}
-	};
+	using fileop = std::function<int(file_index_t, std::int64_t, span<iovec_t const>, storage_error&)>;
 
 	// this function is responsible for turning read and write operations in the
 	// torrent space (pieces) into read and write operations in the filesystem
 	// space (files on disk).
 	TORRENT_EXTRA_EXPORT int readwritev(file_storage const& files
 		, span<iovec_t const> bufs, piece_index_t piece, int offset
-		, fileop& op, storage_error& ec);
+		, storage_error& ec, fileop op);
 
 	// moves the files in file_storage f from ``save_path`` to
 	// ``destination_save_path`` according to the rules defined by ``flags``.
@@ -93,21 +81,29 @@ namespace libtorrent {
 		, std::string const& save_path
 		, std::string const& destination_save_path
 		, part_file* pf
-		, int const flags, storage_error& ec);
+		, move_flags_t flags, storage_error& ec);
 
 	// deletes the files on fs from save_path according to options. Options may
 	// opt to only delete the partfile
 	TORRENT_EXTRA_EXPORT void
 	delete_files(file_storage const& fs, std::string const& save_path
-		, std::string const& part_file_name, int const options, storage_error& ec);
+		, std::string const& part_file_name, remove_flags_t options, storage_error& ec);
 
 	TORRENT_EXTRA_EXPORT bool
 	verify_resume_data(add_torrent_params const& rd
 		, aux::vector<std::string, file_index_t> const& links
 		, file_storage const& fs
-		, aux::vector<std::uint8_t, file_index_t> const& file_priority
+		, aux::vector<download_priority_t, file_index_t> const& file_priority
 		, stat_cache& stat
 		, std::string const& save_path
+		, storage_error& ec);
+
+	// given the save_path, stat all files on file_storage until one exists. If a
+	// file exists, return true, otherwise return false.
+	TORRENT_EXTRA_EXPORT bool has_any_file(
+		file_storage const& fs
+		, std::string const& save_path
+		, stat_cache& stat
 		, storage_error& ec);
 }}
 

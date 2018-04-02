@@ -53,8 +53,7 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #include <iostream>
 
-using namespace libtorrent;
-namespace lt = libtorrent;
+using namespace lt;
 
 namespace {
 
@@ -79,7 +78,7 @@ void test_transfer(lt::session& ses, std::shared_ptr<torrent_info> torrent_file
 	, int proxy, char const* protocol, bool url_seed
 	, bool chunked_encoding, bool test_ban, bool keepalive, bool proxy_peers)
 {
-	using namespace libtorrent;
+	using namespace lt;
 
 	TORRENT_ASSERT(torrent_file->web_seeds().size() > 0);
 
@@ -129,13 +128,13 @@ void test_transfer(lt::session& ses, std::shared_ptr<torrent_info> torrent_file
 	}
 
 	add_torrent_params p;
-	p.flags &= ~add_torrent_params::flag_paused;
-	p.flags &= ~add_torrent_params::flag_auto_managed;
+	p.flags &= ~torrent_flags::paused;
+	p.flags &= ~torrent_flags::auto_managed;
 
 	// the reason to set sequential download is to make sure that the order in
 	// which files are requested from the web server is consistent. Any specific
 	// scenario that needs testing should be an explicit test case
-	p.flags |= add_torrent_params::flag_sequential_download;
+	p.flags |= torrent_flags::sequential_download;
 	p.ti = torrent_file;
 	p.save_path = save_path;
 	torrent_handle th = ses.add_torrent(p, ec);
@@ -217,22 +216,20 @@ void test_transfer(lt::session& ses, std::shared_ptr<torrent_info> torrent_file
 
 		if (st.is_seeding)
 		{
+			std::int64_t const total_blocks = (torrent_file->total_size() + 0x3fff) / 0x4000;
 			// we need to sleep here a bit to let the session sync with the torrent stats
 			// commented out because it takes such a long time
 			for (int i = 0; i < 50; ++i)
 			{
 				cnt = get_counters(ses);
-				if (cnt["disk.read_cache_blocks"]
-						== (torrent_file->total_size() + 0x3fff) / 0x4000
-					&& cnt["disk.disk_blocks_in_use"]
-						== (torrent_file->total_size() + 0x3fff) / 0x4000)
+				if (std::abs(int(cnt["disk.read_cache_blocks"] - total_blocks)) <= 2 &&
+					std::abs(int(cnt["disk.disk_blocks_in_use"] - total_blocks)) <= 2)
 					break;
 				std::printf("cache_size: %d/%d\n", int(cnt["disk.read_cache_blocks"])
 					, int(cnt["disk.disk_blocks_in_use"]));
 				std::this_thread::sleep_for(lt::milliseconds(100));
 			}
-			TEST_CHECK(std::abs(int(cnt["disk.disk_blocks_in_use"]
-				- (torrent_file->total_size() + 0x3fff) / 0x4000)) <= 2);
+			TEST_CHECK(std::abs(int(cnt["disk.disk_blocks_in_use"] - total_blocks)) <= 2);
 		}
 	}
 
@@ -278,7 +275,7 @@ int EXPORT run_http_suite(int proxy, char const* protocol, bool test_url_seed
 	, bool chunked_encoding, bool test_ban, bool keepalive, bool test_rename
 	, bool proxy_peers)
 {
-	using namespace libtorrent;
+	using namespace lt;
 
 	std::string save_path = "web_seed";
 	save_path += proxy_name[proxy];
@@ -394,7 +391,7 @@ int EXPORT run_http_suite(int proxy, char const* protocol, bool test_url_seed
 		}
 
 		{
-			const int mask = alert::all_categories
+			auto const mask = alert::all_categories
 				& ~(alert::progress_notification
 					| alert::performance_warning
 					| alert::stats_notification);
@@ -408,7 +405,7 @@ int EXPORT run_http_suite(int proxy, char const* protocol, bool test_url_seed
 			pack.set_bool(settings_pack::enable_natpmp, false);
 			pack.set_bool(settings_pack::enable_upnp, false);
 			pack.set_bool(settings_pack::enable_dht, false);
-			libtorrent::session ses(pack, 0);
+			lt::session ses(pack, {});
 
 			test_transfer(ses, torrent_file, proxy, protocol, test_url_seed
 				, chunked_encoding, test_ban, keepalive, proxy_peers);

@@ -92,12 +92,12 @@ namespace libtorrent {
 
 		error_code ec;
 		std::string fn = combine_path(m_path, m_name);
-		m_file.open(fn, file::read_only, ec);
+		m_file.open(fn, open_mode::read_only, ec);
 		if (ec) return;
 
 		// parse header
-		std::unique_ptr<std::uint32_t[]> header(new std::uint32_t[m_header_size]);
-		iovec_t b = {header.get(), std::size_t(m_header_size)};
+		std::vector<char> header(static_cast<std::size_t>(m_header_size));
+		iovec_t b = header;
 		int n = int(m_file.readv(0, b, ec));
 		if (ec) return;
 
@@ -105,7 +105,7 @@ namespace libtorrent {
 		if (n < m_header_size) return;
 		using namespace libtorrent::detail;
 
-		char* ptr = reinterpret_cast<char*>(header.get());
+		char* ptr = header.data();
 		// we have a header. Parse it
 		int const num_pieces_ = int(read_uint32(ptr));
 		int const piece_size_ = int(read_uint32(ptr));
@@ -173,12 +173,12 @@ namespace libtorrent {
 	}
 
 	int part_file::writev(span<iovec_t const> bufs, piece_index_t const piece
-		, int offset, error_code& ec)
+		, int const offset, error_code& ec)
 	{
 		TORRENT_ASSERT(offset >= 0);
 		std::unique_lock<std::mutex> l(m_mutex);
 
-		open_file(file::read_write, ec);
+		open_file(open_mode::read_write, ec);
 		if (ec) return -1;
 
 		auto const i = m_piece_map.find(piece);
@@ -206,7 +206,7 @@ namespace libtorrent {
 		}
 
 		slot_index_t const slot = i->second;
-		open_file(file::read_write, ec);
+		open_file(open_mode::read_write, ec);
 		if (ec) return -1;
 
 		l.unlock();
@@ -215,15 +215,15 @@ namespace libtorrent {
 		return int(m_file.readv(slot_offset + offset, bufs, ec));
 	}
 
-	void part_file::open_file(std::uint32_t const mode, error_code& ec)
+	void part_file::open_file(open_mode_t const mode, error_code& ec)
 	{
 		if (m_file.is_open()
-			&& ((m_file.open_mode() & file::rw_mask) == mode
-				|| mode == file::read_only)) return;
+			&& ((m_file.open_mode() & open_mode::rw_mask) == mode
+				|| mode == open_mode::read_only)) return;
 
 		std::string fn = combine_path(m_path, m_name);
 		m_file.open(fn, mode, ec);
-		if (((mode & file::rw_mask) != file::read_only)
+		if (((mode & open_mode::rw_mask) != open_mode::read_only)
 			&& ec == boost::system::errc::no_such_file_or_directory)
 		{
 			// this means the directory the file is in doesn't exist.
@@ -236,7 +236,7 @@ namespace libtorrent {
 		}
 	}
 
-	void part_file::free_piece(piece_index_t piece)
+	void part_file::free_piece(piece_index_t const piece)
 	{
 		std::lock_guard<std::mutex> l(m_mutex);
 
@@ -301,7 +301,7 @@ namespace libtorrent {
 			if (i != m_piece_map.end())
 			{
 				slot_index_t const slot = i->second;
-				open_file(file::read_only, ec);
+				open_file(open_mode::read_only, ec);
 				if (ec) return;
 
 				if (!buf) buf.reset(new char[m_piece_size]);
@@ -313,9 +313,10 @@ namespace libtorrent {
 				l.unlock();
 
 				iovec_t v = {buf.get(), std::size_t(block_to_copy)};
-				v.iov_len = std::size_t(m_file.readv(slot_offset + piece_offset, v, ec));
+				auto bytes_read = std::size_t(m_file.readv(slot_offset + piece_offset, v, ec));
+				v = v.first(bytes_read);
 				TORRENT_ASSERT(!ec);
-				if (ec || v.iov_len == 0) return;
+				if (ec || v.empty()) return;
 
 				f(file_offset, {buf.get(), std::size_t(block_to_copy)});
 
@@ -374,15 +375,14 @@ namespace libtorrent {
 			return;
 		}
 
-		open_file(file::read_write, ec);
+		open_file(open_mode::read_write, ec);
 		if (ec) return;
 
-		std::unique_ptr<std::uint32_t[]> header(new std::uint32_t[m_header_size]);
+		std::vector<char> header(static_cast<std::size_t>(m_header_size));
 
 		using namespace libtorrent::detail;
 
-		char* ptr = reinterpret_cast<char*>(header.get());
-
+		char* ptr = header.data();
 		write_uint32(m_max_pieces, ptr);
 		write_uint32(m_piece_size, ptr);
 
@@ -393,9 +393,8 @@ namespace libtorrent {
 				? slot_index_t(-1) : i->second);
 			write_int32(static_cast<int>(slot), ptr);
 		}
-		std::memset(ptr, 0, std::size_t(m_header_size - (ptr - reinterpret_cast<char*>(header.get()))));
-
-		iovec_t b = {header.get(), std::size_t(m_header_size)};
+		std::memset(ptr, 0, std::size_t(m_header_size - (ptr - header.data())));
+		iovec_t b = header;
 		m_file.writev(0, b, ec);
 	}
 }

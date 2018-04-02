@@ -56,21 +56,21 @@ namespace libtorrent {
 		// The constructor taking a pointer ``b`` and ``bits`` copies a bitfield
 		// from the specified buffer, and ``bits`` number of bits (rounded up to
 		// the nearest byte boundary).
-		bitfield() = default;
+		bitfield() noexcept = default;
 		explicit bitfield(int bits) { resize(bits); }
 		bitfield(int bits, bool val) { resize(bits, val); }
 		bitfield(char const* b, int bits) { assign(b, bits); }
 		bitfield(bitfield const& rhs) { assign(rhs.data(), rhs.size()); }
-		bitfield(bitfield&& rhs) = default;
+		bitfield(bitfield&& rhs) noexcept = default;
 
 		// copy bitfield from buffer ``b`` of ``bits`` number of bits, rounded up to
 		// the nearest byte boundary.
-		void assign(char const* b, int bits)
+		void assign(char const* b, int const bits)
 		{
 			resize(bits);
 			if (bits > 0)
 			{
-				std::memcpy(buf(), b, size_t((bits + 7) / 8));
+				std::memcpy(buf(), b, std::size_t((bits + 7) / 8));
 				clear_trailing_bits();
 			}
 		}
@@ -83,7 +83,7 @@ namespace libtorrent {
 		{
 			TORRENT_ASSERT(index >= 0);
 			TORRENT_ASSERT(index < size());
-			return (buf()[index / 32] & aux::host_to_network((0x80000000 >> (index & 31)))) != 0;
+			return (buf()[index / 32] & aux::host_to_network(0x80000000 >> (index & 31))) != 0;
 		}
 
 		// set bit at ``index`` to 0 (clear_bit) or 1 (set_bit).
@@ -97,7 +97,7 @@ namespace libtorrent {
 		{
 			TORRENT_ASSERT(index >= 0);
 			TORRENT_ASSERT(index < size());
-			buf()[index / 32] |= aux::host_to_network((0x80000000 >> (index & 31)));
+			buf()[index / 32] |= aux::host_to_network(0x80000000 >> (index & 31));
 		}
 
 		// returns true if all bits in the bitfield are set
@@ -119,7 +119,9 @@ namespace libtorrent {
 		// returns the size of the bitfield in bits.
 		int size() const
 		{
-			return m_buf == nullptr ? 0 : int(m_buf[0]);
+			int const bits = m_buf == nullptr ? 0 : int(m_buf[0]);
+			TORRENT_ASSERT(bits >= 0);
+			return bits;
 		}
 
 		int num_words() const
@@ -146,7 +148,7 @@ namespace libtorrent {
 			return *this;
 		}
 
-		bitfield& operator=(bitfield&& rhs) = default;
+		bitfield& operator=(bitfield&& rhs) noexcept = default;
 
 		void swap(bitfield& rhs)
 		{
@@ -162,11 +164,11 @@ namespace libtorrent {
 		{
 		friend struct bitfield;
 
-			typedef bool value_type;
-			typedef ptrdiff_t difference_type;
-			typedef bool const* pointer;
-			typedef bool& reference;
-			typedef std::forward_iterator_tag iterator_category;
+			using value_type = bool;
+			using difference_type = ptrdiff_t;
+			using pointer = bool const*;
+			using reference = bool&;
+			using iterator_category = std::forward_iterator_tag;
 
 			bool operator*() { return (*buf & aux::host_to_network(bit)) != 0; }
 			const_iterator& operator++() { inc(); return *this; }
@@ -176,7 +178,7 @@ namespace libtorrent {
 			const_iterator operator--(int)
 			{ const_iterator ret(*this); dec(); return ret; }
 
-			const_iterator(): buf(0), bit(0x80000000) {}
+			const_iterator() {}
 			bool operator==(const_iterator const& rhs) const
 			{ return buf == rhs.buf && bit == rhs.bit; }
 
@@ -212,8 +214,8 @@ namespace libtorrent {
 			}
 			const_iterator(std::uint32_t const* ptr, int offset)
 				: buf(ptr), bit(0x80000000 >> offset) {}
-			std::uint32_t const* buf;
-			std::uint32_t bit;
+			std::uint32_t const* buf = nullptr;
+			std::uint32_t bit = 0x80000000;
 		};
 
 		const_iterator begin() const { return const_iterator(m_buf ? buf() : nullptr, 0); }
@@ -229,13 +231,13 @@ namespace libtorrent {
 		void set_all()
 		{
 			if (size() == 0) return;
-			std::memset(buf(), 0xff, size_t(num_words() * 4));
+			std::memset(buf(), 0xff, std::size_t(num_words() * 4));
 			clear_trailing_bits();
 		}
 		void clear_all()
 		{
 			if (size() == 0) return;
-			std::memset(buf(), 0x00, size_t(num_words() * 4));
+			std::memset(buf(), 0x00, std::size_t(num_words() * 4));
 		}
 
 		// make the bitfield empty, of zero size.
@@ -259,6 +261,25 @@ namespace libtorrent {
 	template <typename IndexType>
 	struct typed_bitfield : bitfield
 	{
+		typed_bitfield() noexcept {}
+		typed_bitfield(typed_bitfield&& rhs) noexcept
+			: bitfield(std::forward<bitfield>(rhs))
+		{}
+		typed_bitfield(typed_bitfield const& rhs)
+			: bitfield(static_cast<bitfield const&>(rhs))
+		{}
+		typed_bitfield(bitfield&& rhs) noexcept : bitfield(std::forward<bitfield>(rhs)) {} // NOLINT
+		typed_bitfield(bitfield const& rhs) : bitfield(rhs) {} // NOLINT
+		typed_bitfield& operator=(typed_bitfield&& rhs) noexcept
+		{
+			this->bitfield::operator=(std::forward<bitfield>(rhs));
+			return *this;
+		}
+		typed_bitfield& operator=(typed_bitfield const& rhs)
+		{
+			this->bitfield::operator=(rhs);
+			return *this;
+		}
 		using bitfield::bitfield;
 
 		bool operator[](IndexType const index) const
@@ -275,7 +296,6 @@ namespace libtorrent {
 
 		IndexType end_index() const { return IndexType(this->size()); }
 	};
-
 }
 
 #endif // TORRENT_BITFIELD_HPP_INCLUDED

@@ -35,14 +35,24 @@ POSSIBILITY OF SUCH DAMAGE.
 namespace libtorrent {
 
 	file_index_t constexpr torrent_status::error_file_none;
-	file_index_t constexpr torrent_status::error_file_url;
 	file_index_t constexpr torrent_status::error_file_ssl_ctx;
-	file_index_t constexpr torrent_status::error_file_metadata;
 	file_index_t constexpr torrent_status::error_file_exception;
-	torrent_status::torrent_status() = default;
+	file_index_t constexpr torrent_status::error_file_partfile;
+
+#ifndef TORRENT_NO_DEPRECATE
+	file_index_t constexpr torrent_status::error_file_url;
+	file_index_t constexpr torrent_status::error_file_metadata;
+#endif
+
+	torrent_status::torrent_status() noexcept {}
 	torrent_status::~torrent_status() = default;
 	torrent_status::torrent_status(torrent_status const&) = default;
 	torrent_status& torrent_status::operator=(torrent_status const&) = default;
-	torrent_status::torrent_status(torrent_status&&) = default;
+	torrent_status::torrent_status(torrent_status&&) noexcept = default;
 	torrent_status& torrent_status::operator=(torrent_status&&) = default;
+
+	static_assert(std::is_nothrow_move_constructible<torrent_status>::value
+		, "should be nothrow move constructible");
+	static_assert(std::is_nothrow_default_constructible<torrent_status>::value
+		, "should be nothrow default constructible");
 }

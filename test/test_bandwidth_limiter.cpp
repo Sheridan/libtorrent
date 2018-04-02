@@ -49,8 +49,10 @@ POSSIBILITY OF SUCH DAMAGE.
 struct torrent;
 struct peer_connection;
 
-using namespace libtorrent;
+using namespace lt;
 using namespace std::placeholders;
+
+namespace {
 
 const float sample_time = 20.f; // seconds
 
@@ -71,7 +73,6 @@ struct peer_connection: bandwidth_socket, std::enable_shared_from_this<peer_conn
 	{}
 
 	bool is_disconnecting() const override { return false; }
-	bool ignore_bandwidth_limits() { return m_ignore_limits; }
 	void assign_bandwidth(int channel, int amount) override;
 
 	void throttle(int limit) { m_bandwidth_channel.throttle(limit); }
@@ -89,7 +90,7 @@ struct peer_connection: bandwidth_socket, std::enable_shared_from_this<peer_conn
 	std::int64_t m_quota;
 };
 
-void peer_connection::assign_bandwidth(int channel, int amount)
+void peer_connection::assign_bandwidth(int /*channel*/, int amount)
 {
 	m_quota += amount;
 #ifdef VERBOSE_LOGGING
@@ -112,7 +113,7 @@ void peer_connection::start()
 }
 
 
-typedef std::vector<std::shared_ptr<peer_connection>> connections_t;
+using connections_t = std::vector<std::shared_ptr<peer_connection>>;
 
 void do_change_rate(bandwidth_channel& t1, bandwidth_channel& t2, int limit)
 {
@@ -156,7 +157,7 @@ void run_test(connections_t& v
 	std::for_each(v.begin(), v.end()
 		, std::bind(&peer_connection::start, _1));
 
-	libtorrent::aux::session_settings s;
+	lt::aux::session_settings s;
 	int tick_interval = s.get_int(settings_pack::tick_interval);
 
 	for (int i = 0; i < int(sample_time * 1000 / tick_interval); ++i)
@@ -455,6 +456,8 @@ void test_no_starvation(int limit)
 	TEST_CHECK(close_to(p->m_quota / sample_time, float(limit) / 200 / num_peers, 5));
 }
 
+} // anonymous namespace
+
 TORRENT_TEST(equal_connection)
 {
 	test_equal_connections( 2,      20);
@@ -466,6 +469,7 @@ TORRENT_TEST(equal_connection)
 	test_equal_connections(33,   60000);
 	test_equal_connections(33,  500000);
 	test_equal_connections( 1, 1000000);
+	test_equal_connections( 1, 6000000);
 }
 
 TORRENT_TEST(conn_var_rate)

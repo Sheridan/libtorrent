@@ -50,17 +50,16 @@ POSSIBILITY OF SUCH DAMAGE.
 #pragma warning( disable : 4706 )
 #endif
 
-void test_swarm(int flags)
+void test_swarm(test_flags_t const flags)
 {
-	using namespace libtorrent;
-	namespace lt = libtorrent;
+	using namespace lt;
 
 	std::printf("\n\n ==== TEST SWARM === %s%s%s%s%s ===\n\n\n"
-		, (flags & super_seeding) ? "super-seeding ": ""
-		, (flags & strict_super_seeding) ? "strict-super-seeding ": ""
-		, (flags & seed_mode) ? "seed-mode ": ""
-		, (flags & time_critical) ? "time-critical ": ""
-		, (flags & suggest) ? "suggest ": ""
+		, (flags & test_flags::super_seeding) ? "super-seeding ": ""
+		, (flags & test_flags::strict_super_seeding) ? "strict-super-seeding ": ""
+		, (flags & test_flags::seed_mode) ? "seed-mode ": ""
+		, (flags & test_flags::time_critical) ? "time-critical ": ""
+		, (flags & test_flags::suggest) ? "suggest ": ""
 		);
 
 	// in case the previous run was terminated
@@ -76,7 +75,7 @@ void test_swarm(int flags)
 	session_proxy p2;
 	session_proxy p3;
 
-	const int mask = alert::all_categories
+	auto const mask = alert::all_categories
 		& ~(alert::progress_notification
 			| alert::performance_warning
 			| alert::stats_notification);
@@ -89,10 +88,10 @@ void test_swarm(int flags)
 	pack.set_int(settings_pack::alert_mask, mask);
 	pack.set_bool(settings_pack::allow_multiple_connections_per_ip, true);
 
-	if (flags & strict_super_seeding)
+	if (flags & test_flags::strict_super_seeding)
 		pack.set_bool(settings_pack::strict_super_seeding, true);
 
-	if (flags & suggest)
+	if (flags & test_flags::suggest)
 		pack.set_int(settings_pack::suggest_mode, settings_pack::suggest_read_cache);
 
 	// this is to avoid everything finish from a single peer
@@ -127,14 +126,14 @@ void test_swarm(int flags)
 	torrent_handle tor3;
 
 	add_torrent_params p;
-	p.flags &= ~add_torrent_params::flag_paused;
-	p.flags &= ~add_torrent_params::flag_auto_managed;
-	if (flags & seed_mode) p.flags |= add_torrent_params::flag_seed_mode;
+	p.flags &= ~torrent_flags::paused;
+	p.flags &= ~torrent_flags::auto_managed;
+	if (flags & test_flags::seed_mode) p.flags |= torrent_flags::seed_mode;
 	// test using piece sizes smaller than 16kB
 	std::tie(tor1, tor2, tor3) = setup_transfer(&ses1, &ses2, &ses3, true
-		, false, true, "_swarm", 8 * 1024, nullptr, flags & super_seeding, &p);
+		, false, true, "_swarm", 8 * 1024, nullptr, bool(flags & test_flags::super_seeding), &p);
 
-	if (flags & time_critical)
+	if (flags & test_flags::time_critical)
 	{
 		tor2.set_piece_deadline(piece_index_t(2), 0);
 		tor2.set_piece_deadline(piece_index_t(5), 1000);
@@ -156,10 +155,10 @@ void test_swarm(int flags)
 		torrent_status st2 = tor2.status();
 		torrent_status st3 = tor3.status();
 
-		if (flags & super_seeding)
+		if (flags & test_flags::super_seeding)
 		{
 			TEST_CHECK(st1.is_seeding);
-			TEST_CHECK(st1.super_seeding);
+			TEST_CHECK(tor1.flags() & torrent_flags::super_seeding);
 		}
 
 		if (st2.progress < 1.f && st2.progress > 0.5f)
@@ -182,10 +181,9 @@ void test_swarm(int flags)
 	TEST_CHECK(tor2.status().is_seeding);
 	TEST_CHECK(tor3.status().is_seeding);
 
-	float average2 = sum_dl_rate2 / float(count_dl_rates2);
-	float average3 = sum_dl_rate3 / float(count_dl_rates3);
+	float average2 = count_dl_rates2 > 0 ? sum_dl_rate2 / float(count_dl_rates2) : -1;
+	float average3 = count_dl_rates3 > 0 ? sum_dl_rate3 / float(count_dl_rates3) : -1;
 
-	std::cout << average2 << std::endl;
 	std::cout << "average rate: " << (average2 / 1000.f) << "kB/s - "
 		<< (average3 / 1000.f) << "kB/s" << std::endl;
 
@@ -212,10 +210,9 @@ void test_swarm(int flags)
 			, int(total_milliseconds(clock_type::now() - start)));
 		std::vector<alert*> alerts;
 		ses1.pop_alerts(&alerts);
-		for (std::vector<alert*>::iterator i = alerts.begin()
-			, end(alerts.end()); i != end; ++i)
+		for (auto ap : alerts)
 		{
-			std::printf("%s\n", ret->message().c_str());
+			std::printf("%s\n", ap->message().c_str());
 		}
 		start = clock_type::now();
 	}
@@ -228,7 +225,7 @@ void test_swarm(int flags)
 	p2 = ses2.abort();
 	p3 = ses3.abort();
 
-	time_point end = clock_type::now();
+	time_point const end = clock_type::now();
 
 	std::printf("time: %d ms\n", int(total_milliseconds(end - start)));
 	TEST_CHECK(end - start < milliseconds(3000));
@@ -246,4 +243,3 @@ void test_swarm(int flags)
 #ifdef _MSC_VER
 #pragma warning(pop)
 #endif
-

@@ -35,7 +35,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/settings_pack.hpp"
 #include "test.hpp"
 
-using namespace libtorrent;
+using namespace lt;
 
 TORRENT_TEST(super_seeding)
 {
@@ -44,7 +44,7 @@ TORRENT_TEST(super_seeding)
 		, [](lt::settings_pack&) {}
 		// add torrent
 		, [](lt::add_torrent_params& params) {
-			params.flags |= add_torrent_params::flag_super_seeding;
+			params.flags |= torrent_flags::super_seeding;
 		}
 		// on alert
 		, [](lt::alert const*, lt::session&) {}
@@ -62,7 +62,7 @@ TORRENT_TEST(strict_super_seeding)
 		}
 		// add torrent
 		, [](lt::add_torrent_params& params) {
-			params.flags |= add_torrent_params::flag_super_seeding;
+			params.flags |= torrent_flags::super_seeding;
 		}
 		// on alert
 		, [](lt::alert const*, lt::session&) {}

@@ -138,8 +138,9 @@ namespace libtorrent {
 		utp_mtu = std::min(mtu, restrict_mtu());
 	}
 
-	void utp_socket_manager::send_packet(udp::endpoint const& ep, char const* p
-		, int const len, error_code& ec, int const flags)
+	void utp_socket_manager::send_packet(std::weak_ptr<utp_socket_interface> sock
+		, udp::endpoint const& ep, char const* p
+		, int const len, error_code& ec, udp_send_flags_t const flags)
 	{
 #if !defined TORRENT_HAS_DONT_FRAGMENT && !defined TORRENT_DEBUG_MTU
 		TORRENT_UNUSED(flags);
@@ -150,19 +151,19 @@ namespace libtorrent {
 		if ((flags & dont_fragment) && len > TORRENT_DEBUG_MTU) return;
 #endif
 
-		m_send_fun(ep, {p, std::size_t(len)}, ec
-			, ((flags & dont_fragment) ? udp_socket::dont_fragment : 0)
+		m_send_fun(std::move(sock), ep, {p, std::size_t(len)}, ec
+			, (flags & udp_socket::dont_fragment)
 				| udp_socket::peer_connection);
 	}
 
-	bool utp_socket_manager::incoming_packet(udp::endpoint const& ep
-			, span<char const> p)
+	bool utp_socket_manager::incoming_packet(std::weak_ptr<utp_socket_interface> socket
+		, udp::endpoint const& ep, span<char const> p)
 	{
 //		UTP_LOGV("incoming packet size:%d\n", size);
 
 		if (p.size() < sizeof(utp_header)) return false;
 
-		utp_header const* ph = reinterpret_cast<utp_header const*>(p.data());
+		auto const* ph = reinterpret_cast<utp_header const*>(p.data());
 
 //		UTP_LOGV("incoming packet version:%d\n", int(ph->get_version()));
 
@@ -208,7 +209,7 @@ namespace libtorrent {
 
 //			UTP_LOGV("not found, new connection id:%d\n", m_new_connection);
 
-			std::shared_ptr<socket_type> c(new (std::nothrow) socket_type(m_ios));
+			std::shared_ptr<aux::socket_type> c(new (std::nothrow) aux::socket_type(m_ios));
 			if (!c) return false;
 
 			TORRENT_ASSERT(m_new_connection == -1);
@@ -230,6 +231,7 @@ namespace libtorrent {
 			int link_mtu, utp_mtu;
 			mtu_for_dest(ep.address(), link_mtu, utp_mtu);
 			utp_init_mtu(str->get_impl(), link_mtu, utp_mtu);
+			utp_init_socket(str->get_impl(), std::move(socket));
 			bool ret = utp_incoming_packet(str->get_impl(), p, ep, receive_time);
 			if (!ret) return false;
 			m_cb(c);
@@ -304,9 +306,20 @@ namespace libtorrent {
 		m_drained_event.push_back(s);
 	}
 
-	void utp_socket_manager::remove_socket(std::uint16_t id)
+	void utp_socket_manager::remove_udp_socket(std::weak_ptr<utp_socket_interface> sock)
 	{
-		socket_map_t::iterator i = m_utp_sockets.find(id);
+		for (auto& s : m_utp_sockets)
+		{
+			if (!bound_to_udp_socket(s.second, sock))
+				continue;
+
+			utp_abort(s.second);
+		}
+	}
+
+	void utp_socket_manager::remove_socket(std::uint16_t const id)
+	{
+		auto const i = m_utp_sockets.find(id);
 		if (i == m_utp_sockets.end()) return;
 		delete_utp_impl(i->second);
 		if (m_last_socket == i->second) m_last_socket = nullptr;

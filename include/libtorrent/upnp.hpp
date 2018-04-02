@@ -36,11 +36,11 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/socket.hpp"
 #include "libtorrent/error_code.hpp"
 #include "libtorrent/broadcast_socket.hpp"
-#include "libtorrent/http_connection.hpp"
 #include "libtorrent/deadline_timer.hpp"
 #include "libtorrent/enum_net.hpp"
 #include "libtorrent/resolver.hpp"
 #include "libtorrent/debug.hpp"
+#include "libtorrent/string_util.hpp"
 #include "libtorrent/aux_/portmap.hpp"
 #include "libtorrent/aux_/vector.hpp"
 
@@ -49,6 +49,8 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <set>
 
 namespace libtorrent {
+	struct http_connection;
+	class http_parser;
 
 	namespace upnp_errors
 	{
@@ -79,7 +81,7 @@ namespace libtorrent {
 			// lease times on port mappings
 			only_permanent_leases_supported = 725,
 			// RemoteHost must be a wildcard and cannot be a
-			// specific IP addres or DNS name
+			// specific IP address or DNS name
 			remote_host_must_be_wildcard = 726,
 			// ExternalPort must be a wildcard and cannot be a
 			// specific port
@@ -172,19 +174,19 @@ struct TORRENT_EXTRA_EXPORT upnp final
 	// portmap_alert_ respectively. If The mapping fails immediately, the return value
 	// is -1, which means failure. There will not be any error alert notification for
 	// mappings that fail with a -1 return value.
-	int add_mapping(aux::portmap_protocol p, int external_port, int local_port);
+	port_mapping_t add_mapping(portmap_protocol p, int external_port, tcp::endpoint local_ep);
 
 	// This function removes a port mapping. ``mapping_index`` is the index that refers
 	// to the mapping you want to remove, which was returned from add_mapping().
-	void delete_mapping(int mapping_index);
+	void delete_mapping(port_mapping_t mapping_index);
 
-	bool get_mapping(int mapping_index, int& local_port, int& external_port
-		, aux::portmap_protocol& protocol) const;
+	bool get_mapping(port_mapping_t mapping_index, tcp::endpoint& local_ep, int& external_port
+		, portmap_protocol& protocol) const;
 
 	void discover_device();
 	void close();
 
-	// This is only available for UPnP routers. If the model is advertized by
+	// This is only available for UPnP routers. If the model is advertised by
 	// the router, it can be queried through this function.
 	std::string router_model()
 	{
@@ -199,22 +201,13 @@ private:
 	void map_timer(error_code const& ec);
 	void try_map_upnp(bool timer = false);
 	void discover_device_impl();
-	static address_v4 upnp_multicast_address;
-	static udp::endpoint upnp_multicast_endpoint;
-
-	// there are routers that's don't support timed
-	// port maps, without returning error 725. It seems
-	// safer to always assume that we have to ask for
-	// permanent leases
-	enum { default_lease_time = 0 };
 
 	void resend_request(error_code const& e);
-	void on_reply(udp::endpoint const& from, char* buffer
-		, std::size_t bytes_transferred);
+	void on_reply(udp::endpoint const& from, span<char const> buffer);
 
 	struct rootdevice;
-	void next(rootdevice& d, int i);
-	void update_map(rootdevice& d, int i);
+	void next(rootdevice& d, port_mapping_t i);
+	void update_map(rootdevice& d, port_mapping_t i);
 
 	void on_upnp_xml(error_code const& e
 		, libtorrent::http_parser const& p, rootdevice& d
@@ -224,22 +217,22 @@ private:
 		, http_connection& c);
 	void on_upnp_map_response(error_code const& e
 		, libtorrent::http_parser const& p, rootdevice& d
-		, int mapping, http_connection& c);
+		, port_mapping_t mapping, http_connection& c);
 	void on_upnp_unmap_response(error_code const& e
 		, libtorrent::http_parser const& p, rootdevice& d
-		, int mapping, http_connection& c);
+		, port_mapping_t mapping, http_connection& c);
 	void on_expire(error_code const& e);
 
 	void disable(error_code const& ec);
-	void return_error(int mapping, int code);
+	void return_error(port_mapping_t mapping, int code);
 #ifndef TORRENT_DISABLE_LOGGING
 	bool should_log() const;
 	void log(char const* msg, ...) const TORRENT_FORMAT(2,3);
 #endif
 
 	void get_ip_address(rootdevice& d);
-	void delete_port_mapping(rootdevice& d, int i);
-	void create_port_mapping(http_connection& c, rootdevice& d, int i);
+	void delete_port_mapping(rootdevice& d, port_mapping_t i);
+	void create_port_mapping(http_connection& c, rootdevice& d, port_mapping_t i);
 	void post(upnp::rootdevice const& d, char const* soap
 		, char const* soap_action);
 
@@ -247,31 +240,16 @@ private:
 
 	struct global_mapping_t
 	{
-		aux::portmap_protocol protocol = aux::portmap_protocol::none;
+		portmap_protocol protocol = portmap_protocol::none;
 		int external_port = 0;
-		int local_port = 0;
+		tcp::endpoint local_ep;
 	};
 
-	struct mapping_t
+	struct mapping_t : aux::base_mapping
 	{
-		enum class action : std::uint8_t { none, add, del };
-
-		// the time the port mapping will expire
-		time_point expires;
-
-		action act = action::none;
-
 		// the local port for this mapping. If this is set
 		// to 0, the mapping is not in use
-		int local_port = 0;
-
-		// the external (on the NAT router) port
-		// for the mapping. This is the port we
-		// should announce to others
-		int external_port = 0;
-
-		// 2 = udp, 1 = tcp
-		aux::portmap_protocol protocol = aux::portmap_protocol::none;
+		tcp::endpoint local_ep;
 
 		// the number of times this mapping has failed
 		int failcount = 0;
@@ -279,16 +257,12 @@ private:
 
 	struct rootdevice
 	{
-#if TORRENT_USE_ASSERTS
-		rootdevice() {}
-		~rootdevice()
-		{
-			TORRENT_ASSERT(magic == 1337);
-			magic = 0;
-		}
-		rootdevice(rootdevice const&) = default;
-		rootdevice& operator=(rootdevice const&) = default;
-#endif
+		rootdevice();
+		~rootdevice();
+		rootdevice(rootdevice const&);
+		rootdevice& operator=(rootdevice const&);
+		rootdevice(rootdevice&&);
+		rootdevice& operator=(rootdevice&&);
 
 		// the interface url, through which the list of
 		// supported interfaces are fetched
@@ -299,7 +273,7 @@ private:
 		// either the WANIP namespace or the WANPPP namespace
 		std::string service_namespace;
 
-		aux::vector<mapping_t> mapping;
+		aux::vector<mapping_t, port_mapping_t> mapping;
 
 		// this is the hostname, port and path
 		// component of the url or the control_url
@@ -309,7 +283,11 @@ private:
 		std::string path;
 		address external_ip;
 
-		int lease_duration = default_lease_time;
+		// there are routers that's don't support timed
+		// port maps, without returning error 725. It seems
+		// safer to always assume that we have to ask for
+		// permanent leases
+		int lease_duration = 0;
 
 		// true if the device supports specifying a
 		// specific external port, false if it doesn't
@@ -329,13 +307,6 @@ private:
 #if TORRENT_USE_ASSERTS
 		int magic = 1337;
 #endif
-		void close() const
-		{
-			TORRENT_ASSERT(magic == 1337);
-			if (!upnp_connection) return;
-			upnp_connection->close();
-			upnp_connection.reset();
-		}
 
 		bool operator<(rootdevice const& rhs) const
 		{ return url < rhs.url; }
@@ -343,11 +314,11 @@ private:
 
 	struct upnp_state_t
 	{
-		std::vector<global_mapping_t> mappings;
+		aux::vector<global_mapping_t, port_mapping_t> mappings;
 		std::set<rootdevice> devices;
 	};
 
-	aux::vector<global_mapping_t> m_mappings;
+	aux::vector<global_mapping_t, port_mapping_t> m_mappings;
 
 	std::string m_user_agent;
 
@@ -375,7 +346,7 @@ private:
 	deadline_timer m_refresh_timer;
 
 	// this timer fires one second after the last UPnP response. This is the
-	// point where we assume we have received most or all SSDP reponses. If we
+	// point where we assume we have received most or all SSDP responses. If we
 	// are ignoring non-routers and at this point we still haven't received a
 	// response from a router UPnP device, we override the ignoring behavior and
 	// map them anyway.

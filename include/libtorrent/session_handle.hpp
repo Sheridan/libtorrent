@@ -43,8 +43,12 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/peer_class_type_filter.hpp"
 #include "libtorrent/peer_id.hpp"
 #include "libtorrent/io_service.hpp"
+#include "libtorrent/session_types.hpp"
+#include "libtorrent/portmap.hpp" // for portmap_protocol
+#include "libtorrent/alert_manager.hpp" // for dropped_alerts_t
 
 #include "libtorrent/kademlia/dht_storage.hpp"
+#include "libtorrent/kademlia/dht_settings.hpp"
 
 #ifndef TORRENT_NO_DEPRECATE
 #include "libtorrent/session_settings.hpp"
@@ -69,57 +73,41 @@ namespace libtorrent {
 
 	struct TORRENT_EXPORT session_handle
 	{
-		session_handle() : m_impl(nullptr) {}
+		friend class session;
+		friend struct aux::session_impl;
 
-		explicit session_handle(aux::session_impl* impl)
-			: m_impl(impl)
-		{}
+		session_handle() {}
 
-		// moveable
-		session_handle(session_handle&&) = default;
-		session_handle& operator=(session_handle&&) = default;
+		session_handle(session_handle const& t) = default;
+		session_handle(session_handle&& t) noexcept = default;
+		session_handle& operator=(session_handle const&) = default;
+		session_handle& operator=(session_handle&&) noexcept = default;
 
-		// non copyable
-		session_handle(session_handle const&) = delete;
-		session_handle& operator=(session_handle const&) = delete;
+		bool is_valid() const { return !m_impl.expired(); }
 
-		bool is_valid() const { return m_impl != nullptr; }
+		// saves settings (i.e. the settings_pack)
+		static constexpr save_state_flags_t save_settings = 0_bit;
 
-		// TODO: 2 the ip filter should probably be saved here too
+		// saves dht_settings
+		static constexpr save_state_flags_t save_dht_settings = 1_bit;
 
-#include "libtorrent/aux_/disable_warnings_push.hpp"
-
-		// flags that determines which aspects of the session should be
-		// saved when calling save_state().
-		enum save_state_flags_t
-		{
-			// saves settings (i.e. the settings_pack)
-			save_settings =     0x001,
-
-			// saves dht_settings
-			save_dht_settings = 0x002,
-
-			// saves dht state such as nodes and node-id, possibly accelerating
-			// joining the DHT if provided at next session startup.
-			save_dht_state =    0x004,
-
-			// save pe_settings
-			save_encryption_settings = 0x020
+		// saves dht state such as nodes and node-id, possibly accelerating
+		// joining the DHT if provided at next session startup.
+		static constexpr save_state_flags_t save_dht_state = 2_bit;
 
 #ifndef TORRENT_NO_DEPRECATE
-			,
-			save_as_map TORRENT_DEPRECATED_ENUM =       0x040,
-			save_proxy TORRENT_DEPRECATED_ENUM =        0x008,
-			save_i2p_proxy TORRENT_DEPRECATED_ENUM =    0x010,
-			save_dht_proxy TORRENT_DEPRECATED_ENUM = save_proxy,
-			save_peer_proxy TORRENT_DEPRECATED_ENUM = save_proxy,
-			save_web_proxy TORRENT_DEPRECATED_ENUM = save_proxy,
-			save_tracker_proxy TORRENT_DEPRECATED_ENUM = save_proxy
+		// save pe_settings
+		static constexpr save_state_flags_t TORRENT_DEPRECATED_MEMBER save_encryption_settings = 3_bit;
+		static constexpr save_state_flags_t TORRENT_DEPRECATED_MEMBER save_as_map = 4_bit;
+		static constexpr save_state_flags_t TORRENT_DEPRECATED_MEMBER save_proxy = 5_bit;
+		static constexpr save_state_flags_t TORRENT_DEPRECATED_MEMBER save_i2p_proxy = 6_bit;
+		static constexpr save_state_flags_t TORRENT_DEPRECATED_MEMBER save_dht_proxy = 7_bit;
+		static constexpr save_state_flags_t TORRENT_DEPRECATED_MEMBER save_peer_proxy = 8_bit;
+		static constexpr save_state_flags_t TORRENT_DEPRECATED_MEMBER save_web_proxy = 9_bit;
+		static constexpr save_state_flags_t TORRENT_DEPRECATED_MEMBER save_tracker_proxy = 10_bit;
 #endif
-		};
 
-#include "libtorrent/aux_/disable_warnings_pop.hpp"
-
+		// TODO: 2 the ip filter should probably be saved here too
 		// loads and saves all session settings, including dht_settings,
 		// encryption settings and proxy settings. ``save_state`` writes all keys
 		// to the ``entry`` that's passed in, which needs to either not be
@@ -130,14 +118,14 @@ namespace libtorrent {
 		//
 		// The ``flags`` argument is used to filter which parts of the session
 		// state to save or load. By default, all state is saved/restored (except
-		// for the individual torrents). see save_state_flags_t
+		// for the individual torrents).
 		//
 		// When saving settings, there are two fields that are *not* loaded.
 		// ``peer_fingerprint`` and ``user_agent``. Those are left as configured
 		// by the ``session_settings`` passed to the session constructor or
 		// subsequently set via apply_settings().
-		void save_state(entry& e, std::uint32_t flags = 0xffffffff) const;
-		void load_state(bdecode_node const& e, std::uint32_t flags = 0xffffffff);
+		void save_state(entry& e, save_state_flags_t flags = save_state_flags_t::all()) const;
+		void load_state(bdecode_node const& e, save_state_flags_t flags = save_state_flags_t::all());
 
 		// .. note::
 		// 	these calls are potentially expensive and won't scale well with
@@ -164,11 +152,11 @@ namespace libtorrent {
 		//
 		// Any torrent_status object whose ``handle`` member is not referring to
 		// a valid torrent are ignored.
-		void get_torrent_status(std::vector<torrent_status>* ret
-			, std::function<bool(torrent_status const&)> const& pred
-			, std::uint32_t flags = 0) const;
+		std::vector<torrent_status> get_torrent_status(
+			std::function<bool(torrent_status const&)> const& pred
+			, status_flags_t flags = {}) const;
 		void refresh_torrent_status(std::vector<torrent_status>* ret
-			, std::uint32_t flags = 0) const;
+			, status_flags_t flags = {}) const;
 
 		// This functions instructs the session to post the state_update_alert,
 		// containing the status of all torrents whose state changed since the
@@ -178,7 +166,7 @@ namespace libtorrent {
 		// included. This flag is on by default. See add_torrent_params.
 		// the ``flags`` argument is the same as for torrent_handle::status().
 		// see torrent_handle::status_flags_t.
-		void post_torrent_updates(std::uint32_t flags = 0xffffffff);
+		void post_torrent_updates(status_flags_t flags = status_flags_t::all());
 
 		// This function will post a session_stats_alert object, containing a
 		// snapshot of the performance counters from the internals of libtorrent.
@@ -257,7 +245,7 @@ namespace libtorrent {
 			, storage_mode_t storage_mode = storage_mode_sparse
 			, bool paused = false
 			, storage_constructor_type sc = default_storage_constructor
-			, void* userdata = 0);
+			, void* userdata = nullptr);
 #endif
 #endif
 
@@ -298,7 +286,7 @@ namespace libtorrent {
 		TORRENT_DEPRECATED
 		void set_load_function(user_load_function_t fun);
 
-		//  deprecated in libtorrent 1.1, use performance_counters instead
+		// deprecated in libtorrent 1.1, use performance_counters instead
 		// returns session wide-statistics and status. For more information, see
 		// the ``session_status`` struct.
 		TORRENT_DEPRECATED
@@ -316,7 +304,13 @@ namespace libtorrent {
 		// For more information, see the cache_status type.
 		TORRENT_DEPRECATED
 		cache_status get_cache_status() const;
-#endif
+
+		// deprecated in 1.2
+		TORRENT_DEPRECATED
+		void get_torrent_status(std::vector<torrent_status>* ret
+			, std::function<bool(torrent_status const&)> const& pred
+			, status_flags_t flags = {}) const;
+#endif // TORRENT_NO_DEPRECATE
 
 		enum { disk_cache_no_pieces = 1 };
 
@@ -345,9 +339,9 @@ namespace libtorrent {
 		// otherwise.
 		//
 		// ``get_dht_settings()`` returns the current settings
-		void set_dht_settings(dht_settings const& settings);
+		void set_dht_settings(dht::dht_settings const& settings);
 		bool is_dht_running() const;
-		dht_settings get_dht_settings() const;
+		dht::dht_settings get_dht_settings() const;
 
 		// ``set_dht_storage`` set a dht custom storage constructor function
 		// to be used internally when the dht is created.
@@ -398,7 +392,7 @@ namespace libtorrent {
 
 		// store the given bencoded data as an immutable item in the DHT.
 		// the returned hash is the key that is to be used to look the item
-		// up again. It's just the sha-1 hash of the bencoded form of the
+		// up again. It's just the SHA-1 hash of the bencoded form of the
 		// structure.
 		sha1_hash dht_put_item(entry data);
 
@@ -415,7 +409,7 @@ namespace libtorrent {
 		// 	to be set to the value to be stored by the function.
 		//
 		// std::array<char,64>& signature
-		// 	the signature authenticating the current value. This may be zeroes
+		// 	the signature authenticating the current value. This may be zeros
 		// 	if there is currently no value stored. The function is expected to
 		// 	fill in this buffer with the signature of the new value to store.
 		// 	To generate the signature, you may want to use the
@@ -435,7 +429,7 @@ namespace libtorrent {
 		// it is critical to not perform any blocking operations. Ideally not
 		// even locking a mutex. Pass any data required for this function along
 		// with the function object's context and make the function entirely
-		// self-contained. The only reason data blobs' values are computed
+		// self-contained. The only reason data blob's value is computed
 		// via a function instead of just passing in the new value is to avoid
 		// race conditions. If you want to *update* the value in the DHT, you
 		// must first retrieve it, then modify it, then write it back. The way
@@ -455,6 +449,14 @@ namespace libtorrent {
 		// Since this alert is a response to an explicit call, it will always be
 		// posted, regardless of the alert mask.
 		void dht_live_nodes(sha1_hash const& nid);
+
+		// Query the DHT node specified by ``ep`` to retrieve a sample of the
+		// info-hashes that the node currently have in their storage.
+		// The ``target`` is included for iterative lookups so that indexing nodes
+		// can perform a key space traversal with a single RPC per node by adjusting
+		// the target value for each RPC. It has no effect on the returned sample value.
+		// The result is posted as a ``dht_sample_infohashes_alert``.
+		void dht_sample_infohashes(udp::endpoint const& ep, sha1_hash const& target);
 
 		// Send an arbitrary DHT request directly to the specified endpoint. This
 		// function is intended for use by plugins. When a response is received
@@ -485,7 +487,7 @@ namespace libtorrent {
 		// 	directly. Makes it possible to join a swarm with just a tracker and
 		// 	info-hash.
 		//
-		// ::
+		// .. code:: c++
 		//
 		// 	#include <libtorrent/extensions/ut_metadata.hpp>
 		// 	ses.add_extension(&libtorrent::create_ut_metadata_plugin);
@@ -493,7 +495,7 @@ namespace libtorrent {
 		// uTorrent peer exchange
 		// 	Exchanges peers between clients.
 		//
-		// ::
+		// .. code:: c++
 		//
 		// 	#include <libtorrent/extensions/ut_pex.hpp>
 		// 	ses.add_extension(&libtorrent::create_ut_pex_plugin);
@@ -503,7 +505,7 @@ namespace libtorrent {
 		// 	that sends bad data with very high accuracy. Should
 		// 	eliminate most problems on poisoned torrents.
 		//
-		// ::
+		// .. code:: c++
 		//
 		// 	#include <libtorrent/extensions/smart_ban.hpp>
 		// 	ses.add_extension(&libtorrent::create_smart_ban_plugin);
@@ -535,7 +537,6 @@ namespace libtorrent {
 		void load_country_db(char const* file);
 		TORRENT_DEPRECATED
 		int as_for_ip(address const& addr);
-#if TORRENT_USE_WSTRING
 		// all wstring APIs are deprecated since 0.16.11
 		// instead, use the wchar -> utf8 conversion functions
 		// and pass in utf8 strings
@@ -543,19 +544,18 @@ namespace libtorrent {
 		void load_country_db(wchar_t const* file);
 		TORRENT_DEPRECATED
 		void load_asnum_db(wchar_t const* file);
-#endif // TORRENT_USE_WSTRING
 
 		// deprecated in 0.15
 		// use load_state and save_state instead
 		TORRENT_DEPRECATED
 		void load_state(entry const& ses_state
-			, std::uint32_t flags = 0xffffffff);
+			, save_state_flags_t flags = save_state_flags_t::all());
 		TORRENT_DEPRECATED
 		entry state() const;
 		// deprecated in 1.1
 		TORRENT_DEPRECATED
 		void load_state(lazy_entry const& ses_state
-			, std::uint32_t flags = 0xffffffff);
+			, save_state_flags_t flags = save_state_flags_t::all());
 #endif // TORRENT_NO_DEPRECATE
 
 		// Sets a filter that will be used to reject and accept incoming as well
@@ -579,16 +579,19 @@ namespace libtorrent {
 		// deprecated in 1.1, use settings_pack::peer_fingerprint instead
 		TORRENT_DEPRECATED
 		void set_peer_id(peer_id const& pid);
+
+		// deprecated in 1.1.7. read settings_pack::peer_fingerprint instead
+		TORRENT_DEPRECATED
+		peer_id id() const;
 #endif
 
-		// returns the raw peer ID used by libtorrent. When anonymous mode is set
-		// the peer ID is randomized per peer.
-		peer_id id() const;
-
+#ifndef TORRENT_NO_DEPRECATE
+		// deprecated in 1.2
 		// sets the key sent to trackers. If it's not set, it is initialized
 		// by libtorrent. The key may be used by the tracker to identify the
 		// peer potentially across you changing your IP.
 		void set_key(std::uint32_t key);
+#endif
 
 		// built-in peer classes
 		static constexpr peer_class_t global_peer_class_id{0};
@@ -617,7 +620,9 @@ namespace libtorrent {
 		// For more info, see ip_filter.
 		//
 		// For example, to make all peers in the range 200.1.1.0 - 200.1.255.255
-		// belong to their own peer class, apply the following filter::
+		// belong to their own peer class, apply the following filter:
+		//
+		// .. code:: c++
 		//
 		// 	ip_filter f;
 		// 	peer_class_t my_class = ses.create_peer_class("200.1.x.x IP range");
@@ -637,8 +642,11 @@ namespace libtorrent {
 		// The ``peer_class`` argument cannot be greater than 31. The bitmasks
 		// representing peer classes in the ``peer_class_filter`` are 32 bits.
 		//
+		// The ``get_peer_class_filter()`` function returns the current filter.
+		//
 		// For more information, see peer-classes_.
 		void set_peer_class_filter(ip_filter const& f);
+		ip_filter get_peer_class_filter() const;
 
 		// Sets and gets the *peer class type filter*. This is controls automatic
 		// peer class assignments to peers based on what kind of socket it is.
@@ -653,16 +661,16 @@ namespace libtorrent {
 		// 3. peer-class type filter, adding classes
 		//
 		// For more information, see peer-classes_.
-		// TODO: add get_peer_class_type_filter() as well
 		void set_peer_class_type_filter(peer_class_type_filter const& f);
+		peer_class_type_filter get_peer_class_type_filter() const;
 
 		// Creates a new peer class (see peer-classes_) with the given name. The
-		// returned integer is the new peer class' identifier. Peer classes may
+		// returned integer is the new peer class identifier. Peer classes may
 		// have the same name, so each invocation of this function creates a new
 		// class and returns a unique identifier.
 		//
 		// Identifiers are assigned from low numbers to higher. So if you plan on
-		// using certain peer classes in a call to `set_peer_class_filter()`_,
+		// using certain peer classes in a call to set_peer_class_filter(),
 		// make sure to create those early on, to get low identifiers.
 		//
 		// For more information on peer classes, see peer-classes_.
@@ -694,7 +702,7 @@ namespace libtorrent {
 		// return value of ``get_peer_class()`` is undefined.
 		//
 		// ``set_peer_class()`` sets all the information in the
-		// ``peer_class_info`` object in the specified peer class. There is no
+		// peer_class_info object in the specified peer class. There is no
 		// option to only update a single property.
 		//
 		// A peer or torrent belonging to more than one class, the highest
@@ -702,7 +710,7 @@ namespace libtorrent {
 		// account.
 		//
 		// For more information, see peer-classes_.
-		peer_class_info get_peer_class(peer_class_t cid);
+		peer_class_info get_peer_class(peer_class_t cid) const;
 		void set_peer_class(peer_class_t cid, peer_class_info const& pci);
 
 #ifndef TORRENT_NO_DEPRECATE
@@ -733,32 +741,24 @@ namespace libtorrent {
 		void listen_on(
 			std::pair<int, int> const& port_range
 			, error_code& ec
-			, const char* net_interface = 0
+			, const char* net_interface = nullptr
 			, int flags = 0);
 #endif
 
-		// flags to be passed in to remove_torrent().
-		enum options_t
-		{
-			// delete the files belonging to the torrent from disk.
-			// including the part-file, if there is one
-			delete_files = 1,
+		// delete the files belonging to the torrent from disk.
+		// including the part-file, if there is one
+		static constexpr remove_flags_t delete_files = 0_bit;
 
-			// delete just the part-file associated with this torrent
-			delete_partfile = 2
-		};
+		// delete just the part-file associated with this torrent
+		static constexpr remove_flags_t delete_partfile = 1_bit;
 
-		// flags to be passed in to the session constructor
-		enum session_flags_t
-		{
-			// this will add common extensions like ut_pex, ut_metadata, lt_tex
-			// smart_ban and possibly others.
-			add_default_plugins = 1,
+		// this will add common extensions like ut_pex, ut_metadata, lt_tex
+		// smart_ban and possibly others.
+		static constexpr session_flags_t add_default_plugins = 0_bit;
 
-			// this will start features like DHT, local service discovery, UPnP
-			// and NAT-PMP.
-			start_default_features = 2
-		};
+		// this will start features like DHT, local service discovery, UPnP
+		// and NAT-PMP.
+		static constexpr session_flags_t start_default_features = 1_bit;
 
 		// ``remove_torrent()`` will close all peer connections associated with
 		// the torrent and tell the tracker that we've stopped participating in
@@ -773,12 +773,12 @@ namespace libtorrent {
 		// the torrent is deleted, a torrent_deleted_alert is posted.
 		//
 		// Note that when a queued or downloading torrent is removed, its position
-		// in the download queue is vacated and avery subsequent torrent in the
+		// in the download queue is vacated and every subsequent torrent in the
 		// queue has their queue positions updated. This can potentially cause a
 		// large state_update to be posted. When removing all torrents, it is
-		// adviced to remove them from the back of the queue, to minimize the
+		// advised to remove them from the back of the queue, to minimize the
 		// shifting.
-		void remove_torrent(const torrent_handle& h, int options = 0);
+		void remove_torrent(const torrent_handle& h, remove_flags_t options = {});
 
 #ifndef TORRENT_NO_DEPRECATE
 		// deprecated in libtorrent 1.1. use settings_pack instead
@@ -795,7 +795,7 @@ namespace libtorrent {
 		settings_pack get_settings() const;
 
 #ifndef TORRENT_NO_DEPRECATE
-		// ``set_i2p_proxy`` sets the i2p_ proxy, and tries to open a persistant
+		// ``set_i2p_proxy`` sets the i2p_ proxy, and tries to open a persistent
 		// connection to it. The only used fields in the proxy settings structs
 		// are ``hostname`` and ``port``.
 		//
@@ -884,9 +884,6 @@ namespace libtorrent {
 		TORRENT_DEPRECATED
 		int max_uploads() const;
 
-		TORRENT_DEPRECATED
-		void pop_alerts(std::deque<alert*>* alerts);
-
 #endif
 
 		// Alerts is the main mechanism for libtorrent to report errors and
@@ -940,9 +937,22 @@ namespace libtorrent {
 		// retrieval of alerts should not be done in the callback. In fact, the
 		// callback should not block. It should not perform any expensive work.
 		// It really should just notify the main application thread.
+		//
+		// The ``dropped_alerts()`` function returns a ``std::bitfield``
+		// representing which types of alerts have been dropped. Dropped meaning
+		// that the alert failed to be delivered to the client. The most common
+		// cause of such failure is that the internal alert queue grew too big
+		// (controlled by alert_queue_size). This call also clears the internal
+		// bitfield, so the bitfield starts recording dropped alerts from this
+		// point forward only.
+		//
+		// The type of an alert is returned by the polymorphic function
+		// ``alert::type()`` but can also be queries from a concrete type via
+		// ``T::alert_type``, as a static constant.
 		void pop_alerts(std::vector<alert*>* alerts);
 		alert* wait_for_alert(time_duration max_wait);
 		void set_alert_notify(std::function<void()> const& fun);
+		dropped_alerts_t dropped_alerts();
 
 #ifndef TORRENT_NO_DEPRECATE
 #include "libtorrent/aux_/disable_warnings_push.hpp"
@@ -969,7 +979,7 @@ namespace libtorrent {
 		std::uint32_t get_alert_mask() const;
 
 		// Starts and stops Local Service Discovery. This service will broadcast
-		// the infohashes of all the non-private torrents on the local network to
+		// the info-hashes of all the non-private torrents on the local network to
 		// look for peers on the same swarm within multicast reach.
 		//
 		// deprecated. use settings_pack::enable_lsd instead
@@ -1010,19 +1020,33 @@ namespace libtorrent {
 #endif
 
 		// protocols used by add_port_mapping()
-		enum protocol_type { udp = 1, tcp = 2 };
+		constexpr static portmap_protocol udp = portmap_protocol::udp;
+		constexpr static portmap_protocol tcp = portmap_protocol::tcp;
 
 		// add_port_mapping adds a port forwarding on UPnP and/or NAT-PMP,
 		// whichever is enabled. The return value is a handle referring to the
 		// port mapping that was just created. Pass it to delete_port_mapping()
 		// to remove it.
-		int add_port_mapping(protocol_type t, int external_port, int local_port);
-		void delete_port_mapping(int handle);
+		port_mapping_t add_port_mapping(portmap_protocol t, int external_port, int local_port);
+		void delete_port_mapping(port_mapping_t handle);
+
+		// This option indicates if the ports are mapped using natpmp
+		// and upnp. If mapping was already made, they are deleted and added
+		// again. This only works if natpmp and/or upnp are configured to be
+		// enable.
+		static constexpr reopen_network_flags_t reopen_map_ports = 0_bit;
+
+		// Instructs the session to reopen all listen and outgoing sockets.
+		//
+		// It's useful in the case your platform doesn't support the built in
+		// IP notifier mechanism, or if you have a better more reliable way to
+		// detect changes in the IP routing table.
+		void reopen_network_sockets(reopen_network_flags_t options = reopen_map_ports);
 
 		// This function is intended only for use by plugins. This type does
 		// not have a stable API and should be relied on as little as possible.
-		aux::session_impl* native_handle() const
-		{ return m_impl; }
+		std::shared_ptr<aux::session_impl> native_handle() const
+		{ return m_impl.lock(); }
 
 	private:
 
@@ -1035,7 +1059,11 @@ namespace libtorrent {
 		template <typename Ret, typename Fun, typename... Args>
 		Ret sync_call_ret(Fun f, Args&&... a) const;
 
-		aux::session_impl* m_impl;
+		explicit session_handle(std::weak_ptr<aux::session_impl> impl)
+			: m_impl(std::move(impl))
+		{}
+
+		std::weak_ptr<aux::session_impl> m_impl;
 	};
 
 } // namespace libtorrent

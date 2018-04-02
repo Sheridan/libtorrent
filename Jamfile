@@ -45,63 +45,9 @@ else
 
 VERSION = 1.2.0 ;
 
-# rule for linking the correct libraries depending
-# on features and target-os
 rule linking ( properties * )
 {
 	local result ;
-
-	# ssl=openssl => crypto=libcrypto
-	# this match the previous behavior
-	if <ssl>openssl in $(properties)
-		&& ! <crypto>libcrypto in $(properties)
-	{
-		ECHO "with ssl=openssl the value for crypto must be libcrypto" ;
-		result += <build>no ;
-	}
-
-	# openssl libraries, if enabled
-	if <ssl>openssl in $(properties)
-	{
-		# exclude gcc from a regular windows build to make mingw
-		# link against the regular unix library name
-		if <target-os>windows in $(properties)
-			&& ! <toolset>gcc in $(properties)
-		{
-			result += <library>ssleay32
-				<library>advapi32
-				<library>user32
-				<library>shell32
-				<library>gdi32
-			;
-		}
-		else
-		{
-			result += <library>ssl ;
-		}
-	}
-
-	if <crypto>libcrypto in $(properties)
-	{
-		# exclude gcc from a regular windows build to make mingw
-		# link against the regular unix library name
-		if <target-os>windows in $(properties)
-			&& ! <toolset>gcc in $(properties)
-		{
-			# it should be possible to cleanup this list, but this is safe for now
-			result += <library>libeay32
-				<library>advapi32
-				<library>user32
-				<library>shell32
-				<library>gdi32
-			;
-		}
-		else
-		{
-			result += <library>crypto ;
-		}
-	}
-
 	if <simulator>on in $(properties)
 	{
 		result += <library>/libsimulator//simulator ;
@@ -110,15 +56,13 @@ rule linking ( properties * )
 	if <target-os>windows in $(properties)
 		&& ( <asserts>on in $(properties)
 			|| <asserts>production in $(properties)
-			|| <pool-allocators>debug in $(properties)
-			|| <allocator>debug in $(properties)
 			|| <asio-debugging>on in $(properties) )
 	{
 		result += <library>dbghelp ;
 	}
 
 	# gcrypt libraries, if enabled
-	if <crypto>libgcrypt in $(properties)
+	if <crypto>gcrypt in $(properties)
 	{
 		result += <library>gcrypt ;
 	}
@@ -142,18 +86,23 @@ rule linking ( properties * )
 		{
 			result += <library>advapi32 ;
 		}
+	}
 
-		# default to windows vista
-		if <windows-version>default in $(properties)
-		{
-			result += <define>_WIN32_WINNT=0x0600 ;
-		}
+	if <target-os>android in $(properties)
+	{
+		result += <library>dl ;
 	}
 
 	if <target-os>beos in $(properties)
 	{
 		result += <library>netkit <library>gcc ;
 	}
+
+	if <target-os>haiku in $(properties)
+	{
+		result += <library>libnetwork <library>gcc ;
+	}
+
 
 	if <target-os>solaris in $(properties)
 	{
@@ -177,8 +126,6 @@ rule linking ( properties * )
 		&& <target-os>linux in $(properties)
 		&& ( <asserts>on in $(properties)
 			|| <asserts>production in $(properties)
-			|| <pool-allocators>debug in $(properties)
-			|| <allocator>debug in $(properties)
 			|| <asio-debugging>on in $(properties) )
 	{
 		# for backtraces in assertion failures
@@ -262,9 +209,6 @@ rule warnings ( properties * )
 		result += <cflags>-Wvla ;
 		result += <cxxflags>-Wc++11-compat ;
 		result += <cflags>-Wno-format-zero-length ;
-
-# enable these warnings again, once the other ones are dealt with
-		result += <cflags>-Wno-unused-variable ;
 	}
 
 	if <toolset>msvc in $(properties)
@@ -283,6 +227,8 @@ rule warnings ( properties * )
 		# C4268: 'identifier' : 'const' static/global data initialized
 		#        with compiler generated default constructor fills the object with zeros
 		result += <cflags>/wd4268 ;
+		# C4503: 'identifier': decorated name length exceeded, name was truncated
+		result += <cflags>/wd4503 ;
 	}
 
 	return $(result) ;
@@ -368,7 +314,18 @@ rule building ( properties * )
 	return $(result) ;
 }
 
-rule tag ( name : type  ? : property-set )
+rule default-build ( properties * )
+{
+	local result ;
+	if <variant>debug in $(properties)
+	{
+		result += <variant>debug:<invariant-checks>on
+			<variant>debug:<asserts>on ;
+	}
+	return $(result) ;
+}
+
+rule tag ( name : type ? : property-set )
 {
 	name = [ virtual-target.add-prefix-and-suffix $(name) : $(type) : $(property-set) ] ;
 
@@ -381,15 +338,85 @@ rule tag ( name : type  ? : property-set )
 	return $(name) ;
 }
 
+# the search path to pick up the openssl libraries from. This is the <search>
+# property of those libraries
+rule openssl-lib-path ( properties * )
+{
+	local OPENSSL_LIB = [ feature.get-values <openssl-lib> : $(properties) ] ;
+
+	if <target-os>darwin in $(properties) && $(OPENSSL_LIB) = ""
+	{
+		# on macOS, default to pick up openssl from the homebrew installation
+		# brew install openssl
+		OPENSSL_LIB = /usr/local/opt/openssl/lib ;
+	}
+	else if <target-os>windows in $(properties)
+		&& <toolset>gcc in $(properties)
+		&& $(OPENSSL_LIB) = ""
+	{
+		# on mingw, assume openssl is installed in c:\OpenSSL-Win32 by default
+		OPENSSL_LIB = c:\\OpenSSL-Win32\\lib ;
+	}
+	else if <target-os>windows in $(properties) && $(OPENSSL_LIB) = ""
+	{
+		# on windows, just assume openssl is installed to c:\openssl
+		if <address-model>64 in $(properties)
+		{ OPENSSL_LIB = c:\\openssl\\lib64 ; }
+		else
+		{ OPENSSL_LIB = c:\\openssl\\lib ; }
+	}
+
+	local result ;
+	result += <search>$(OPENSSL_LIB) ;
+	return $(result) ;
+}
+
+# the include path to pick up openssl headers from. This is the
+# usage-requirement for the openssl-related libraries
+rule openssl-include-path ( properties * )
+{
+	local OPENSSL_INCLUDE = [ feature.get-values <openssl-include> : $(properties) ] ;
+
+	if <target-os>darwin in $(properties) && $(OPENSSL_INCLUDE) = ""
+	{
+		# on macOS, default to pick up openssl from the homebrew installation
+		# brew install openssl
+		OPENSSL_INCLUDE = /usr/local/opt/openssl/include ;
+	}
+	else if <target-os>windows in $(properties)
+		&& <toolset>gcc in $(properties)
+		&& $(OPENSSL_INCLUDE) = ""
+	{
+		# on mingw, assume openssl is installed in c:\OpenSSL-Win32 by default
+		OPENSSL_INCLUDE = c:\\OpenSSL-Win32\\include ;
+	}
+	else if <target-os>windows in $(properties) && $(OPENSSL_INCLUDE) = ""
+	{
+		# on windows, just assume openssl is installed to c:\openssl
+		# not sure if there's a better way to find out where it may be
+		if <address-model>64 in $(properties)
+		{ OPENSSL_INCLUDE = c:\\openssl\\include64 ; }
+		else
+		{ OPENSSL_INCLUDE = c:\\openssl\\include ; }
+	}
+
+	local result ;
+	result += <include>$(OPENSSL_INCLUDE) ;
+	return $(result) ;
+}
+
+feature openssl-lib : : free path ;
+feature openssl-include : : free path ;
+
 feature ipv6 : on off : composite propagated link-incompatible ;
 feature.compose <ipv6>off : <define>TORRENT_USE_IPV6=0 ;
 
-feature sanitize : off address bounds undefined thread rtc : composite propagated link-incompatible ;
+feature sanitize : off address memory undefined thread rtc : composite propagated link-incompatible ;
 # sanitize is a clang and GCC feature
-feature.compose <sanitize>bounds : <cflags>-fsanitize=bounds <cflags>-fsanitize-undefined-trap-on-error <linkflags>-fsanitize=bounds <linkflags>-fsanitize-undefined-trap-on-error ;
-feature.compose <sanitize>undefined : <cflags>-fsanitize=undefined <linkflags>-fsanitize=undefined ;
+feature.compose <sanitize>undefined : <cflags>-fsanitize=undefined <cflags>-fsanitize-undefined-trap-on-error <linkflags>-fsanitize=undefined <linkflags>-fsanitize-undefined-trap-on-error ;
 feature.compose <sanitize>thread : <cflags>-fsanitize=thread <linkflags>-fsanitize=thread ;
 feature.compose <sanitize>address : <cflags>-fsanitize=address <linkflags>-fsanitize=address ;
+feature.compose <sanitize>memory : <cflags>-fsanitize=memory <linkflags>-fsanitize=memory ;
 # RTC (runtime check) is an msvc feature
 feature.compose <sanitize>rtc : <cflags>/RTCc <cflags>/RTCsu ;
 
@@ -406,7 +433,7 @@ feature.compose <asserts>on : <define>TORRENT_USE_ASSERTS=1 ;
 feature.compose <asserts>production : <define>TORRENT_USE_ASSERTS=1 <define>TORRENT_PRODUCTION_ASSERTS=1 ;
 feature.compose <asserts>system : <define>TORRENT_USE_ASSERTS=1 <define>TORRENT_USE_SYSTEM_ASSERTS=1 ;
 
-feature windows-version : default vista win7 xp : composite propagated link-incompatible ;
+feature windows-version : vista win7 xp : composite propagated link-incompatible ;
 feature.compose <windows-version>vista : <define>_WIN32_WINNT=0x0600 ;
 feature.compose <windows-version>win7 : <define>_WIN32_WINNT=0x0601 ;
 feature.compose <windows-version>xp : <define>_WIN32_WINNT=0x0501 ;
@@ -422,15 +449,6 @@ feature.compose <picker-debugging>on : <define>TORRENT_DEBUG_REFCOUNTS ;
 
 feature simulator : off on : composite propagated link-incompatible ;
 feature.compose <simulator>on : <define>TORRENT_BUILD_SIMULATOR ;
-
-# deprecated use allocator=pool instead
-feature pool-allocators : on off debug : composite propagated link-incompatible ;
-feature.compose <pool-allocators>off : <define>TORRENT_DISABLE_POOL_ALLOCATOR ;
-feature.compose <pool-allocators>debug : <define>TORRENT_DISABLE_POOL_ALLOCATOR <define>TORRENT_DEBUG_BUFFERS ;
-
-feature allocator : pool system debug : composite propagated ;
-feature.compose <allocator>system : <define>TORRENT_DISABLE_POOL_ALLOCATOR ;
-feature.compose <allocator>debug : <define>TORRENT_DISABLE_POOL_ALLOCATOR <define>TORRENT_DEBUG_BUFFERS ;
 
 feature piece-allocator : valloc memalign posix_memalign : composite propagated ;
 feature.compose <piece-allocator>memalign : <define>TORRENT_USE_MEMALIGN=1 ;
@@ -458,24 +476,26 @@ feature.compose <encryption>off : <define>TORRENT_DISABLE_ENCRYPTION ;
 feature mutable-torrents : on off : composite propagated link-incompatible ;
 feature.compose <mutable-torrents>off : <define>TORRENT_DISABLE_MUTABLE_TORRENTS ;
 
-feature crypto : built-in libcrypto libgcrypt : composite propagated ;
+feature crypto : built-in openssl libcrypto gcrypt : composite propagated ;
+feature.compose <crypto>openssl : <define>TORRENT_USE_LIBCRYPTO <define>TORRENT_USE_OPENSSL <define>OPENSSL_NO_SSL2 ;
 feature.compose <crypto>libcrypto : <define>TORRENT_USE_LIBCRYPTO ;
-feature.compose <crypto>libgcrypt : <define>TORRENT_USE_LIBGCRYPT ;
+feature.compose <crypto>gcrypt : <define>TORRENT_USE_LIBGCRYPT ;
 
-feature ssl : off openssl : composite propagated ;
-feature.compose <ssl>openssl : <define>TORRENT_USE_OPENSSL <define>OPENSSL_NO_SSL2 ;
-
-feature character-set : unicode ansi : composite propagated link-incompatible ;
-feature.compose <character-set>unicode : <define>_UNICODE <define>UNICODE ;
+feature openssl-version : 1.1 pre1.1 : composite propagated ;
 
 feature deprecated-functions : on off : composite propagated link-incompatible ;
 feature.compose <deprecated-functions>off : <define>TORRENT_NO_DEPRECATE ;
 
 feature boost-link : default static shared : propagated composite ;
 
-feature debug-iterators : off on : composite propagated link-incompatible ;
-feature.compose <debug-iterators>on : <define>_SCL_SECURE=1 <define>_GLIBCXX_DEBUG
+# msvc enables debug iterators by default in debug builds whereas GCC and
+# clang do not, that's why "default" is there. msvc has incorrect noexcept
+# constructors on some containers when enabling debug iterators, so it's
+# possible to turn them off
+feature debug-iterators : default off on : composite propagated link-incompatible ;
+feature.compose <debug-iterators>on : <define>_ITERATOR_DEBUG_LEVEL=2 <define>_GLIBCXX_DEBUG
 	<define>_GLIBCXX_DEBUG_PEDANTIC ;
+feature.compose <debug-iterators>off : <define>_ITERATOR_DEBUG_LEVEL=0 ;
 
 feature fpic : off on : composite propagated link-incompatible ;
 feature.compose <fpic>on : <cflags>-fPIC ;
@@ -501,19 +521,18 @@ feature.compose <export-extra>on : <define>TORRENT_EXPORT_EXTRA ;
 variant test_release : release
 	: <asserts>production <debug-symbols>on
 	<invariant-checks>full <boost-link>shared <optimization>off
-	<export-extra>on <debug-iterators>on <threading>multi
+	<export-extra>on <threading>multi
 	<inlining>on <deprecated-functions>off
 	;
 variant test_debug : debug
 	: <logging>on
-	<allocator>debug
 	<invariant-checks>full <boost-link>shared
-	<export-extra>on <debug-iterators>on <threading>multi <asserts>on
+	<export-extra>on <threading>multi <asserts>on
 	;
 variant test_barebones : debug
 	: <ipv6>off <dht>off <extensions>off <logging>off <boost-link>shared
 	<deprecated-functions>off <invariant-checks>off
-	<export-extra>on <debug-iterators>on <threading>multi <asserts>on
+	<export-extra>on <threading>multi <asserts>on
 	;
 variant test_arm : debug
 	: <ipv6>off <dht>off <extensions>off <logging>off
@@ -521,13 +540,51 @@ variant test_arm : debug
 	<export-extra>on <asserts>on
 	;
 
-# required for openssl on windows
-lib ssleay32 : : <name>ssleay32 ;
-lib libeay32 : : <name>libeay32 ;
 lib advapi32 : : <name>advapi32 ;
 lib user32 : : <name>user32 ;
 lib shell32 : : <name>shell32 ;
 lib gdi32 : : <name>gdi32 ;
+lib z : : <link>shared <name>z ;
+
+# windows variants for libssl and libcrypto (they have different names and some
+# additional dependencies)
+lib crypto
+	: # sources
+	: # requirements
+	<target-os>windows
+	<openssl-version>pre1.1
+	<name>libeay32
+	<conditional>@openssl-lib-path
+	: # default-build
+	: # usage-requirements
+	<conditional>@openssl-include-path
+	<library>advapi32
+	<library>user32
+	<library>shell32
+	<library>gdi32
+	;
+
+lib ssl
+	: # sources
+	: # requirements
+	<target-os>windows
+	<openssl-version>pre1.1
+	<name>ssleay32
+	<use>crypto
+	<conditional>@openssl-lib-path
+	: # default-build
+	: # usage-requirments
+	<conditional>@openssl-include-path
+	<library>advapi32
+	<library>user32
+	<library>shell32
+	<library>gdi32
+	;
+
+
+lib crypto : : <name>crypto <use>z <conditional>@openssl-lib-path  : : <conditional>@openssl-include-path ;
+lib ssl : : <name>ssl <use>crypto <conditional>@openssl-lib-path : : <conditional>@openssl-include-path ;
+
 lib dbghelp : : <name>dbghelp ;
 
 # required for networking on beos
@@ -537,13 +594,13 @@ lib gcc : : <name>gcc <link>static ;
 # when using iconv
 lib libiconv : : <name>iconv <link>shared <search>/usr/local/lib ;
 
-# openssl on linux/bsd/macos etc.
-lib gcrypt : : <name>gcrypt <link>shared <search>/usr/local/lib : : <include>/usr/local/include ;
-lib crypto : : <name>crypto <link>shared ;
-lib ssl : : <name>ssl <link>shared <use>crypto ;
+# openssl on linux/bsd etc.
+lib gcrypt : : <name>gcrypt <link>shared <search>/opt/local/lib ;
+lib dl : : <link>shared <name>dl ;
 
 lib libsocket : : <use>libnsl <name>socket <link>shared <search>/usr/sfw/lib <link>shared ;
 lib libnsl : : <name>nsl <link>shared <search>/usr/sfw/lib <link>shared ;
+lib libnetwork : : <name>network <link>shared ;
 
 # socket libraries on windows
 lib wsock32 : : <name>wsock32 <link>shared ;
@@ -594,6 +651,7 @@ SOURCES =
 	ip_filter
 	ip_notifier
 	ip_voter
+	listen_socket_handle
 	merkle
 	peer_connection
 	platform_util
@@ -619,6 +677,7 @@ SOURCES =
 	session_handle
 	session_impl
 	session_call
+	session_udp_sockets
 	settings_pack
 	sha1_hash
 	socket_io
@@ -665,6 +724,9 @@ SOURCES =
 	proxy_settings
 	file_progress
 	ffs
+	add_torrent_params
+	peer_info
+	stack_allocator
 
 # -- extensions --
 	ut_pex
@@ -691,6 +753,8 @@ KADEMLIA_SOURCES =
 	get_item
 	put_data
 	ed25519
+	sample_infohashes
+	dht_settings
 	;
 
 ED25519_SOURCES =
@@ -713,15 +777,11 @@ local usage-requirements =
 	<include>/usr/local/include
 	<variant>release:<define>NDEBUG
 	<define>_FILE_OFFSET_BITS=64
-	<define>BOOST_EXCEPTION_DISABLE
 # enable cancel support in asio
 	<define>BOOST_ASIO_ENABLE_CANCELIO
 # make sure asio uses std::chrono
 	<define>BOOST_ASIO_HAS_STD_CHRONO
 	<conditional>@linking
-# these compiler settings just makes the compiler standard conforming
-	<toolset>msvc:<cflags>/Zc:wchar_t
-	<toolset>msvc:<cflags>/Zc:forScope
 # msvc optimizations
 	<toolset>msvc,<variant>release:<linkflags>/OPT:ICF=5
 	<toolset>msvc,<variant>release:<linkflags>/OPT:REF
@@ -748,13 +808,14 @@ lib torrent
 	<link>shared:<define>TORRENT_BUILDING_SHARED
 	<define>BOOST_NO_DEPRECATED
 	<link>shared:<define>BOOST_SYSTEM_SOURCE
+	<crypto>openssl:<library>ssl
+	<crypto>openssl:<library>crypto
+	<crypto>libcrypto:<library>crypto
 
 	<dht>on:<source>src/kademlia/$(KADEMLIA_SOURCES).cpp
 	<dht>on:<source>ed25519/src/$(ED25519_SOURCES).cpp
 	<dht>on:<source>src/hasher512.cpp
 	<deprecated-functions>on:<source>src/lazy_bdecode.cpp
-	<variant>debug:<asserts>on
-	<variant>debug:<invariant-checks>on
 
 	<conditional>@building
 	<conditional>@warnings
@@ -766,6 +827,8 @@ lib torrent
 
 	: # default build
 	<threading>multi
+	<c++-template-depth>512
+	<conditional>@default-build
 
 	: # usage requirements
 	$(usage-requirements)

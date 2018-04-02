@@ -40,12 +40,11 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <functional>
 #include <thread>
 
-namespace lt = libtorrent;
-using namespace libtorrent;
+using namespace lt;
 
 TORRENT_TEST(limit)
 {
-	alert_manager mgr(500, 0xffffffff);
+	alert_manager mgr(500, alert::all_categories);
 
 	TEST_EQUAL(mgr.alert_queue_size_limit(), 500);
 	TEST_EQUAL(mgr.pending(), false);
@@ -81,7 +80,7 @@ TORRENT_TEST(limit)
 
 TORRENT_TEST(priority_limit)
 {
-	alert_manager mgr(100, 0xffffffff);
+	alert_manager mgr(100, alert::all_categories);
 
 	TEST_EQUAL(mgr.alert_queue_size_limit(), 100);
 
@@ -101,15 +100,17 @@ TORRENT_TEST(priority_limit)
 	TEST_EQUAL(alerts.size(), 200);
 }
 
+namespace {
 void test_notify_fun(int& cnt)
 {
 	++cnt;
 }
+} // anonymous namespace
 
 TORRENT_TEST(notify_function)
 {
 	int cnt = 0;
-	alert_manager mgr(100, 0xffffffff);
+	alert_manager mgr(100, alert::all_categories);
 
 	TEST_EQUAL(mgr.alert_queue_size_limit(), 100);
 	TEST_EQUAL(mgr.pending(), false);
@@ -149,25 +150,26 @@ TORRENT_TEST(notify_function)
 }
 
 #ifndef TORRENT_DISABLE_EXTENSIONS
+namespace {
 int plugin_alerts[3] = { 0, 0, 0 };
 
-struct test_plugin : libtorrent::plugin
+struct test_plugin : lt::plugin
 {
 	explicit test_plugin(int index) : m_index(index) {}
-	void on_alert(alert const* a) override
+	void on_alert(alert const*) override
 	{
 		++plugin_alerts[m_index];
 	}
 	int m_index;
 };
-
+} // anonymous namespace
 #endif
 
 TORRENT_TEST(extensions)
 {
 #ifndef TORRENT_DISABLE_EXTENSIONS
 	memset(plugin_alerts, 0, sizeof(plugin_alerts));
-	alert_manager mgr(100, 0xffffffff);
+	alert_manager mgr(100, alert::all_categories);
 
 	mgr.add_extension(std::make_shared<test_plugin>(0));
 	mgr.add_extension(std::make_shared<test_plugin>(1));
@@ -189,15 +191,19 @@ TORRENT_TEST(extensions)
 #endif
 }
 
+namespace {
+
 void post_torrent_added(alert_manager* mgr)
 {
 	std::this_thread::sleep_for(lt::milliseconds(10));
 	mgr->emplace_alert<add_torrent_alert>(torrent_handle(), add_torrent_params(), error_code());
 }
 
+} // anonymous namespace
+
 TORRENT_TEST(wait_for_alert)
 {
-	alert_manager mgr(100, 0xffffffff);
+	alert_manager mgr(100, alert::all_categories);
 
 	time_point start = clock_type::now();
 
@@ -238,14 +244,33 @@ TORRENT_TEST(wait_for_alert)
 
 TORRENT_TEST(alert_mask)
 {
-	alert_manager mgr(100, 0xffffffff);
+	alert_manager mgr(100, alert::all_categories);
 
 	TEST_CHECK(mgr.should_post<add_torrent_alert>());
 	TEST_CHECK(mgr.should_post<torrent_paused_alert>());
 
-	mgr.set_alert_mask(0);
+	mgr.set_alert_mask({});
 
 	TEST_CHECK(!mgr.should_post<add_torrent_alert>());
 	TEST_CHECK(!mgr.should_post<torrent_paused_alert>());
 }
 
+TORRENT_TEST(dropped_alerts)
+{
+	alert_manager mgr(1, alert::all_categories);
+
+	// nothing has dropped yet
+	TEST_CHECK(mgr.dropped_alerts().none());
+	mgr.emplace_alert<torrent_finished_alert>(torrent_handle());
+	// still nothing, there's space for one alert
+	TEST_CHECK(mgr.dropped_alerts().none());
+	mgr.emplace_alert<torrent_finished_alert>(torrent_handle());
+	// that last alert got dropped though, since it would have brought the queue
+	// size to 2
+	auto const d = mgr.dropped_alerts();
+	TEST_CHECK(d.count() == 1);
+	TEST_CHECK(d.test(torrent_finished_alert::alert_type));
+
+	// it should have been cleared now though
+	TEST_CHECK(mgr.dropped_alerts().none());
+}

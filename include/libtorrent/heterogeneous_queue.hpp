@@ -49,7 +49,7 @@ namespace libtorrent {
 		struct free_deleter
 		{ void operator()(char* ptr) { return std::free(ptr); } };
 
-		inline std::size_t calculate_pad_bytes(char* inptr, std::size_t alignment)
+		inline std::size_t calculate_pad_bytes(char const* inptr, std::size_t alignment)
 		{
 			std::uintptr_t const ptr = reinterpret_cast<std::uintptr_t>(inptr);
 			std::uintptr_t const offset = ptr & (alignment - 1);
@@ -78,7 +78,7 @@ namespace libtorrent {
 			std::size_t const pad_bytes = aux::calculate_pad_bytes(ptr + sizeof(header_t), alignof(U));
 
 			// pad_bytes is only 8 bits in the header, so types that need more than
-			// 256 byte alignment may not be suppored
+			// 256 byte alignment may not be supported
 			static_assert(alignof(U) <= 256
 				, "heterogeneous_queue does not support types with alignment requirements > 256");
 
@@ -207,7 +207,7 @@ namespace libtorrent {
 				static_cast<char*>(std::malloc(std::size_t(m_capacity + amount_to_grow)))
 				, aux::free_deleter());
 
-			if (new_storage.get() == nullptr)
+			if (!new_storage)
 				aux::throw_ex<std::bad_alloc>();
 
 			char* src = m_storage.get();
@@ -221,9 +221,7 @@ namespace libtorrent {
 				dst += sizeof(header_t) + src_hdr->pad_bytes;
 				int const len = src_hdr->len;
 				TORRENT_ASSERT(src + len <= end);
-				// TODO: if this throws, we should technically destruct the elements
-				// we've constructed so far, but maybe we should just disallow
-				// throwing move instead.
+				// this is no-throw
 				src_hdr->move(dst, src);
 				src_hdr->~header_t();
 				src += len ;
@@ -235,8 +233,12 @@ namespace libtorrent {
 		}
 
 		template <class U>
-		static void move(char* dst, char* src)
+		static void move(char* dst, char* src) noexcept
 		{
+			static_assert(std::is_nothrow_move_constructible<U>::value
+				, "heterogeneous queue only supports noexcept move constructible types");
+			static_assert(std::is_nothrow_destructible<U>::value
+				, "heterogeneous queue only supports noexcept destructible types");
 			U& rhs = *reinterpret_cast<U*>(src);
 
 			TORRENT_ASSERT((reinterpret_cast<std::uintptr_t>(dst) & (alignof(U) - 1)) == 0);
@@ -256,4 +258,3 @@ namespace libtorrent {
 }
 
 #endif
-

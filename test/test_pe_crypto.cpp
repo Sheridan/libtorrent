@@ -45,21 +45,21 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #if !defined(TORRENT_DISABLE_ENCRYPTION) && !defined(TORRENT_DISABLE_EXTENSIONS)
 
-namespace lt = libtorrent;
+namespace {
 
-void test_enc_handler(libtorrent::crypto_plugin& a, libtorrent::crypto_plugin& b)
+void test_enc_handler(lt::crypto_plugin& a, lt::crypto_plugin& b)
 {
 	int const repcount = 128;
 	for (int rep = 0; rep < repcount; ++rep)
 	{
-		int const buf_len = rand() % (512 * 1024);
+		std::size_t const buf_len = rand() % (512 * 1024);
 		std::vector<char> buf(buf_len);
 		std::vector<char> cmp_buf(buf_len);
 
 		std::generate(buf.begin(), buf.end(), &std::rand);
 		std::copy(buf.begin(), buf.end(), cmp_buf.begin());
 
-		using namespace libtorrent::aux;
+		using namespace lt::aux;
 
 		{
 			lt::span<char> iovec(&buf[0], buf_len);
@@ -68,7 +68,7 @@ void test_enc_handler(libtorrent::crypto_plugin& a, libtorrent::crypto_plugin& b
 			std::tie(next_barrier, iovec_out) = a.encrypt(iovec);
 			TEST_CHECK(buf != cmp_buf);
 			TEST_EQUAL(iovec_out.size(), 0);
-			TEST_EQUAL(next_barrier, buf_len);
+			TEST_EQUAL(next_barrier, int(buf_len));
 		}
 
 		{
@@ -79,7 +79,7 @@ void test_enc_handler(libtorrent::crypto_plugin& a, libtorrent::crypto_plugin& b
 			std::tie(consume, produce, packet_size) = b.decrypt(iovec);
 			TEST_CHECK(buf == cmp_buf);
 			TEST_EQUAL(consume, 0);
-			TEST_EQUAL(produce, buf_len);
+			TEST_EQUAL(produce, int(buf_len));
 			TEST_EQUAL(packet_size, 0);
 		}
 
@@ -90,7 +90,7 @@ void test_enc_handler(libtorrent::crypto_plugin& a, libtorrent::crypto_plugin& b
 			std::tie(next_barrier, iovec_out) = b.encrypt(iovec);
 			TEST_EQUAL(iovec_out.size(), 0);
 			TEST_CHECK(buf != cmp_buf);
-			TEST_EQUAL(next_barrier, buf_len);
+			TEST_EQUAL(next_barrier, int(buf_len));
 
 			int consume = 0;
 			int produce = 0;
@@ -99,15 +99,17 @@ void test_enc_handler(libtorrent::crypto_plugin& a, libtorrent::crypto_plugin& b
 			std::tie(consume, produce, packet_size) = a.decrypt(iovec2);
 			TEST_CHECK(buf == cmp_buf);
 			TEST_EQUAL(consume, 0);
-			TEST_EQUAL(produce, buf_len);
+			TEST_EQUAL(produce, int(buf_len));
 			TEST_EQUAL(packet_size, 0);
 		}
 	}
 }
 
+} // anonymous namespace
+
 TORRENT_TEST(diffie_hellman)
 {
-	using namespace libtorrent;
+	using namespace lt;
 
 	const int repcount = 128;
 
@@ -138,7 +140,7 @@ TORRENT_TEST(diffie_hellman)
 
 TORRENT_TEST(rc4)
 {
-	using namespace libtorrent;
+	using namespace lt;
 
 	sha1_hash test1_key = hasher("test1_key",8).final();
 	sha1_hash test2_key = hasher("test2_key",8).final();

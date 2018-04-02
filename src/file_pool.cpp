@@ -55,7 +55,7 @@ namespace libtorrent {
 	{
 		// file prio is only supported on vista and up
 		// so load the functions dynamically
-		typedef enum {
+		enum FILE_INFO_BY_HANDLE_CLASS_LOCAL {
 			FileBasicInfo,
 			FileStandardInfo,
 			FileNameInfo,
@@ -71,22 +71,24 @@ namespace libtorrent {
 			FileIoPriorityHintInfo,
 			FileRemoteProtocolInfo,
 			MaximumFileInfoByHandleClass
-		} FILE_INFO_BY_HANDLE_CLASS_LOCAL;
+		};
 
-		typedef enum {
+		enum PRIORITY_HINT_LOCAL {
 			IoPriorityHintVeryLow = 0,
 			IoPriorityHintLow,
 			IoPriorityHintNormal,
 			MaximumIoPriorityHintType
-		} PRIORITY_HINT_LOCAL;
+		};
 
-		typedef struct {
+		struct FILE_IO_PRIORITY_HINT_INFO_LOCAL {
 			PRIORITY_HINT_LOCAL PriorityHint;
-		} FILE_IO_PRIORITY_HINT_INFO_LOCAL;
+		};
 
-		typedef BOOL (WINAPI *SetFileInformationByHandle_t)(HANDLE hFile, FILE_INFO_BY_HANDLE_CLASS_LOCAL FileInformationClass, LPVOID lpFileInformation, DWORD dwBufferSize);
+		using SetFileInformationByHandle_t = BOOL (WINAPI *)(HANDLE
+			, FILE_INFO_BY_HANDLE_CLASS_LOCAL, LPVOID, DWORD);
 		auto SetFileInformationByHandle =
-			aux::get_library_procedure<aux::kernel32, SetFileInformationByHandle_t>("SetFileInformationByHandle");
+			aux::get_library_procedure<aux::kernel32, SetFileInformationByHandle_t>(
+				"SetFileInformationByHandle");
 
 		if (SetFileInformationByHandle == nullptr) return;
 
@@ -99,7 +101,7 @@ namespace libtorrent {
 
 	file_handle file_pool::open_file(storage_index_t st, std::string const& p
 		, file_index_t const file_index, file_storage const& fs
-		, std::uint32_t const m, error_code& ec)
+		, open_mode_t const m, error_code& ec)
 	{
 		// potentially used to hold a reference to a file object that's
 		// about to be destructed. If we have such object we assign it to
@@ -119,8 +121,8 @@ namespace libtorrent {
 #endif
 
 		TORRENT_ASSERT(is_complete(p));
-		TORRENT_ASSERT((m & file::rw_mask) == file::read_only
-			|| (m & file::rw_mask) == file::read_write);
+		TORRENT_ASSERT((m & open_mode::rw_mask) == open_mode::read_only
+			|| (m & open_mode::rw_mask) == open_mode::read_write);
 		auto const i = m_files.find(std::make_pair(st, file_index));
 		if (i != m_files.end())
 		{
@@ -130,9 +132,9 @@ namespace libtorrent {
 			// if we asked for a file in write mode,
 			// and the cached file is is not opened in
 			// write mode, re-open it
-			if ((((e.mode & file::rw_mask) != file::read_write)
-				&& ((m & file::rw_mask) == file::read_write))
-				|| (e.mode & file::random_access) != (m & file::random_access))
+			if ((((e.mode & open_mode::rw_mask) != open_mode::read_write)
+				&& ((m & open_mode::rw_mask) == open_mode::read_write))
+				|| (e.mode & open_mode::random_access) != (m & open_mode::random_access))
 			{
 				file_handle new_file = std::make_shared<file>();
 
@@ -175,33 +177,29 @@ namespace libtorrent {
 		{
 			// the file cache is at its maximum size, close
 			// the least recently used (lru) file from it
-			remove_oldest(l);
+			defer_destruction = remove_oldest(l);
 		}
 		return file_ptr;
 	}
 
 	namespace {
 
-	std::uint32_t to_file_open_mode(std::uint32_t const mode)
+	file_open_mode_t to_file_open_mode(open_mode_t const mode)
 	{
-		std::uint32_t ret = 0;
-		switch (mode & file::rw_mask)
-		{
-			case file::read_only:
-				ret = file_open_mode::read_only;
-				break;
-			case file::write_only:
-				ret = file_open_mode::write_only;
-				break;
-			case file::read_write:
-				ret = file_open_mode::read_write;
-				break;
-		}
+		file_open_mode_t ret;
+		open_mode_t const rw_mode = mode & open_mode::rw_mask;
 
-		if (mode & file::sparse) ret |= file_open_mode::sparse;
-		if (mode & file::no_atime) ret |= file_open_mode::no_atime;
-		if (mode & file::random_access) ret |= file_open_mode::random_access;
-		if (mode & file::lock_file) ret |= file_open_mode::locked;
+		ret = (rw_mode == open_mode::read_only)
+			? file_open_mode::read_only
+			: (rw_mode == open_mode::write_only)
+			? file_open_mode::write_only
+			: (rw_mode == open_mode::read_write)
+			? file_open_mode::read_write
+			: file_open_mode_t{};
+
+		if (mode & open_mode::sparse) ret |= file_open_mode::sparse;
+		if (mode & open_mode::no_atime) ret |= file_open_mode::no_atime;
+		if (mode & open_mode::random_access) ret |= file_open_mode::random_access;
 		return ret;
 	}
 
@@ -226,21 +224,20 @@ namespace libtorrent {
 		return ret;
 	}
 
-	void file_pool::remove_oldest(std::unique_lock<std::mutex>& l)
+	file_handle file_pool::remove_oldest(std::unique_lock<std::mutex>&)
 	{
 		using value_type = decltype(m_files)::value_type;
 		auto const i = std::min_element(m_files.begin(), m_files.end()
 			, [] (value_type const& lhs, value_type const& rhs)
 				{ return lhs.second.last_use < rhs.second.last_use; });
-		if (i == m_files.end()) return;
+		if (i == m_files.end()) return file_handle();
 
 		file_handle file_ptr = i->second.file_ptr;
 		m_files.erase(i);
 
 		// closing a file may be long running operation (mac os x)
-		l.unlock();
-		file_ptr.reset();
-		l.lock();
+		// let the calling function destruct it after releasing the mutex
+		return file_ptr;
 	}
 
 	void file_pool::release(storage_index_t const st, file_index_t file_index)
@@ -309,6 +306,9 @@ namespace libtorrent {
 
 	void file_pool::resize(int size)
 	{
+		// these are destructed _after_ the mutex is released
+		std::vector<file_handle> defer_destruction;
+
 		std::unique_lock<std::mutex> l(m_mutex);
 
 		TORRENT_ASSERT(size > 0);
@@ -319,7 +319,7 @@ namespace libtorrent {
 
 		// close the least recently used files
 		while (int(m_files.size()) > m_size)
-			remove_oldest(l);
+			defer_destruction.push_back(remove_oldest(l));
 	}
 
 	void file_pool::close_oldest()

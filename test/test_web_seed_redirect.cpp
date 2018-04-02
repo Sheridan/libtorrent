@@ -37,11 +37,11 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/create_torrent.hpp"
 #include "libtorrent/torrent_info.hpp"
 
-using namespace libtorrent;
+using namespace lt;
 
 TORRENT_TEST(web_seed_redirect)
 {
-	using namespace libtorrent;
+	using namespace lt;
 
 	error_code ec;
 
@@ -50,7 +50,7 @@ TORRENT_TEST(web_seed_redirect)
 
 	char random_data[16000];
 	std::generate(random_data, random_data + sizeof(random_data), random_byte);
-	file f("test_file", file::write_only, ec);
+	file f("test_file", open_mode::write_only, ec);
 	if (ec)
 	{
 		std::printf("failed to create file \"test_file\": (%d) %s\n"
@@ -66,7 +66,7 @@ TORRENT_TEST(web_seed_redirect)
 
 	// generate a torrent with pad files to make sure they
 	// are not requested web seeds
-	libtorrent::create_torrent t(fs, piece_size, 0x4000);
+	lt::create_torrent t(fs, piece_size, 0x4000);
 
 	char tmp[512];
 	std::snprintf(tmp, sizeof(tmp), "http://127.0.0.1:%d/redirect", port);
@@ -85,21 +85,18 @@ TORRENT_TEST(web_seed_redirect)
 
 	std::vector<char> buf;
 	bencode(std::back_inserter(buf), t.generate());
-	auto torrent_file = std::make_shared<torrent_info>(&buf[0]
-		, int(buf.size()), ec);
+	auto torrent_file = std::make_shared<torrent_info>(buf, ec, from_span);
 
 	{
 		settings_pack p = settings();
 		p.set_int(settings_pack::max_queued_disk_bytes, 256 * 1024);
 		p.set_int(settings_pack::alert_mask, ~(alert::progress_notification | alert::stats_notification));
-		libtorrent::session ses(p);
+		lt::session ses(p);
 
 		// disable keep-alive because otherwise the test will choke on seeing
 		// the disconnect (from the redirect)
-		test_transfer(ses, torrent_file, 0, nullptr, "http", true, false, false, false);
+		test_transfer(ses, torrent_file, 0, "http", true, false, false, false);
 	}
 
 	stop_web_server();
 }
-
-

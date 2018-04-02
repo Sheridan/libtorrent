@@ -73,9 +73,9 @@ POSSIBILITY OF SUCH DAMAGE.
 //	struct temp_storage : storage_interface
 //	{
 //		temp_storage(file_storage const& fs) : storage_interface(fs) {}
-//		virtual bool initialize(storage_error& se) { return false; }
-//		virtual bool has_any_file() { return false; }
-//		virtual int read(char* buf, int piece, int offset, int size)
+//		bool initialize(storage_error& se) override { return false; }
+//		bool has_any_file() override { return false; }
+//		int read(char* buf, int piece, int offset, int size) override
 //		{
 //			std::map<int, std::vector<char>>::const_iterator i = m_file_data.find(piece);
 //			if (i == m_file_data.end()) return 0;
@@ -85,22 +85,22 @@ POSSIBILITY OF SUCH DAMAGE.
 //			memcpy(buf, &i->second[offset], available);
 //			return available;
 //		}
-//		virtual int write(const char* buf, int piece, int offset, int size)
+//		int write(const char* buf, int piece, int offset, int size) override
 //		{
 //			std::vector<char>& data = m_file_data[piece];
 //			if (data.size() < offset + size) data.resize(offset + size);
 //			std::memcpy(&data[offset], buf, size);
 //			return size;
 //		}
-//		virtual bool rename_file(file_index_t file, std::string const& new_name)
+//		bool rename_file(file_index_t file, std::string const& new_name) override
 //		{ assert(false); return false; }
-//		virtual status_t move_storage(std::string const& save_path) { return false; }
-//		virtual bool verify_resume_data(add_torrent_params const& rd
+//		status_t move_storage(std::string const& save_path) override { return false; }
+//		bool verify_resume_data(add_torrent_params const& rd
 //			, std::vector<std::string> const* links
-//			, storage_error& error) { return false; }
-//		virtual std::int64_t physical_offset(int piece, int offset)
+//			, storage_error& error) override { return false; }
+//		std::int64_t physical_offset(int piece, int offset) override
 //		{ return piece * files().piece_length() + offset; };
-//		virtual sha1_hash hash_for_slot(int piece, partial_hash& ph, int piece_size)
+//		sha1_hash hash_for_slot(int piece, partial_hash& ph, int piece_size) override
 //		{
 //			int left = piece_size - ph.offset;
 //			assert(left >= 0);
@@ -110,14 +110,14 @@ POSSIBILITY OF SUCH DAMAGE.
 //				// if there are padding files, those blocks will be considered
 //				// completed even though they haven't been written to the storage.
 //				// in this case, just extend the piece buffer to its full size
-//				// and fill it with zeroes.
+//				// and fill it with zeros.
 //				if (data.size() < piece_size) data.resize(piece_size, 0);
 //				ph.h.update(&data[ph.offset], left);
 //			}
 //			return ph.h.final();
 //		}
-//		virtual bool release_files() { return false; }
-//		virtual bool delete_files() { return false; }
+//		bool release_files() override { return false; }
+//		bool delete_files() override { return false; }
 //
 //		std::map<int, std::vector<char>> m_file_data;
 //	};
@@ -133,8 +133,6 @@ namespace libtorrent {
 	namespace aux { struct session_settings; }
 	struct add_torrent_params;
 
-	TORRENT_EXTRA_EXPORT void clear_bufs(span<iovec_t const> bufs);
-
 	struct disk_io_thread;
 
 	// The storage interface is a pure virtual class that can be implemented to
@@ -143,7 +141,7 @@ namespace libtorrent {
 	// the torrent in the way one would assume a torrent is saved to disk.
 	// Implementing your own storage interface makes it possible to store all
 	// data in RAM, or in some optimized order on disk (the order the pieces are
-	// received for instance), or saving multifile torrents in a single file in
+	// received for instance), or saving multi file torrents in a single file in
 	// order to be able to take advantage of optimized disk-I/O.
 	//
 	// It is also possible to write a thin class that uses the default storage
@@ -163,17 +161,33 @@ namespace libtorrent {
 	// reads garbage. It's useful mostly for benchmarking and profiling purpose.
 	//
 	struct TORRENT_EXPORT storage_interface
-		: public std::enable_shared_from_this<storage_interface>
-		, public aux::disk_job_fence
-		, public aux::storage_piece_set
-		, boost::noncopyable
+		: std::enable_shared_from_this<storage_interface>
+		, aux::disk_job_fence
+		, aux::storage_piece_set
 	{
 		explicit storage_interface(file_storage const& fs) : m_files(fs) {}
 
-		// This function is called when the storage is to be initialized. The
-		// default storage will create directories and empty files at this point.
-		// If ``allocate_files`` is true, it will also ``ftruncate`` all files to
-		// their target size.
+		storage_interface(storage_interface const&) = delete;
+		storage_interface& operator=(storage_interface const&) = delete;
+
+		// This function is called when the *storage* on disk is to be
+		// initialized. The default storage will create directories and empty
+		// files at this point. If ``allocate_files`` is true, it will also
+		// ``ftruncate`` all files to their target size.
+		//
+		// This function may be called multiple time on a single instance. When a
+		// torrent is force-rechecked, the storage is re-initialized to trigger
+		// the re-check from scratch.
+		//
+		// The function is not necessarily called before other member functions.
+		// For instance has_any_files() and verify_resume_data() are
+		// called early to determine whether we may have to check all files or
+		// not. If we're doing a full check of the files every piece will be
+		// hashed, causing readv() to be called as well.
+		//
+		// Any required internals that need initialization should be done in the
+		// constructor. This function is called before the torrent starts to
+		// download.
 		//
 		// If an error occurs, ``storage_error`` should be set to reflect it.
 		virtual void initialize(storage_error& ec) = 0;
@@ -208,9 +222,9 @@ namespace libtorrent {
 		// error. If there's an error, the ``storage_error`` must be filled out
 		// to represent the error that occurred.
 		virtual int readv(span<iovec_t const> bufs
-			, piece_index_t piece, int offset, std::uint32_t flags, storage_error& ec) = 0;
+			, piece_index_t piece, int offset, open_mode_t flags, storage_error& ec) = 0;
 		virtual int writev(span<iovec_t const> bufs
-			, piece_index_t piece, int offset, std::uint32_t flags, storage_error& ec) = 0;
+			, piece_index_t piece, int offset, open_mode_t flags, storage_error& ec) = 0;
 
 		// This function is called when first checking (or re-checking) the
 		// storage for a torrent. It should return true if any of the files that
@@ -223,7 +237,7 @@ namespace libtorrent {
 		// change the priorities of files. This is a fenced job and is
 		// guaranteed to be the only running function on this storage
 		// when called
-		virtual void set_file_priority(aux::vector<std::uint8_t, file_index_t> const& prio
+		virtual void set_file_priority(aux::vector<download_priority_t, file_index_t> const& prio
 			, storage_error& ec) = 0;
 
 		// This function should move all the files belonging to the storage to
@@ -234,8 +248,8 @@ namespace libtorrent {
 		// like ``release_files()``.
 		//
 		//If an error occurs, ``storage_error`` should be set to reflect it.
-		virtual status_t move_storage(std::string const& save_path, int flags
-			, storage_error& ec) = 0;
+		virtual status_t move_storage(std::string const& save_path
+			, move_flags_t flags, storage_error& ec) = 0;
 
 		// This function should verify the resume data ``rd`` with the files
 		// on disk. If the resume data seems to be up-to-date, return true. If
@@ -266,7 +280,7 @@ namespace libtorrent {
 		//
 		virtual void release_files(storage_error& ec) = 0;
 
-		// Rename file with index ``index`` to the name ``new_filename``.
+		// Rename the file with index ``file`` to name ``new_name``.
 		//
 		// If an error occurs, ``storage_error`` should be set to reflect it.
 		//
@@ -281,22 +295,22 @@ namespace libtorrent {
 		// If an error occurs, ``storage_error`` should be set to reflect it.
 		//
 		// The ``disk_buffer_pool`` is used to allocate and free disk buffers. It
-		// has the following members::
+		// has the following members:
 		//
-		//	struct disk_buffer_pool : boost::noncopyable
-		//	{
-		//		char* allocate_buffer(char const* category);
-		//		void free_buffer(char* buf);
+		// .. code:: c++
 		//
-		//		char* allocate_buffers(int blocks, char const* category);
-		//		void free_buffers(char* buf, int blocks);
+		//		struct disk_buffer_pool
+		//		{
+		//			char* allocate_buffer(char const* category);
+		//			void free_buffer(char* buf);
 		//
-		//		int block_size() const { return m_block_size; }
+		//			char* allocate_buffers(int blocks, char const* category);
+		//			void free_buffers(char* buf, int blocks);
 		//
-		//		void release_memory();
-		//	};
+		//			int block_size() const { return m_block_size; }
 		//
-		virtual void delete_files(int options, storage_error& ec) = 0;
+		//		};
+		virtual void delete_files(remove_flags_t options, storage_error& ec) = 0;
 
 		// called periodically (useful for deferred flushing). When returning
 		// false, it means no more ticks are necessary. Any disk job submitted
@@ -336,7 +350,7 @@ namespace libtorrent {
 		int dec_refcount()
 		{
 			TORRENT_ASSERT(m_references > 0);
-			return m_references--;
+			return --m_references;
 		}
 		void inc_refcount() { ++m_references; }
 	private:
@@ -352,7 +366,7 @@ namespace libtorrent {
 		// the file_storage object is owned by the torrent.
 		std::shared_ptr<void> m_torrent;
 
-		storage_index_t m_storage_index;
+		storage_index_t m_storage_index{0};
 
 		// the number of block_cache_reference objects referencing this storage
 		std::atomic<int> m_references{1};
@@ -380,27 +394,27 @@ namespace libtorrent {
 		explicit default_storage(storage_params const& params, file_pool&);
 
 		// hidden
-		~default_storage();
+		~default_storage() override;
 
-		virtual bool has_any_file(storage_error& ec) override;
-		virtual void set_file_priority(aux::vector<std::uint8_t, file_index_t> const& prio
+		bool has_any_file(storage_error& ec) override;
+		void set_file_priority(aux::vector<download_priority_t, file_index_t> const& prio
 			, storage_error& ec) override;
-		virtual void rename_file(file_index_t index, std::string const& new_filename
+		void rename_file(file_index_t index, std::string const& new_filename
 			, storage_error& ec) override;
-		virtual void release_files(storage_error& ec) override;
-		virtual void delete_files(int options, storage_error& ec) override;
-		virtual void initialize(storage_error& ec) override;
-		virtual status_t move_storage(std::string const& save_path, int flags
-			, storage_error& ec) override;
-		virtual bool verify_resume_data(add_torrent_params const& rd
+		void release_files(storage_error& ec) override;
+		void delete_files(remove_flags_t options, storage_error& ec) override;
+		void initialize(storage_error& ec) override;
+		status_t move_storage(std::string const& save_path
+			, move_flags_t flags, storage_error& ec) override;
+		bool verify_resume_data(add_torrent_params const& rd
 			, aux::vector<std::string, file_index_t> const& links
 			, storage_error& error) override;
-		virtual bool tick() override;
+		bool tick() override;
 
 		int readv(span<iovec_t const> bufs
-			, piece_index_t piece, int offset, std::uint32_t flags, storage_error& ec) override;
+			, piece_index_t piece, int offset, open_mode_t flags, storage_error& ec) override;
 		int writev(span<iovec_t const> bufs
-			, piece_index_t piece, int offset, std::uint32_t flags, storage_error& ec) override;
+			, piece_index_t piece, int offset, open_mode_t flags, storage_error& ec) override;
 
 		// if the files in this storage are mapped, returns the mapped
 		// file_storage, otherwise returns the original file_storage object.
@@ -410,8 +424,6 @@ namespace libtorrent {
 		}
 
 	private:
-
-		void delete_one_file(std::string const& p, error_code& ec);
 
 		void need_partfile();
 
@@ -424,12 +436,27 @@ namespace libtorrent {
 		mutable stat_cache m_stat_cache;
 
 		// helper function to open a file in the file pool with the right mode
-		file_handle open_file(file_index_t file, std::uint32_t mode, storage_error& ec) const;
-		file_handle open_file_impl(file_index_t file, std::uint32_t mode, error_code& ec) const;
+		file_handle open_file(file_index_t file, open_mode_t mode, storage_error& ec) const;
+		file_handle open_file_impl(file_index_t file, open_mode_t mode, error_code& ec) const;
 
-		aux::vector<std::uint8_t, file_index_t> m_file_priority;
+		bool use_partfile(file_index_t index) const;
+		void use_partfile(file_index_t index, bool b);
+
+		aux::vector<download_priority_t, file_index_t> m_file_priority;
 		std::string m_save_path;
 		std::string m_part_file_name;
+
+		// this this is an array indexed by file-index. Each slot represents
+		// whether this file has the part-file enabled for it. This is used for
+		// backwards compatibility with pre-partfile versions of libtorrent. If
+		// this vector is empty, the default is that files *do* use the partfile.
+		// on startup, any 0-priority file that's found in it's original location
+		// is expected to be an old-style (pre-partfile) torrent storage, and
+		// those files have their slot set to false in this vector.
+		// note that the vector is *sparse*, it's only allocated if a file has its
+		// entry set to false, and only indices up to that entry.
+		aux::vector<bool, file_index_t> m_use_partfile;
+
 		// the file pool is a member of the disk_io_thread
 		// to make all storage instances share the pool
 		file_pool& m_pool;
@@ -442,6 +469,7 @@ namespace libtorrent {
 		// whose bit is 0, we set the file size, to make the file allocated
 		// on disk (in full allocation mode) and just sparsely allocated in
 		// case of sparse allocation mode
+		mutable std::mutex m_file_created_mutex;
 		mutable typed_bitfield<file_index_t> m_file_created;
 
 		bool m_allocate_files;

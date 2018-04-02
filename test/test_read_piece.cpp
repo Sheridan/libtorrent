@@ -39,6 +39,8 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/hex.hpp" // to_hex
 #include "libtorrent/aux_/path.hpp"
 
+namespace {
+
 enum flags_t
 {
 	seed_mode = 1,
@@ -47,8 +49,7 @@ enum flags_t
 
 void test_read_piece(int flags)
 {
-	using namespace libtorrent;
-	namespace lt = libtorrent;
+	using namespace lt;
 
 	std::printf("==== TEST READ PIECE =====\n");
 
@@ -76,7 +77,7 @@ void test_read_piece(int flags)
 		, file_sizes, 2);
 
 	add_files(fs, combine_path("tmp1_read_piece", "test_torrent"));
-	libtorrent::create_torrent t(fs, piece_size, 0x4000);
+	lt::create_torrent t(fs, piece_size, 0x4000);
 
 	// calculate the hash for all pieces
 	set_piece_hashes(t, "tmp1_read_piece", ec);
@@ -85,12 +86,12 @@ void test_read_piece(int flags)
 
 	std::vector<char> buf;
 	bencode(std::back_inserter(buf), t.generate());
-	auto ti = std::make_shared<torrent_info>(&buf[0], int(buf.size()), ec);
+	auto ti = std::make_shared<torrent_info>(buf, ec, from_span);
 
 	std::printf("generated torrent: %s tmp1_read_piece/test_torrent\n"
 		, aux::to_hex(ti->info_hash()).c_str());
 
-	const int mask = alert::all_categories
+	auto const mask = alert::all_categories
 		& ~(alert::progress_notification
 			| alert::performance_warning
 			| alert::stats_notification);
@@ -106,12 +107,12 @@ void test_read_piece(int flags)
 	lt::session ses(sett);
 
 	add_torrent_params p;
-	p.flags &= ~add_torrent_params::flag_paused;
-	p.flags &= ~add_torrent_params::flag_auto_managed;
+	p.flags &= ~torrent_flags::paused;
+	p.flags &= ~torrent_flags::auto_managed;
 	p.save_path = "tmp1_read_piece";
 	p.ti = ti;
-	if (flags & seed_mode)
-		p.flags |= add_torrent_params::flag_seed_mode;
+	if (flags & flags_t::seed_mode)
+		p.flags |= torrent_flags::seed_mode;
 	torrent_handle tor1 = ses.add_torrent(p, ec);
 	if (ec) std::printf("ERROR: add_torrent: (%d) %s\n"
 		, ec.value(), ec.message().c_str());
@@ -150,6 +151,8 @@ void test_read_piece(int flags)
 		, ec.value(), ec.message().c_str());
 }
 
+} // anonymous namespace
+
 TORRENT_TEST(read_piece)
 {
 	test_read_piece(0);
@@ -164,4 +167,3 @@ TORRENT_TEST(time_critical)
 {
 	test_read_piece(time_critical);
 }
-

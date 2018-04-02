@@ -35,6 +35,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <libtorrent/kademlia/dht_observer.hpp>
 #include <libtorrent/socket_io.hpp>
 #include <libtorrent/performance_counters.hpp>
+#include <libtorrent/broadcast_socket.hpp> // for is_v4
 
 #ifndef TORRENT_DISABLE_LOGGING
 #include <libtorrent/hex.hpp> // to_hex
@@ -44,7 +45,7 @@ namespace libtorrent { namespace dht {
 
 void get_peers_observer::reply(msg const& m)
 {
-	bdecode_node r = m.message.dict_find_dict("r");
+	bdecode_node const r = m.message.dict_find_dict("r");
 	if (!r)
 	{
 #ifndef TORRENT_DISABLE_LOGGING
@@ -61,7 +62,7 @@ void get_peers_observer::reply(msg const& m)
 	{
 		std::vector<tcp::endpoint> peer_list;
 		if (n.list_size() == 1 && n.list_at(0).type() == bdecode_node::string_t
-			&& m.addr.protocol() == udp::v4())
+			&& is_v4(m.addr))
 		{
 			// assume it's mainline format
 			char const* peers = n.list_at(0).string_ptr();
@@ -218,7 +219,7 @@ bool obfuscated_get_peers::invoke(observer_ptr o)
 			// don't re-request from nodes that didn't respond
 			if (node->flags & observer::flag_failed) continue;
 			// don't interrupt with queries that are already in-flight
-			if ((node->flags & observer::flag_alive) == 0) continue;
+			if (!(node->flags & observer::flag_alive)) continue;
 			node->flags &= ~(observer::flag_queried | observer::flag_alive);
 		}
 		return get_peers::invoke(o);
@@ -275,7 +276,7 @@ void obfuscated_get_peers::done()
 #endif
 
 	int num_added = 0;
-	for (std::vector<observer_ptr>::iterator i = m_results.begin()
+	for (auto i = m_results.begin()
 		, end(m_results.end()); i != end && num_added < 16; ++i)
 	{
 		observer_ptr o = *i;
@@ -283,7 +284,7 @@ void obfuscated_get_peers::done()
 		// only add nodes whose node ID we know and that
 		// we know are alive
 		if (o->flags & observer::flag_no_id) continue;
-		if ((o->flags & observer::flag_alive) == 0) continue;
+		if (!(o->flags & observer::flag_alive)) continue;
 
 		ta->add_entry(o->id(), o->target_ep(), observer::flag_initial);
 		++num_added;

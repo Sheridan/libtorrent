@@ -39,45 +39,85 @@ POSSIBILITY OF SUCH DAMAGE.
 
 namespace libtorrent {
 
+namespace aux {
+
+	template <typename From, typename To>
+	struct compatible_type
+	{
+		// conversions that are OK
+		// int -> int
+		// int const -> int const
+		// int -> int const
+		// int -> int volatile
+		// int -> int const volatile
+		// int volatile -> int const volatile
+		// int const -> int const volatile
+
+		static const bool value = std::is_same<From, To>::value
+			|| std::is_same<From, typename std::remove_const<To>::type>::value
+			|| std::is_same<From, typename std::remove_volatile<To>::type>::value
+			|| std::is_same<From, typename std::remove_cv<To>::type>::value
+			;
+	};
+}
+
 	template <typename T>
 	struct span
 	{
-		span() : m_ptr(nullptr), m_len(0) {}
+		span() noexcept : m_ptr(nullptr), m_len(0) {}
 
-		template <typename U>
-		span(span<U> const& v) // NOLINT
+		template <typename U, typename
+			= typename std::enable_if<aux::compatible_type<U, T>::value>::type>
+		span(span<U> const& v) noexcept // NOLINT
 			: m_ptr(v.data()), m_len(v.size()) {}
 
-		span(T& p) : m_ptr(&p), m_len(1) {} // NOLINT
-		span(T* p, std::size_t const l) : m_ptr(p), m_len(l) {} // NOLINT
+		span(T& p) noexcept : m_ptr(&p), m_len(1) {} // NOLINT
+		span(T* p, std::size_t const l) noexcept : m_ptr(p), m_len(l) {} // NOLINT
 
 		template <typename U, std::size_t N>
-		span(std::array<U, N>& arr) // NOLINT
+		span(std::array<U, N>& arr) noexcept // NOLINT
 			: m_ptr(arr.data()), m_len(arr.size()) {}
 
+		// this is necessary until C++17, where data() returns a non-const pointer
+		template <typename U>
+		span(std::basic_string<U>& str) noexcept // NOLINT
+			: m_ptr(&str[0]), m_len(str.size()) {}
+
 		template <typename U, std::size_t N>
-		span(U (&arr)[N]) // NOLINT
+		span(U (&arr)[N]) noexcept // NOLINT
 			: m_ptr(&arr[0]), m_len(N) {}
 
 		// anything with a .data() member function is considered a container
-		template <typename Cont, typename = decltype(std::declval<Cont>().data())>
+		// but only if the value type is compatible with T
+		template <typename Cont
+			, typename U = typename std::remove_reference<decltype(*std::declval<Cont>().data())>::type
+			, typename = typename std::enable_if<aux::compatible_type<U, T>::value>::type>
 		span(Cont& c) // NOLINT
 			: m_ptr(c.data()), m_len(c.size()) {}
 
-		std::size_t size() const { return m_len; }
-		bool empty() const { return m_len == 0; }
-		T* data() const { return m_ptr; }
+		// allow construction from const containers if T is const
+		// this allows const spans to be constructed from a temporary container
+		template <typename Cont
+			, typename U = typename std::remove_reference<decltype(*std::declval<Cont>().data())>::type
+			, typename = typename std::enable_if<aux::compatible_type<U, T>::value
+				&& std::is_const<T>::value>::type>
+		span(Cont const& c) // NOLINT
+			: m_ptr(c.data()), m_len(c.size()) {}
+
+		std::size_t size() const noexcept { return m_len; }
+		bool empty() const noexcept { return m_len == 0; }
+		T* data() const noexcept { return m_ptr; }
 
 		using iterator = T*;
 		using reverse_iterator = std::reverse_iterator<T*>;
 
-		T* begin() const { return m_ptr; }
-		T* end() const { return m_ptr + m_len; }
-		reverse_iterator rbegin() const { return reverse_iterator(end()); }
-		reverse_iterator rend() const { return reverse_iterator(begin()); }
+		T* begin() const noexcept { return m_ptr; }
+		T* end() const noexcept { return m_ptr + m_len; }
+		reverse_iterator rbegin() const noexcept { return reverse_iterator(end()); }
+		reverse_iterator rend() const noexcept { return reverse_iterator(begin()); }
 
-		T& front() const { TORRENT_ASSERT(m_len > 0); return m_ptr[0]; }
-		T& back() const { TORRENT_ASSERT(m_len > 0); return m_ptr[m_len - 1]; }
+		T& front() const noexcept { TORRENT_ASSERT(m_len > 0); return m_ptr[0]; }
+		T& back() const noexcept { TORRENT_ASSERT(m_len > 0); return m_ptr[m_len - 1]; }
 
 		span<T> first(std::size_t const n) const
 		{
@@ -114,6 +154,14 @@ namespace libtorrent {
 		T* m_ptr;
 		std::size_t m_len;
 	};
+
+	template <class T, class U>
+	inline bool operator==(span<T> const& lhs, span<U> const& rhs)
+	{
+		return  lhs.size()  == rhs.size()
+			&& (lhs.begin() == rhs.begin() || std::equal(lhs.begin(), lhs.end(), rhs.begin()));
+	}
+
 }
 
 #endif // TORRENT_SPAN_HPP_INCLUDED

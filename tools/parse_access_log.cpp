@@ -40,8 +40,8 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <cstdio>
 #include <cinttypes> // for PRId64 et.al.
 
-using namespace libtorrent;
-using namespace libtorrent::detail; // for write_* and read_*
+using namespace lt;
+using namespace lt::detail; // for write_* and read_*
 
 void print_usage()
 {
@@ -76,7 +76,7 @@ int main(int argc, char* argv[])
 	FILE* reads_elev_file = std::fopen("reads_elevator.log", "w+");
 
 
-	typedef std::map<std::uint32_t, file_op> op_map;
+	using op_map = std::map<std::uint32_t, file_op>;
 	op_map outstanding_ops;
 
 	std::uint64_t first_timestamp = 0;

@@ -34,7 +34,9 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/block_cache.hpp" // for cached_piece_entry
 #include "libtorrent/disk_buffer_holder.hpp"
 
+#include "libtorrent/aux_/disable_warnings_push.hpp"
 #include <boost/variant/get.hpp>
+#include "libtorrent/aux_/disable_warnings_pop.hpp"
 
 namespace libtorrent {
 
@@ -60,7 +62,7 @@ namespace libtorrent {
 			void operator()(disk_io_job::hash_handler& h) const
 			{
 				if (!h) return;
-				h(m_job.piece, sha1_hash(m_job.d.piece_hash), m_job.error);
+				h(m_job.piece, m_job.d.piece_hash, m_job.error);
 			}
 
 			void operator()(disk_io_job::move_handler& h) const
@@ -100,10 +102,13 @@ namespace libtorrent {
 		};
 	}
 
+	constexpr disk_job_flags_t disk_io_job::fence;
+	constexpr disk_job_flags_t disk_io_job::in_progress;
+	constexpr disk_job_flags_t disk_io_job::aborted;
+
 	disk_io_job::disk_io_job()
-		: argument(0)
+		: argument(remove_flags_t{})
 		, piece(0)
-		, action(read)
 	{
 		d.io.offset = 0;
 		d.io.buffer_size = 0;
@@ -114,14 +119,14 @@ namespace libtorrent {
 		boost::apply_visitor(caller_visitor(*this), callback);
 	}
 
-	bool disk_io_job::completed(cached_piece_entry const* pe, int block_size)
+	bool disk_io_job::completed(cached_piece_entry const* pe)
 	{
-		if (action != write) return false;
+		if (action != job_action_t::write) return false;
 
-		int block_offset = d.io.offset & (block_size - 1);
+		int block_offset = d.io.offset & (default_block_size - 1);
 		int size = d.io.buffer_size;
-		int start = d.io.offset / block_size;
-		int end = block_offset > 0 && (size > block_size - block_offset) ? start + 2 : start + 1;
+		int start = d.io.offset / default_block_size;
+		int end = block_offset > 0 && (size > default_block_size - block_offset) ? start + 2 : start + 1;
 
 		for (int i = start; i < end; ++i)
 		{

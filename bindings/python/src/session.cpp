@@ -2,6 +2,7 @@
 // subject to the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 
+#include "boost_python.hpp"
 #include <list>
 #include <string>
 #include <libtorrent/session.hpp>
@@ -13,12 +14,14 @@
 #include <libtorrent/bdecode.hpp>
 #include <libtorrent/bencode.hpp>
 #include <libtorrent/read_resume_data.hpp>
+#include <libtorrent/write_resume_data.hpp>
 #include <libtorrent/torrent_info.hpp>
 #include <libtorrent/kademlia/item.hpp> // for sign_mutable_item
 #include <libtorrent/alert.hpp>
 #include <libtorrent/time.hpp>
 #include <libtorrent/session_stats.hpp>
 #include <libtorrent/session_status.hpp>
+#include <libtorrent/peer_class_type_filter.hpp>
 
 #include <libtorrent/extensions/smart_ban.hpp>
 #include <libtorrent/extensions/ut_metadata.hpp>
@@ -27,8 +30,9 @@
 namespace boost
 {
 	// this fixes mysterious link error on msvc
-	libtorrent::alert const volatile*
-	get_pointer(libtorrent::alert const volatile* p)
+	template <>
+	inline lt::alert const volatile*
+	get_pointer(class lt::alert const volatile* p)
 	{
 		return p;
 	}
@@ -36,7 +40,6 @@ namespace boost
 
 #include "gil.hpp"
 #include "bytes.hpp"
-#include "boost_python.hpp"
 
 #ifdef _MSC_VER
 #pragma warning(push)
@@ -45,12 +48,13 @@ namespace boost
 #endif
 
 using namespace boost::python;
-using namespace libtorrent;
-namespace lt = libtorrent;
+using namespace lt;
 
 namespace
 {
 #ifndef TORRENT_NO_DEPRECATE
+    struct dummy {};
+
     void listen_on(lt::session& s, int min_, int max_, char const* interface, int flags)
     {
         allow_threading_guard guard;
@@ -109,11 +113,10 @@ namespace
 
 	void make_settings_pack(lt::settings_pack& p, dict const& sett_dict)
 	{
-		list iterkeys = (list)sett_dict.keys();
-		int const len = int(boost::python::len(iterkeys));
-		for (int i = 0; i < len; i++)
+		stl_input_iterator<std::string> i(sett_dict.keys()), end;
+		for (; i != end; ++i)
 		{
-			std::string const key = extract<std::string>(iterkeys[i]);
+			std::string const key = *i;
 
 			int sett = setting_by_name(key);
 			if (sett < 0)
@@ -165,7 +168,7 @@ namespace
 		return ret;
 	}
 
-	std::shared_ptr<lt::session> make_session(boost::python::dict sett, int flags)
+	std::shared_ptr<lt::session> make_session(boost::python::dict sett, session_flags_t flags)
 	{
 		settings_pack p;
 		make_settings_pack(p, sett);
@@ -231,7 +234,7 @@ namespace
             object const value = item[1];
             // torrent_info objects are always held by a shared_ptr in the
             // python binding, skip it if it is a object
-            if(key == "ti" && value != boost::python::object())
+            if (key == "ti" && value != boost::python::object())
             {
                 // make a copy here. We don't want to end up holding a python-owned
                 // object inside libtorrent. If the last reference goes out of scope
@@ -310,7 +313,7 @@ namespace
             }
             else if(key == "flags")
             {
-                p.flags = extract<std::uint64_t>(value);
+                p.flags = extract<lt::torrent_flags_t>(value);
                 continue;
             }
             else if(key == "trackerid")
@@ -332,7 +335,7 @@ namespace
             }
             else if(key == "file_priorities")
             {
-                p.file_priorities = extract<std::vector<std::uint8_t>>(value);
+                p.file_priorities = extract<std::vector<download_priority_t>>(value);
             }
             else
             {
@@ -473,11 +476,11 @@ namespace
     }
 #endif
 
-    entry save_state(lt::session const& s, std::uint32_t flags)
+    entry save_state(lt::session const& s, std::uint32_t const flags)
     {
         allow_threading_guard guard;
         entry e;
-        s.save_state(e, flags);
+        s.save_state(e, save_state_flags_t(flags));
         return e;
     }
 
@@ -497,7 +500,7 @@ namespace
         return ret;
     }
 
-	void load_state(lt::session& ses, entry const& st, std::uint32_t flags)
+	void load_state(lt::session& ses, entry const& st, std::uint32_t const flags)
 	{
 		allow_threading_guard guard;
 
@@ -507,7 +510,73 @@ namespace
 		error_code ec;
 		bdecode(&buf[0], &buf[0] + buf.size(), e, ec);
 		TORRENT_ASSERT(!ec);
-		ses.load_state(e, flags);
+		ses.load_state(e, save_state_flags_t(flags));
+	}
+
+	dict get_peer_class(lt::session& ses, lt::peer_class_t const pc)
+	{
+		lt::peer_class_info pci;
+		{
+			allow_threading_guard guard;
+			pci = ses.get_peer_class(pc);
+		}
+		dict ret;
+		ret["ignore_unchoke_slots"] = pci.ignore_unchoke_slots;
+		ret["connection_limit_factor"] = pci.connection_limit_factor;
+		ret["label"] = pci.label;
+		ret["upload_limit"] = pci.upload_limit;
+		ret["download_limit"] = pci.download_limit;
+		ret["upload_priority"] = pci.upload_priority;
+		ret["download_priority"] = pci.download_priority;
+		return ret;
+	}
+
+	void set_peer_class(lt::session& ses, peer_class_t const pc, dict info)
+	{
+		lt::peer_class_info pci;
+		stl_input_iterator<std::string> i(info.keys()), end;
+		for (; i != end; ++i)
+		{
+			std::string const key = *i;
+
+			object const value = info[key];
+			if (key == "ignore_unchoke_slots")
+			{
+				pci.ignore_unchoke_slots = extract<bool>(value);
+			}
+			else if (key == "connection_limit_factor")
+			{
+				pci.connection_limit_factor = extract<int>(value);
+			}
+			else if (key == "label")
+			{
+				pci.label = extract<std::string>(value);
+			}
+			else if (key == "upload_limit")
+			{
+				pci.upload_limit = extract<int>(value);
+			}
+			else if (key == "download_limit")
+			{
+				pci.download_limit = extract<int>(value);
+			}
+			else if (key == "upload_priority")
+			{
+				pci.upload_priority = extract<int>(value);
+			}
+			else if (key == "download_priority")
+			{
+				pci.download_priority = extract<int>(value);
+			}
+			else
+			{
+				PyErr_SetString(PyExc_KeyError, ("unknown name in peer_class_info: " + key).c_str());
+				throw_error_already_set();
+			}
+		}
+
+		allow_threading_guard guard;
+		ses.set_peer_class(pc, pci);
 	}
 
 #ifndef TORRENT_DISABLE_DHT
@@ -523,7 +592,7 @@ namespace
         , std::string const& salt, std::string pk, std::string sk
         , std::string data)
     {
-        using libtorrent::dht::sign_mutable_item;
+        using lt::dht::sign_mutable_item;
 
         e = data;
         std::vector<char> buf;
@@ -560,8 +629,20 @@ namespace
         return p;
     }
 
-} // namespace unnamed
+	 int find_metric_idx_wrap(char const* name)
+	 {
+		 return lt::find_metric_idx(name);
+	 }
 
+} // anonymous namespace
+
+struct dummy1 {};
+#ifndef TORRENT_NO_DEPRECATE
+struct dummy2 {};
+#endif
+struct dummy9 {};
+struct dummy10 {};
+struct dummy11 {};
 
 void bind_session()
 {
@@ -658,7 +739,7 @@ void bind_session()
 //        .def_readwrite("storage", &add_torrent_params::storage)
         .add_property("file_priorities", PROP(&add_torrent_params::file_priorities))
         .def_readwrite("trackerid", &add_torrent_params::trackerid)
-        .def_readwrite("flags", &add_torrent_params::flags)
+        .add_property("flags", PROP(&add_torrent_params::flags))
         .def_readwrite("info_hash", &add_torrent_params::info_hash)
         .def_readwrite("max_uploads", &add_torrent_params::max_uploads)
         .def_readwrite("max_connections", &add_torrent_params::max_connections)
@@ -689,47 +770,67 @@ void bind_session()
 #ifndef TORRENT_NO_DEPRECATE
         .def_readwrite("url", &add_torrent_params::url)
         .def_readwrite("uuid", &add_torrent_params::uuid)
-        .def_readwrite("resume_data", &add_torrent_params::resume_data)
+        .add_property("resume_data", PROP(&add_torrent_params::resume_data))
 #endif
       ;
-
 
     enum_<storage_mode_t>("storage_mode_t")
         .value("storage_mode_allocate", storage_mode_allocate)
         .value("storage_mode_sparse", storage_mode_sparse)
     ;
 
-    enum_<lt::session::options_t>("options_t")
-        .value("delete_files", lt::session::delete_files)
-    ;
+    {
+        scope s = class_<dummy11>("options_t");
+        s.attr("delete_files") = lt::session::delete_files;
+    }
 
-    enum_<lt::session::session_flags_t>("session_flags_t")
-        .value("add_default_plugins", lt::session::add_default_plugins)
-        .value("start_default_features", lt::session::start_default_features)
-    ;
+    {
+        scope s = class_<dummy10>("session_flags_t");
+        s.attr("add_default_plugins") = lt::session::add_default_plugins;
+        s.attr("start_default_features") = lt::session::start_default_features;
+    }
 
-    enum_<add_torrent_params::flags_t>("add_torrent_params_flags_t")
-        .value("flag_seed_mode", add_torrent_params::flag_seed_mode)
-        .value("flag_upload_mode", add_torrent_params::flag_upload_mode)
-        .value("flag_share_mode", add_torrent_params::flag_share_mode)
-        .value("flag_apply_ip_filter", add_torrent_params::flag_apply_ip_filter)
-        .value("flag_paused", add_torrent_params::flag_paused)
-        .value("flag_auto_managed", add_torrent_params::flag_auto_managed)
-        .value("flag_duplicate_is_error", add_torrent_params::flag_duplicate_is_error)
-        .value("flag_update_subscribe", add_torrent_params::flag_update_subscribe)
-        .value("flag_super_seeding", add_torrent_params::flag_super_seeding)
-        .value("flag_sequential_download", add_torrent_params::flag_sequential_download)
-        .value("flag_stop_when_ready", add_torrent_params::flag_stop_when_ready)
-        .value("flag_override_trackers", add_torrent_params::flag_override_trackers)
-        .value("flag_override_web_seeds", add_torrent_params::flag_override_web_seeds)
+    {
+    scope s = class_<dummy1>("torrent_flags");
+    s.attr("seed_mode") = torrent_flags::seed_mode;
+    s.attr("upload_mode") = torrent_flags::upload_mode;
+    s.attr("share_mode") = torrent_flags::share_mode;
+    s.attr("apply_ip_filter") = torrent_flags::apply_ip_filter;
+    s.attr("paused") = torrent_flags::paused;
+    s.attr("auto_managed") = torrent_flags::auto_managed;
+    s.attr("duplicate_is_error") = torrent_flags::duplicate_is_error;
+    s.attr("update_subscribe") = torrent_flags::update_subscribe;
+    s.attr("super_seeding") = torrent_flags::super_seeding;
+    s.attr("sequential_download") = torrent_flags::sequential_download;
+    s.attr("stop_when_ready") = torrent_flags::stop_when_ready;
+    s.attr("override_trackers") = torrent_flags::override_trackers;
+    s.attr("override_web_seeds") = torrent_flags::override_web_seeds;
+    }
+
 #ifndef TORRENT_NO_DEPRECATE
-        .value("flag_pinned", add_torrent_params::flag_pinned)
-        .value("flag_override_resume_data", add_torrent_params::flag_override_resume_data)
-        .value("flag_merge_resume_trackers", add_torrent_params::flag_merge_resume_trackers)
-        .value("flag_use_resume_save_path", add_torrent_params::flag_use_resume_save_path)
-        .value("flag_merge_resume_http_seeds", add_torrent_params::flag_merge_resume_http_seeds)
+    {
+    scope s = class_<dummy2>("add_torrent_params_flags_t");
+    s.attr("flag_seed_mode") = add_torrent_params::flag_seed_mode;
+    s.attr("flag_upload_mode") = add_torrent_params::flag_upload_mode;
+    s.attr("flag_share_mode") = add_torrent_params::flag_share_mode;
+    s.attr("flag_apply_ip_filter") = add_torrent_params::flag_apply_ip_filter;
+    s.attr("flag_paused") = add_torrent_params::flag_paused;
+    s.attr("flag_auto_managed") = add_torrent_params::flag_auto_managed;
+    s.attr("flag_duplicate_is_error") = add_torrent_params::flag_duplicate_is_error;
+    s.attr("flag_update_subscribe") = add_torrent_params::flag_update_subscribe;
+    s.attr("flag_super_seeding") = add_torrent_params::flag_super_seeding;
+    s.attr("flag_sequential_download") = add_torrent_params::flag_sequential_download;
+    s.attr("flag_stop_when_ready") = add_torrent_params::flag_stop_when_ready;
+    s.attr("flag_override_trackers") = add_torrent_params::flag_override_trackers;
+    s.attr("flag_override_web_seeds") = add_torrent_params::flag_override_web_seeds;
+    s.attr("flag_pinned") = add_torrent_params::flag_pinned;
+    s.attr("flag_override_resume_data") = add_torrent_params::flag_override_resume_data;
+    s.attr("flag_merge_resume_trackers") = add_torrent_params::flag_merge_resume_trackers;
+    s.attr("flag_use_resume_save_path") = add_torrent_params::flag_use_resume_save_path;
+    s.attr("flag_merge_resume_http_seeds") = add_torrent_params::flag_merge_resume_http_seeds;
+    }
 #endif
-    ;
+
     class_<cache_status>("cache_status")
         .add_property("pieces", cache_status_pieces)
 #ifndef TORRENT_NO_DEPRECATE
@@ -768,7 +869,43 @@ void bind_session()
 #endif
     ;
 
-    class_<lt::session, boost::noncopyable>("session", no_init)
+    enum_<lt::portmap_protocol>("portmap_protocol")
+        .value("none", lt::portmap_protocol::none)
+        .value("udp", lt::portmap_protocol::udp)
+        .value("tcp", lt::portmap_protocol::tcp)
+    ;
+
+    enum_<lt::portmap_transport>("portmap_transport")
+      .value("natpmp", lt::portmap_transport::natpmp)
+      .value("upnp", lt::portmap_transport::upnp)
+      ;
+
+    enum_<lt::peer_class_type_filter::socket_type_t>("peer_class_type_filter_socket_type_t")
+        .value("tcp_socket", peer_class_type_filter::tcp_socket)
+        .value("utp_socket", peer_class_type_filter::utp_socket)
+        .value("ssl_tcp_socket", peer_class_type_filter::ssl_tcp_socket)
+        .value("ssl_utp_socket", peer_class_type_filter::ssl_utp_socket)
+        .value("i2p_socket", peer_class_type_filter::i2p_socket)
+        ;
+
+    {
+    scope s = class_<lt::peer_class_type_filter>("peer_class_type_filter")
+        .def(init<>())
+        .def("add", &lt::peer_class_type_filter::add)
+        .def("remove", &lt::peer_class_type_filter::remove)
+        .def("disallow", &lt::peer_class_type_filter::disallow)
+        .def("allow", &lt::peer_class_type_filter::allow)
+        .def("apply", &lt::peer_class_type_filter::apply)
+        ;
+    s.attr("tcp_socket") = peer_class_type_filter::tcp_socket;
+    s.attr("utp_socket") = peer_class_type_filter::utp_socket;
+    s.attr("ssl_tcp_socket") = peer_class_type_filter::ssl_tcp_socket;
+    s.attr("ssl_utp_socket") = peer_class_type_filter::ssl_utp_socket;
+    s.attr("i2p_socket") = peer_class_type_filter::i2p_socket;
+    }
+
+    {
+    scope s = class_<lt::session, boost::noncopyable>("session", no_init)
         .def("__init__", boost::python::make_constructor(&make_session
                 , default_call_policies()
                 , (arg("settings")
@@ -777,14 +914,15 @@ void bind_session()
         )
 #ifndef TORRENT_NO_DEPRECATE
         .def(
-            init<fingerprint, int, std::uint32_t>((
+            init<fingerprint, session_flags_t, alert_category_t>((
                 arg("fingerprint")=fingerprint("LT",0,1,0,0)
                 , arg("flags")=lt::session::start_default_features | lt::session::add_default_plugins
-                , arg("alert_mask")=int(alert::error_notification)))
+                , arg("alert_mask")=alert::error_notification))
         )
         .def("outgoing_ports", &outgoing_ports)
 #endif
         .def("post_torrent_updates", allow_threads(&lt::session::post_torrent_updates), arg("flags") = 0xffffffff)
+        .def("post_dht_stats", allow_threads(&lt::session::post_dht_stats))
         .def("post_session_stats", allow_threads(&lt::session::post_session_stats))
         .def("is_listening", allow_threads(&lt::session::is_listening))
         .def("listen_port", allow_threads(&lt::session::listen_port))
@@ -852,12 +990,19 @@ void bind_session()
         .def("pause", allow_threads(&lt::session::pause))
         .def("resume", allow_threads(&lt::session::resume))
         .def("is_paused", allow_threads(&lt::session::is_paused))
-        .def("id", allow_threads(&lt::session::id))
         .def("get_cache_info", &get_cache_info1, (arg("handle") = torrent_handle(), arg("flags") = 0))
         .def("add_port_mapping", allow_threads(&lt::session::add_port_mapping))
         .def("delete_port_mapping", allow_threads(&lt::session::delete_port_mapping))
+        .def("reopen_network_sockets", allow_threads(&lt::session::reopen_network_sockets))
+        .def("set_peer_class_filter", &lt::session::set_peer_class_filter)
+        .def("set_peer_class_type_filter", &lt::session::set_peer_class_type_filter)
+        .def("create_peer_class", &lt::session::create_peer_class)
+        .def("delete_peer_class", &lt::session::delete_peer_class)
+        .def("get_peer_class", &get_peer_class)
+        .def("set_peer_class", &set_peer_class)
 
 #ifndef TORRENT_NO_DEPRECATE
+        .def("id", allow_threads(&lt::session::id))
         .def(
             "listen_on", &listen_on
           , (arg("min"), "max", arg("interface") = (char const*)nullptr, arg("flags") = 0)
@@ -906,26 +1051,40 @@ void bind_session()
 #endif // TORRENT_NO_DEPRECATE
         ;
 
-    enum_<lt::session::protocol_type>("protocol_type")
-        .value("udp", lt::session::udp)
-        .value("tcp", lt::session::tcp)
-    ;
+    s.attr("tcp") = lt::portmap_protocol::tcp;
+    s.attr("udp") = lt::portmap_protocol::udp;
 
-    enum_<lt::session::save_state_flags_t>("save_state_flags_t")
-        .value("save_settings", lt::session::save_settings)
-        .value("save_dht_settings", lt::session::save_dht_settings)
-        .value("save_dht_state", lt::session::save_dht_state)
-        .value("save_encryption_settings", lt::session:: save_encryption_settings)
+    s.attr("global_peer_class_id") = session::global_peer_class_id;
+    s.attr("tcp_peer_class_id") = session::tcp_peer_class_id;
+    s.attr("local_peer_class_id") = session::local_peer_class_id;
+
+    s.attr("reopen_map_ports") = lt::session::reopen_map_ports;
+    }
+
 #ifndef TORRENT_NO_DEPRECATE
-        .value("save_as_map", lt::session::save_as_map)
-        .value("save_i2p_proxy", lt::session::save_i2p_proxy)
-        .value("save_proxy", lt::session::save_proxy)
-        .value("save_dht_proxy", lt::session::save_dht_proxy)
-        .value("save_peer_proxy", lt::session::save_peer_proxy)
-        .value("save_web_proxy", lt::session::save_web_proxy)
-        .value("save_tracker_proxy", lt::session::save_tracker_proxy)
+    {
+    scope s = class_<dummy>("protocol_type");
+    s.attr("udp") = lt::portmap_protocol::udp;
+    s.attr("tcp") =  lt::portmap_protocol::tcp;
+    }
 #endif
-    ;
+
+    {
+        scope s = class_<dummy9>("save_state_flags_t");
+        s.attr("save_settings") = lt::session::save_settings;
+        s.attr("save_dht_settings") = lt::session::save_dht_settings;
+        s.attr("save_dht_state") = lt::session::save_dht_state;
+#ifndef TORRENT_NO_DEPRECATE
+        s.attr("save_encryption_settings") = lt::session:: save_encryption_settings;
+        s.attr("save_as_map") = lt::session::save_as_map;
+        s.attr("save_i2p_proxy") = lt::session::save_i2p_proxy;
+        s.attr("save_proxy") = lt::session::save_proxy;
+        s.attr("save_dht_proxy") = lt::session::save_dht_proxy;
+        s.attr("save_peer_proxy") = lt::session::save_peer_proxy;
+        s.attr("save_web_proxy") = lt::session::save_web_proxy;
+        s.attr("save_tracker_proxy") = lt::session::save_tracker_proxy;
+#endif
+    }
 
 #ifndef TORRENT_NO_DEPRECATE
     enum_<lt::session::listen_on_flags_t>("listen_on_flags_t")
@@ -938,6 +1097,8 @@ void bind_session()
     def("min_memory_usage", min_memory_usage_wrapper);
     def("default_settings", default_settings_wrapper);
     def("read_resume_data", read_resume_data_wrapper);
+    def("write_resume_data", write_resume_data);
+    def("write_resume_data_buf", write_resume_data_buf);
 
 	class_<stats_metric>("stats_metric")
 		.def_readonly("name", &stats_metric::name)
@@ -946,7 +1107,7 @@ void bind_session()
 	;
 
     def("session_stats_metrics", session_stats_metrics);
-    def("find_metric_idx", find_metric_idx);
+    def("find_metric_idx", find_metric_idx_wrap);
 
     scope().attr("create_ut_metadata_plugin") = "ut_metadata";
     scope().attr("create_ut_pex_plugin") = "ut_pex";

@@ -40,7 +40,11 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/random.hpp"
 #include "libtorrent/aux_/time.hpp" // for aux::time_now()
 #include "libtorrent/aux_/escape_string.hpp" // for convert_from_native
+#include "libtorrent/http_connection.hpp"
+
+#if defined TORRENT_ASIO_DEBUGGING
 #include "libtorrent/debug.hpp"
+#endif
 #include "libtorrent/aux_/numeric_cast.hpp"
 
 #include "libtorrent/aux_/disable_warnings_push.hpp"
@@ -59,16 +63,33 @@ namespace libtorrent {
 
 using namespace aux;
 
+// due to the recursive nature of update_map, it's necessary to
+// limit the internal list of global mappings to a small size
+// this can be changed once the entire UPnP code is refactored
+constexpr std::size_t max_global_mappings = 50;
+
 namespace upnp_errors
 {
 	boost::system::error_code make_error_code(error_code_enum e)
-	{
-		return error_code(e, upnp_category());
-	}
+	{ return {e, upnp_category()}; }
 
 } // upnp_errors namespace
 
 static error_code ignore_error;
+
+upnp::rootdevice::rootdevice() {}
+upnp::rootdevice::~rootdevice()
+{
+	TORRENT_ASSERT(magic == 1337);
+#if TORRENT_USE_ASSERTS
+	magic = 0;
+#endif
+}
+
+upnp::rootdevice::rootdevice(rootdevice const&) = default;
+upnp::rootdevice& upnp::rootdevice::operator=(rootdevice const&) = default;
+upnp::rootdevice::rootdevice(rootdevice&&) = default;
+upnp::rootdevice& upnp::rootdevice::operator=(rootdevice&&) = default;
 
 // TODO: 3 bind the broadcast socket. it would probably have to be changed to a vector of interfaces to
 // bind to, since the broadcast socket opens one socket per local
@@ -82,7 +103,7 @@ upnp::upnp(io_service& ios
 	, m_retry_count(0)
 	, m_io_service(ios)
 	, m_resolver(ios)
-	, m_socket(udp::endpoint(address_v4::from_string("239.255.255.250"
+	, m_socket(udp::endpoint(make_address_v4("239.255.255.250"
 		, ignore_error), 1900))
 	, m_broadcast_timer(ios)
 	, m_refresh_timer(ios)
@@ -99,7 +120,7 @@ void upnp::start()
 	TORRENT_ASSERT(is_single_thread());
 
 	error_code ec;
-	m_socket.open(std::bind(&upnp::on_reply, self(), _1, _2, _3)
+	m_socket.open(std::bind(&upnp::on_reply, self(), _1, _2)
 		, m_refresh_timer.get_io_service(), ec);
 
 	m_mappings.reserve(10);
@@ -121,7 +142,7 @@ void upnp::discover_device()
 #ifndef TORRENT_DISABLE_LOGGING
 bool upnp::should_log() const
 {
-	return m_callback.should_log_portmap(aux::portmap_transport::upnp);
+	return m_callback.should_log_portmap(portmap_transport::upnp);
 }
 
 TORRENT_FORMAT(2,3)
@@ -134,7 +155,7 @@ void upnp::log(char const* fmt, ...) const
 	char msg[500];
 	std::vsnprintf(msg, sizeof(msg), fmt, v);
 	va_end(v);
-	m_callback.log_portmap(aux::portmap_transport::upnp, msg);
+	m_callback.log_portmap(portmap_transport::upnp, msg);
 }
 #endif
 
@@ -181,36 +202,46 @@ void upnp::discover_device_impl()
 }
 
 // returns a reference to a mapping or -1 on failure
-int upnp::add_mapping(portmap_protocol const p, int const external_port
-	, int const local_port)
+port_mapping_t upnp::add_mapping(portmap_protocol const p, int const external_port
+	, tcp::endpoint const local_ep)
 {
 	TORRENT_ASSERT(is_single_thread());
 	// external port 0 means _every_ port
 	TORRENT_ASSERT(external_port != 0);
 
 #ifndef TORRENT_DISABLE_LOGGING
-	log("adding port map: [ protocol: %s ext_port: %u "
-		"local_port: %u ] %s", (p == portmap_protocol::tcp?"tcp":"udp")
-		, external_port
-		, local_port, m_disabled ? "DISABLED": "");
+	if (should_log())
+	{
+		log("adding port map: [ protocol: %s ext_port: %u "
+			"local_ep: %s ] %s", (p == portmap_protocol::tcp?"tcp":"udp")
+			, external_port
+			, print_endpoint(local_ep).c_str(), m_disabled ? "DISABLED": "");
+	}
 #endif
-	if (m_disabled) return -1;
+	if (m_disabled) return port_mapping_t{-1};
 
-	std::vector<global_mapping_t>::iterator mapping_it = std::find_if(
-		m_mappings.begin(), m_mappings.end()
+	auto mapping_it = std::find_if(m_mappings.begin(), m_mappings.end()
 		, [](global_mapping_t const& m) { return m.protocol == portmap_protocol::none; });
 
 	if (mapping_it == m_mappings.end())
 	{
+		TORRENT_ASSERT(m_mappings.size() <= max_global_mappings);
+		if (m_mappings.size() >= max_global_mappings)
+		{
+#ifndef TORRENT_DISABLE_LOGGING
+			log("too many mappings registered");
+#endif
+			return port_mapping_t{-1};
+		}
 		m_mappings.push_back(global_mapping_t());
 		mapping_it = m_mappings.end() - 1;
 	}
 
 	mapping_it->protocol = p;
 	mapping_it->external_port = external_port;
-	mapping_it->local_port = local_port;
+	mapping_it->local_ep = local_ep;
 
-	int const mapping_index = int(mapping_it - m_mappings.begin());
+	port_mapping_t const mapping_index{static_cast<int>(mapping_it - m_mappings.begin())};
 
 	for (auto const& dev : m_devices)
 	{
@@ -218,32 +249,35 @@ int upnp::add_mapping(portmap_protocol const p, int const external_port
 		TORRENT_ASSERT(d.magic == 1337);
 
 		if (d.mapping.end_index() <= mapping_index)
-			d.mapping.resize(mapping_index + 1);
+			d.mapping.resize(static_cast<int>(mapping_index) + 1);
 		mapping_t& m = d.mapping[mapping_index];
 
-		m.act = mapping_t::action::add;
+		m.act = portmap_action::add;
 		m.protocol = p;
 		m.external_port = external_port;
-		m.local_port = local_port;
+		m.local_ep = local_ep;
 
 		if (!d.service_namespace.empty()) update_map(d, mapping_index);
 	}
 
-	return mapping_index;
+	return port_mapping_t{mapping_index};
 }
 
-void upnp::delete_mapping(int const mapping)
+void upnp::delete_mapping(port_mapping_t const mapping)
 {
 	TORRENT_ASSERT(is_single_thread());
 
-	if (mapping >= int(m_mappings.size())) return;
+	if (mapping >= m_mappings.end_index()) return;
 
-	global_mapping_t& m = m_mappings[mapping];
+	global_mapping_t const& m = m_mappings[mapping];
 
 #ifndef TORRENT_DISABLE_LOGGING
-	log("deleting port map: [ protocol: %s ext_port: %u "
-		"local_port: %u ]", (m.protocol == portmap_protocol::tcp?"tcp":"udp"), m.external_port
-		, m.local_port);
+	if (should_log())
+	{
+		log("deleting port map: [ protocol: %s ext_port: %u "
+			"local_ep: %s ]", (m.protocol == portmap_protocol::tcp?"tcp":"udp"), m.external_port
+			, print_endpoint(m.local_ep).c_str());
+	}
 #endif
 
 	if (m.protocol == portmap_protocol::none) return;
@@ -254,23 +288,23 @@ void upnp::delete_mapping(int const mapping)
 		TORRENT_ASSERT(d.magic == 1337);
 
 		TORRENT_ASSERT(mapping < d.mapping.end_index());
-		d.mapping[mapping].act = mapping_t::action::del;
+		d.mapping[mapping].act = portmap_action::del;
 
 		if (!d.service_namespace.empty()) update_map(d, mapping);
 	}
 }
 
-bool upnp::get_mapping(int const index
-	, int& local_port
+bool upnp::get_mapping(port_mapping_t const index
+	, tcp::endpoint& local_ep
 	, int& external_port
 	, portmap_protocol& protocol) const
 {
 	TORRENT_ASSERT(is_single_thread());
-	TORRENT_ASSERT(index < int(m_mappings.size()) && index >= 0);
-	if (index >= int(m_mappings.size()) || index < 0) return false;
+	TORRENT_ASSERT(index < m_mappings.end_index() && index >= port_mapping_t{0});
+	if (index >= m_mappings.end_index() || index < port_mapping_t{0}) return false;
 	global_mapping_t const& m = m_mappings[index];
 	if (m.protocol == portmap_protocol::none) return false;
-	local_port = m.local_port;
+	local_ep = m.local_ep;
 	external_port = m.external_port;
 	protocol = m.protocol;
 	return true;
@@ -321,7 +355,7 @@ void upnp::resend_request(error_code const& ec)
 			d.upnp_connection = std::make_shared<http_connection>(m_io_service
 				, m_resolver
 				, std::bind(&upnp::on_upnp_xml, self(), _1, _2
-				, std::ref(d), _5));
+					, std::ref(d), _4));
 			d.upnp_connection->get(d.url, seconds(30), 1);
 		}
 		TORRENT_CATCH (std::exception const& exc)
@@ -336,8 +370,7 @@ void upnp::resend_request(error_code const& ec)
 	}
 }
 
-void upnp::on_reply(udp::endpoint const& from, char* buffer
-	, std::size_t bytes_transferred)
+void upnp::on_reply(udp::endpoint const& from, span<char const> buffer)
 {
 	TORRENT_ASSERT(is_single_thread());
 	std::shared_ptr<upnp> me(self());
@@ -407,7 +440,7 @@ void upnp::on_reply(udp::endpoint const& from, char* buffer
 	bool non_router = false;
 	if (m_ignore_non_routers)
 	{
-		std::vector<ip_route> const routes = enum_routes(m_io_service, ec);
+		auto const routes = enum_routes(m_io_service, ec);
 		if (std::none_of(routes.begin(), routes.end()
 			, [from] (ip_route const& rt) { return rt.gateway == from.address(); }))
 		{
@@ -450,7 +483,7 @@ void upnp::on_reply(udp::endpoint const& from, char* buffer
 
 	http_parser p;
 	bool error = false;
-	p.incoming(span<char const>(buffer, bytes_transferred), error);
+	p.incoming(buffer, error);
 	if (error)
 	{
 #ifndef TORRENT_DISABLE_LOGGING
@@ -511,7 +544,7 @@ void upnp::on_reply(udp::endpoint const& from, char* buffer
 	rootdevice d;
 	d.url = url;
 
-	std::set<rootdevice>::iterator i = m_devices.find(d);
+	auto i = m_devices.find(d);
 
 	if (i == m_devices.end())
 	{
@@ -585,8 +618,8 @@ void upnp::on_reply(udp::endpoint const& from, char* buffer
 		for (auto const& j : m_mappings)
 		{
 			mapping_t m;
-			m.act = mapping_t::action::add;
-			m.local_port = j.local_port;
+			m.act = portmap_action::add;
+			m.local_ep = j.local_ep;
 			m.external_port = j.external_port;
 			m.protocol = j.protocol;
 			d.mapping.push_back(m);
@@ -619,7 +652,7 @@ void upnp::map_timer(error_code const& ec)
 	try_map_upnp(true);
 }
 
-void upnp::try_map_upnp(bool timer)
+void upnp::try_map_upnp(bool const timer)
 {
 	TORRENT_ASSERT(is_single_thread());
 	if (m_devices.empty()) return;
@@ -627,11 +660,11 @@ void upnp::try_map_upnp(bool timer)
 	bool override_ignore_non_routers = false;
 	if (m_ignore_non_routers && timer)
 	{
-		// if we don't ave any devices that match our default route, we
+		// if we don't have any devices that match our default route, we
 		// should try to map with the ones we did hear from anyway,
 		// regardless of if they are not running at our gateway.
 		override_ignore_non_routers = std::none_of(m_devices.begin()
-			, m_devices.end(), [](rootdevice const& d) { return d.non_router == false; });
+			, m_devices.end(), [](rootdevice const& d) { return !d.non_router; });
 #ifndef TORRENT_DISABLE_LOGGING
 		if (override_ignore_non_routers)
 		{
@@ -640,8 +673,7 @@ void upnp::try_map_upnp(bool timer)
 #endif
 	}
 
-	for (std::set<rootdevice>::iterator i = m_devices.begin()
-		, end(m_devices.end()); i != end; ++i)
+	for (auto i = m_devices.begin(), end(m_devices.end()); i != end; ++i)
 	{
 		// if we're ignoring non-routers, skip them. If on_timer is
 		// set, we expect to have received all responses and if we don't
@@ -662,12 +694,11 @@ void upnp::try_map_upnp(bool timer)
 #ifndef TORRENT_DISABLE_LOGGING
 				log("connecting to: %s", d.url.c_str());
 #endif
-
 				if (d.upnp_connection) d.upnp_connection->close();
 				d.upnp_connection = std::make_shared<http_connection>(m_io_service
 					, m_resolver
 					, std::bind(&upnp::on_upnp_xml, self(), _1, _2
-					, std::ref(d), _5));
+						, std::ref(d), _4));
 				d.upnp_connection->get(d.url, seconds(30), 1);
 			}
 			TORRENT_CATCH (std::exception const& exc)
@@ -708,7 +739,8 @@ void upnp::post(upnp::rootdevice const& d, char const* soap
 #endif
 }
 
-void upnp::create_port_mapping(http_connection& c, rootdevice& d, int const i)
+void upnp::create_port_mapping(http_connection& c, rootdevice& d
+	, port_mapping_t const i)
 {
 	TORRENT_ASSERT(is_single_thread());
 
@@ -718,7 +750,7 @@ void upnp::create_port_mapping(http_connection& c, rootdevice& d, int const i)
 	{
 		TORRENT_ASSERT(d.disabled);
 #ifndef TORRENT_DISABLE_LOGGING
-		log("mapping %u aborted", i);
+		log("mapping %u aborted", static_cast<int>(i));
 #endif
 		return;
 	}
@@ -739,37 +771,37 @@ void upnp::create_port_mapping(http_connection& c, rootdevice& d, int const i)
 		"<NewInternalPort>%u</NewInternalPort>"
 		"<NewInternalClient>%s</NewInternalClient>"
 		"<NewEnabled>1</NewEnabled>"
-		"<NewPortMappingDescription>%s at %s:%d</NewPortMappingDescription>"
+		"<NewPortMappingDescription>%s</NewPortMappingDescription>"
 		"<NewLeaseDuration>%u</NewLeaseDuration>"
 		"</u:%s></s:Body></s:Envelope>"
 		, soap_action, d.service_namespace.c_str(), d.mapping[i].external_port
-		, (d.mapping[i].protocol == portmap_protocol::udp ? "UDP" : "TCP")
-		, d.mapping[i].local_port
+		, to_string(d.mapping[i].protocol)
+		, d.mapping[i].local_ep.port()
 		, local_endpoint.c_str()
-		, m_user_agent.c_str(), local_endpoint.c_str(), d.mapping[i].local_port
+		, m_user_agent.c_str()
 		, d.lease_duration, soap_action);
 
 	post(d, soap, soap_action);
 }
 
-void upnp::next(rootdevice& d, int const i)
+void upnp::next(rootdevice& d, port_mapping_t const i)
 {
 	TORRENT_ASSERT(is_single_thread());
-	if (i < num_mappings() - 1)
+	if (i < prev(m_mappings.end_index()))
 	{
-		update_map(d, i + 1);
+		update_map(d, lt::next(i));
 	}
 	else
 	{
 		auto const j = std::find_if(d.mapping.begin(), d.mapping.end()
-			, [] (mapping_t const& m) { return m.act != mapping_t::action::none; });
+			, [](mapping_t const& m) { return m.act != portmap_action::none; });
 		if (j == d.mapping.end()) return;
 
-		update_map(d, int(j - d.mapping.begin()));
+		update_map(d, port_mapping_t{static_cast<int>(j - d.mapping.begin())});
 	}
 }
 
-void upnp::update_map(rootdevice& d, int const i)
+void upnp::update_map(rootdevice& d, port_mapping_t const i)
 {
 	TORRENT_ASSERT(is_single_thread());
 	TORRENT_ASSERT(d.magic == 1337);
@@ -778,17 +810,20 @@ void upnp::update_map(rootdevice& d, int const i)
 
 	if (d.upnp_connection) return;
 
+	// this should not happen, but in case it does, don't fail at runtime
+	if (i >= d.mapping.end_index()) return;
+
 	std::shared_ptr<upnp> me(self());
 
 	mapping_t& m = d.mapping[i];
 
-	if (m.act == mapping_t::action::none
+	if (m.act == portmap_action::none
 		|| m.protocol == portmap_protocol::none)
 	{
 #ifndef TORRENT_DISABLE_LOGGING
-		log("mapping %u does not need updating, skipping", i);
+		log("mapping %u does not need updating, skipping", static_cast<int>(i));
 #endif
-		m.act = mapping_t::action::none;
+		m.act = portmap_action::none;
 		next(d, i);
 		return;
 	}
@@ -799,11 +834,11 @@ void upnp::update_map(rootdevice& d, int const i)
 #ifndef TORRENT_DISABLE_LOGGING
 	log("connecting to %s", d.hostname.c_str());
 #endif
-	if (m.act == mapping_t::action::add)
+	if (m.act == portmap_action::add)
 	{
 		if (m.failcount > 5)
 		{
-			m.act = mapping_t::action::none;
+			m.act = portmap_action::none;
 			// giving up
 			next(d, i);
 			return;
@@ -813,28 +848,28 @@ void upnp::update_map(rootdevice& d, int const i)
 		d.upnp_connection = std::make_shared<http_connection>(m_io_service
 			, m_resolver
 			, std::bind(&upnp::on_upnp_map_response, self(), _1, _2
-			, std::ref(d), i, _5), true, default_max_bottled_buffer_size
+				, std::ref(d), i, _4), true, default_max_bottled_buffer_size
 			, std::bind(&upnp::create_port_mapping, self(), _1, std::ref(d), i));
 
 		d.upnp_connection->start(d.hostname, d.port
-			, seconds(10), 1);
+			, seconds(10), 1, nullptr, false, 5, m.local_ep.address());
 	}
-	else if (m.act == mapping_t::action::del)
+	else if (m.act == portmap_action::del)
 	{
 		if (d.upnp_connection) d.upnp_connection->close();
 		d.upnp_connection = std::make_shared<http_connection>(m_io_service
 			, m_resolver
 			, std::bind(&upnp::on_upnp_unmap_response, self(), _1, _2
-			, std::ref(d), i, _5), true, default_max_bottled_buffer_size
+				, std::ref(d), i, _4), true, default_max_bottled_buffer_size
 			, std::bind(&upnp::delete_port_mapping, self(), std::ref(d), i));
 		d.upnp_connection->start(d.hostname, d.port
-			, seconds(10), 1);
+			, seconds(10), 1, nullptr, false, 5, m.local_ep.address());
 	}
 
-	m.act = mapping_t::action::none;
+	m.act = portmap_action::none;
 }
 
-void upnp::delete_port_mapping(rootdevice& d, int const i)
+void upnp::delete_port_mapping(rootdevice& d, port_mapping_t const i)
 {
 	TORRENT_ASSERT(is_single_thread());
 
@@ -844,7 +879,7 @@ void upnp::delete_port_mapping(rootdevice& d, int const i)
 	{
 		TORRENT_ASSERT(d.disabled);
 #ifndef TORRENT_DISABLE_LOGGING
-		log("unmapping %u aborted", i);
+		log("unmapping %u aborted", static_cast<int>(i));
 #endif
 		return;
 	}
@@ -863,7 +898,7 @@ void upnp::delete_port_mapping(rootdevice& d, int const i)
 		"</u:%s></s:Body></s:Envelope>"
 		, soap_action, d.service_namespace.c_str()
 		, d.mapping[i].external_port
-		, (d.mapping[i].protocol == portmap_protocol::udp ? "UDP" : "TCP")
+		, to_string(d.mapping[i].protocol)
 		, soap_action);
 
 	post(d, soap, soap_action);
@@ -927,6 +962,8 @@ void upnp::on_upnp_xml(error_code const& e
 		d.upnp_connection->close();
 		d.upnp_connection.reset();
 	}
+
+	if (m_closing) return;
 
 	if (e && e != boost::asio::error::eof)
 	{
@@ -1032,10 +1069,11 @@ void upnp::on_upnp_xml(error_code const& e
 		return;
 	}
 
+	if (d.upnp_connection) d.upnp_connection->close();
 	d.upnp_connection = std::make_shared<http_connection>(m_io_service
 		, m_resolver
 		, std::bind(&upnp::on_upnp_get_ip_address_response, self(), _1, _2
-		, std::ref(d), _5), true, default_max_bottled_buffer_size
+			, std::ref(d), _4), true, default_max_bottled_buffer_size
 		, std::bind(&upnp::get_ip_address, self(), std::ref(d)));
 	d.upnp_connection->start(d.hostname, d.port
 		, seconds(10), 1);
@@ -1076,14 +1114,13 @@ void upnp::disable(error_code const& ec)
 	m_disabled = true;
 
 	// kill all mappings
-	for (std::vector<global_mapping_t>::iterator i = m_mappings.begin()
-		, end(m_mappings.end()); i != end; ++i)
+	for (auto i = m_mappings.begin(), end(m_mappings.end()); i != end; ++i)
 	{
 		if (i->protocol == portmap_protocol::none) continue;
 		portmap_protocol const proto = i->protocol;
 		i->protocol = portmap_protocol::none;
-		m_callback.on_port_mapping(int(i - m_mappings.begin()), address(), 0, proto, ec
-			, aux::portmap_transport::upnp);
+		m_callback.on_port_mapping(port_mapping_t(static_cast<int>(i - m_mappings.begin())), address(), 0, proto, ec
+			, portmap_transport::upnp);
 	}
 
 	// we cannot clear the devices since there
@@ -1106,8 +1143,7 @@ void find_error_code(int const type, string_view string, error_code_parse_state&
 	}
 	else if (type == xml_string && state.in_error_code)
 	{
-		std::string error_code_str(string.begin(), string.end());
-		state.error_code = std::atoi(error_code_str.c_str());
+		state.error_code = std::atoi(string.to_string().c_str());
 		state.exit = true;
 	}
 }
@@ -1163,7 +1199,7 @@ struct upnp_error_category : boost::system::error_category
 		return "UPnP error";
 	}
 
-	std::string message(int ev) const BOOST_SYSTEM_NOEXCEPT override
+	std::string message(int ev) const override
 	{
 		int num_errors = sizeof(error_codes) / sizeof(error_codes[0]);
 		error_code_t* end = error_codes + num_errors;
@@ -1183,7 +1219,7 @@ struct upnp_error_category : boost::system::error_category
 	boost::system::error_condition default_error_condition(
 		int ev) const BOOST_SYSTEM_NOEXCEPT override
 	{
-		return boost::system::error_condition(ev, *this);
+		return {ev, *this};
 	}
 };
 
@@ -1218,7 +1254,7 @@ void upnp::on_upnp_get_ip_address_response(error_code const& e
 				, convert_from_native(e.message()).c_str());
 		}
 #endif
-		if (num_mappings() > 0) update_map(d, 0);
+		if (num_mappings() > 0) update_map(d, port_mapping_t{0});
 		return;
 	}
 
@@ -1227,7 +1263,7 @@ void upnp::on_upnp_get_ip_address_response(error_code const& e
 #ifndef TORRENT_DISABLE_LOGGING
 		log("error while getting external IP address: incomplete http message");
 #endif
-		if (num_mappings() > 0) update_map(d, 0);
+		if (num_mappings() > 0) update_map(d, port_mapping_t{0});
 		return;
 	}
 
@@ -1240,7 +1276,7 @@ void upnp::on_upnp_get_ip_address_response(error_code const& e
 				, convert_from_native(p.message()).c_str());
 		}
 #endif
-		if (num_mappings() > 0) update_map(d, 0);
+		if (num_mappings() > 0) update_map(d, port_mapping_t{0});
 		return;
 	}
 
@@ -1276,7 +1312,7 @@ void upnp::on_upnp_get_ip_address_response(error_code const& e
 #ifndef TORRENT_DISABLE_LOGGING
 		log("got router external IP address %s", s.ip_address.c_str());
 #endif
-		d.external_ip = address::from_string(s.ip_address.c_str(), ignore_error);
+		d.external_ip = make_address(s.ip_address.c_str(), ignore_error);
 	}
 	else
 	{
@@ -1285,11 +1321,11 @@ void upnp::on_upnp_get_ip_address_response(error_code const& e
 #endif
 	}
 
-	if (num_mappings() > 0) update_map(d, 0);
+	if (num_mappings() > 0) update_map(d, port_mapping_t{0});
 }
 
 void upnp::on_upnp_map_response(error_code const& e
-	, libtorrent::http_parser const& p, rootdevice& d, int const mapping
+	, libtorrent::http_parser const& p, rootdevice& d, port_mapping_t const mapping
 	, http_connection& c)
 {
 	TORRENT_ASSERT(is_single_thread());
@@ -1343,7 +1379,7 @@ void upnp::on_upnp_map_response(error_code const& e
 		return;
 	}
 
-	std::string ct = p.header("content-type");
+	std::string const& ct = p.header("content-type");
 	if (!ct.empty()
 		&& ct.find_first_of("text/xml") == std::string::npos
 		&& ct.find_first_of("text/soap+xml") == std::string::npos
@@ -1378,9 +1414,9 @@ void upnp::on_upnp_map_response(error_code const& e
 
 	if (s.error_code == 725)
 	{
-		// only permanent leases supported
+		// The gateway only supports permanent leases
 		d.lease_duration = 0;
-		m.act = mapping_t::action::add;
+		m.act = portmap_action::add;
 		++m.failcount;
 		update_map(d, mapping);
 		return;
@@ -1395,7 +1431,7 @@ void upnp::on_upnp_map_response(error_code const& e
 		// The external port conflicts with another mapping
 		// pick a random port
 		m.external_port = 40000 + int(random(10000));
-		m.act = mapping_t::action::add;
+		m.act = portmap_action::add;
 		++m.failcount;
 		update_map(d, mapping);
 		return;
@@ -1416,7 +1452,7 @@ void upnp::on_upnp_map_response(error_code const& e
 	if (s.error_code == -1)
 	{
 		m_callback.on_port_mapping(mapping, d.external_ip, m.external_port, m.protocol, error_code()
-			, aux::portmap_transport::upnp);
+			, portmap_transport::upnp);
 		if (d.lease_duration > 0)
 		{
 			m.expires = aux::time_now()
@@ -1441,7 +1477,7 @@ void upnp::on_upnp_map_response(error_code const& e
 	next(d, mapping);
 }
 
-void upnp::return_error(int const mapping, int const code)
+void upnp::return_error(port_mapping_t const mapping, int const code)
 {
 	TORRENT_ASSERT(is_single_thread());
 	int num_errors = sizeof(error_codes) / sizeof(error_codes[0]);
@@ -1460,11 +1496,12 @@ void upnp::return_error(int const mapping, int const code)
 	}
 	portmap_protocol const proto = m_mappings[mapping].protocol;
 	m_callback.on_port_mapping(mapping, address(), 0, proto, error_code(code, upnp_category())
-		, aux::portmap_transport::upnp);
+		, portmap_transport::upnp);
 }
 
 void upnp::on_upnp_unmap_response(error_code const& e
-	, libtorrent::http_parser const& p, rootdevice& d, int const mapping
+	, libtorrent::http_parser const& p, rootdevice& d
+	, port_mapping_t const mapping
 	, http_connection& c)
 {
 	TORRENT_ASSERT(is_single_thread());
@@ -1527,9 +1564,17 @@ void upnp::on_upnp_unmap_response(error_code const& e
 	m_callback.on_port_mapping(mapping, address(), 0, proto, p.status_code() != 200
 		? error_code(p.status_code(), http_category())
 		: error_code(s.error_code, upnp_category())
-		, aux::portmap_transport::upnp);
+		, portmap_transport::upnp);
 
 	d.mapping[mapping].protocol = portmap_protocol::none;
+
+	// free the slot in global mappings
+	auto pred = [mapping](rootdevice const& rd)
+		{ return rd.mapping[mapping].protocol == portmap_protocol::none; };
+	if (std::all_of(m_devices.begin(), m_devices.end(), pred))
+	{
+		m_mappings[mapping].protocol = portmap_protocol::none;
+	}
 
 	next(d, mapping);
 }
@@ -1540,15 +1585,16 @@ void upnp::on_expire(error_code const& ec)
 	COMPLETE_ASYNC("upnp::on_expire");
 	if (ec) return;
 
-	time_point now = aux::time_now();
+	if (m_closing) return;
+
+	time_point const now = aux::time_now();
 	time_point next_expire = max_time();
 
-	for (std::set<rootdevice>::iterator i = m_devices.begin()
-		, end(m_devices.end()); i != end; ++i)
+	for (auto& dev : m_devices)
 	{
-		rootdevice& d = const_cast<rootdevice&>(*i);
+		rootdevice& d = const_cast<rootdevice&>(dev);
 		TORRENT_ASSERT(d.magic == 1337);
-		for (int m = 0; m < num_mappings(); ++m)
+		for (port_mapping_t m{0}; m < m_mappings.end_index(); ++m)
 		{
 			if (d.mapping[m].expires != max_time())
 				continue;
@@ -1584,25 +1630,23 @@ void upnp::close()
 	m_closing = true;
 	m_socket.close();
 
-	for (std::set<rootdevice>::iterator i = m_devices.begin()
-		, end(m_devices.end()); i != end; ++i)
+	for (auto& dev : m_devices)
 	{
-		rootdevice& d = const_cast<rootdevice&>(*i);
+		rootdevice& d = const_cast<rootdevice&>(dev);
 		TORRENT_ASSERT(d.magic == 1337);
 		if (d.control_url.empty()) continue;
-		for (std::vector<mapping_t>::iterator j = d.mapping.begin()
-			, end2(d.mapping.end()); j != end2; ++j)
+		for (auto& m : d.mapping)
 		{
-			if (j->protocol == portmap_protocol::none) continue;
-			if (j->act == mapping_t::action::add)
+			if (m.protocol == portmap_protocol::none) continue;
+			if (m.act == portmap_action::add)
 			{
-				j->act = mapping_t::action::none;
+				m.act = portmap_action::none;
 				continue;
 			}
-			j->act = mapping_t::action::del;
-			m_mappings[int(j - d.mapping.begin())].protocol = portmap_protocol::none;
+			m.act = portmap_action::del;
+			m_mappings[port_mapping_t{static_cast<int>(&m - d.mapping.data())}].protocol = portmap_protocol::none;
 		}
-		if (num_mappings() > 0) update_map(d, 0);
+		if (num_mappings() > 0) update_map(d, port_mapping_t{0});
 	}
 }
 

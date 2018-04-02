@@ -46,8 +46,7 @@ POSSIBILITY OF SUCH DAMAGE.
 
 namespace libtorrent {
 
-	struct slot_index_tag_t {};
-	using slot_index_t = aux::strong_typedef<int, slot_index_tag_t>;
+	using slot_index_t = aux::strong_typedef<int, struct slot_index_tag_t>;
 
 	struct TORRENT_EXTRA_EXPORT part_file
 	{
@@ -76,7 +75,7 @@ namespace libtorrent {
 
 	private:
 
-		void open_file(std::uint32_t mode, error_code& ec);
+		void open_file(open_mode_t mode, error_code& ec);
 		void flush_metadata_impl(error_code& ec);
 
 		std::string m_path;

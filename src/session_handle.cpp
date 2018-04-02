@@ -38,6 +38,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/torrent.hpp"
 #include "libtorrent/lazy_entry.hpp"
 #include "libtorrent/peer_class.hpp"
+#include "libtorrent/peer_class_type_filter.hpp"
 
 #ifndef TORRENT_NO_DEPRECATE
 #include "libtorrent/read_resume_data.hpp"
@@ -47,26 +48,50 @@ using libtorrent::aux::session_impl;
 
 namespace libtorrent {
 
-	peer_class_t constexpr session_handle::global_peer_class_id;
-	peer_class_t constexpr session_handle::tcp_peer_class_id;
-	peer_class_t constexpr session_handle::local_peer_class_id;
+	constexpr peer_class_t session_handle::global_peer_class_id;
+	constexpr peer_class_t session_handle::tcp_peer_class_id;
+	constexpr peer_class_t session_handle::local_peer_class_id;
+
+	constexpr save_state_flags_t session_handle::save_settings;
+	constexpr save_state_flags_t session_handle::save_dht_settings;
+	constexpr save_state_flags_t session_handle::save_dht_state;
+#ifndef TORRENT_NO_DEPRECATE
+	constexpr save_state_flags_t session_handle::save_encryption_settings;
+	constexpr save_state_flags_t session_handle::save_as_map TORRENT_DEPRECATED_ENUM;
+	constexpr save_state_flags_t session_handle::save_proxy TORRENT_DEPRECATED_ENUM;
+	constexpr save_state_flags_t session_handle::save_i2p_proxy TORRENT_DEPRECATED_ENUM;
+	constexpr save_state_flags_t session_handle::save_dht_proxy TORRENT_DEPRECATED_ENUM;
+	constexpr save_state_flags_t session_handle::save_peer_proxy TORRENT_DEPRECATED_ENUM;
+	constexpr save_state_flags_t session_handle::save_web_proxy TORRENT_DEPRECATED_ENUM;
+	constexpr save_state_flags_t session_handle::save_tracker_proxy TORRENT_DEPRECATED_ENUM;
+#endif
+
+	constexpr session_flags_t session_handle::add_default_plugins;
+	constexpr session_flags_t session_handle::start_default_features;
+
+	constexpr remove_flags_t session_handle::delete_files;
+	constexpr remove_flags_t session_handle::delete_partfile;
+
+	constexpr reopen_network_flags_t session_handle::reopen_map_ports;
 
 	template <typename Fun, typename... Args>
 	void session_handle::async_call(Fun f, Args&&... a) const
 	{
-		m_impl->get_io_service().dispatch([=]() mutable
+		std::shared_ptr<session_impl> s = m_impl.lock();
+		if (!s) aux::throw_ex<system_error>(errors::invalid_session_handle);
+		s->get_io_service().dispatch([=]() mutable
 		{
 #ifndef BOOST_NO_EXCEPTIONS
 			try {
 #endif
-				(m_impl->*f)(std::forward<Args>(a)...);
+				(s.get()->*f)(std::forward<Args>(a)...);
 #ifndef BOOST_NO_EXCEPTIONS
 			} catch (system_error const& e) {
-				m_impl->alerts().emplace_alert<session_error_alert>(e.code(), e.what());
+				s->alerts().emplace_alert<session_error_alert>(e.code(), e.what());
 			} catch (std::exception const& e) {
-				m_impl->alerts().emplace_alert<session_error_alert>(error_code(), e.what());
+				s->alerts().emplace_alert<session_error_alert>(error_code(), e.what());
 			} catch (...) {
-				m_impl->alerts().emplace_alert<session_error_alert>(error_code(), "unknown error");
+				s->alerts().emplace_alert<session_error_alert>(error_code(), "unknown error");
 			}
 #endif
 		});
@@ -75,90 +100,107 @@ namespace libtorrent {
 	template<typename Fun, typename... Args>
 	void session_handle::sync_call(Fun f, Args&&... a) const
 	{
+		std::shared_ptr<session_impl> s = m_impl.lock();
+		if (!s) aux::throw_ex<system_error>(errors::invalid_session_handle);
+
 		// this is the flag to indicate the call has completed
 		// capture them by pointer to allow everything to be captured by value
 		// and simplify the capture expression
 		bool done = false;
 
 		std::exception_ptr ex;
-		m_impl->get_io_service().dispatch([=, &done, &ex]() mutable
+		s->get_io_service().dispatch([=, &done, &ex]() mutable
 		{
 #ifndef BOOST_NO_EXCEPTIONS
 			try {
 #endif
-				(m_impl->*f)(std::forward<Args>(a)...);
+				(s.get()->*f)(std::forward<Args>(a)...);
 #ifndef BOOST_NO_EXCEPTIONS
 			} catch (...) {
 				ex = std::current_exception();
 			}
 #endif
-			std::unique_lock<std::mutex> l(m_impl->mut);
+			std::unique_lock<std::mutex> l(s->mut);
 			done = true;
-			m_impl->cond.notify_all();
+			s->cond.notify_all();
 		});
 
-		aux::torrent_wait(done, *m_impl);
+		aux::torrent_wait(done, *s);
 		if (ex) std::rethrow_exception(ex);
 	}
 
 	template<typename Ret, typename Fun, typename... Args>
 	Ret session_handle::sync_call_ret(Fun f, Args&&... a) const
 	{
+		std::shared_ptr<session_impl> s = m_impl.lock();
+		if (!s) aux::throw_ex<system_error>(errors::invalid_session_handle);
+
 		// this is the flag to indicate the call has completed
 		// capture them by pointer to allow everything to be captured by value
 		// and simplify the capture expression
 		bool done = false;
 		Ret r;
 		std::exception_ptr ex;
-		m_impl->get_io_service().dispatch([=, &r, &done, &ex]() mutable
+		s->get_io_service().dispatch([=, &r, &done, &ex]() mutable
 		{
 #ifndef BOOST_NO_EXCEPTIONS
 			try {
 #endif
-				r = (m_impl->*f)(std::forward<Args>(a)...);
+				r = (s.get()->*f)(std::forward<Args>(a)...);
 #ifndef BOOST_NO_EXCEPTIONS
 			} catch (...) {
 				ex = std::current_exception();
 			}
 #endif
-			std::unique_lock<std::mutex> l(m_impl->mut);
+			std::unique_lock<std::mutex> l(s->mut);
 			done = true;
-			m_impl->cond.notify_all();
+			s->cond.notify_all();
 		});
 
-		aux::torrent_wait(done, *m_impl);
+		aux::torrent_wait(done, *s);
 		if (ex) std::rethrow_exception(ex);
 		return r;
 	}
 
-	void session_handle::save_state(entry& e, std::uint32_t const flags) const
+	void session_handle::save_state(entry& e, save_state_flags_t const flags) const
 	{
 		entry* ep = &e;
 		sync_call(&session_impl::save_state, ep, flags);
 	}
 
 	void session_handle::load_state(bdecode_node const& e
-		, std::uint32_t const flags)
+		, save_state_flags_t const flags)
 	{
 		// this needs to be synchronized since the lifespan
 		// of e is tied to the caller
 		sync_call(&session_impl::load_state, &e, flags);
 	}
 
+	std::vector<torrent_status> session_handle::get_torrent_status(
+		std::function<bool(torrent_status const&)> const& pred
+		, status_flags_t const flags) const
+	{
+		std::vector<torrent_status> ret;
+		sync_call(&session_impl::get_torrent_status, &ret, pred, flags);
+		return ret;
+	}
+
+#ifndef TORRENT_NO_DEPRECATE
 	void session_handle::get_torrent_status(std::vector<torrent_status>* ret
 		, std::function<bool(torrent_status const&)> const& pred
-		, std::uint32_t const flags) const
+		, status_flags_t const flags) const
 	{
 		sync_call(&session_impl::get_torrent_status, ret, pred, flags);
 	}
+#endif
 
 	void session_handle::refresh_torrent_status(std::vector<torrent_status>* ret
-		, std::uint32_t flags) const
+		, status_flags_t const flags) const
 	{
 		sync_call(&session_impl::refresh_torrent_status, ret, flags);
 	}
 
-	void session_handle::post_torrent_updates(std::uint32_t flags)
+	void session_handle::post_torrent_updates(status_flags_t const flags)
 	{
 		async_call(&session_impl::post_torrent_updates, flags);
 	}
@@ -175,7 +217,9 @@ namespace libtorrent {
 
 	io_service& session_handle::get_io_service()
 	{
-		return m_impl->get_io_service();
+		std::shared_ptr<session_impl> s = m_impl.lock();
+		if (!s) aux::throw_ex<system_error>(errors::invalid_session_handle);
+		return s->get_io_service();
 	}
 
 	torrent_handle session_handle::find_torrent(sha1_hash const& info_hash) const
@@ -191,121 +235,126 @@ namespace libtorrent {
 #ifndef TORRENT_NO_DEPRECATE
 namespace {
 
-		void handle_backwards_compatible_resume_data(add_torrent_params& atp)
+	void handle_backwards_compatible_resume_data(add_torrent_params& atp)
+	{
+		// if there's no resume data set, there's nothing to do. It's either
+		// using the previous API without resume data, or the resume data has
+		// already been parsed out into the add_torrent_params struct.
+		if (atp.resume_data.empty()) return;
+
+		error_code ec;
+		add_torrent_params resume_data
+			= read_resume_data(atp.resume_data, ec);
+
+		resume_data.internal_resume_data_error = ec;
+		if (ec) return;
+
+		// now, merge resume_data into atp according to the merge flags
+		if ((atp.flags & add_torrent_params::flag_use_resume_save_path)
+			&& !resume_data.save_path.empty())
 		{
-			// if there's no resume data set, there's nothing to do. It's either
-			// using the previous API without resume data, or the resume data has
-			// already been parsed out into the add_torrent_params struct.
-			if (atp.resume_data.empty()) return;
+			atp.save_path = std::move(resume_data.save_path);
+		}
 
-			error_code ec;
-			add_torrent_params resume_data
-				= read_resume_data(atp.resume_data, ec);
+		if (!atp.ti)
+		{
+			atp.ti = std::move(resume_data.ti);
+		}
 
-			resume_data.internal_resume_data_error = ec;
-			if (ec) return;
+		if (!resume_data.trackers.empty())
+		{
+			atp.tracker_tiers.resize(atp.trackers.size(), 0);
+			atp.trackers.insert(atp.trackers.end()
+				, resume_data.trackers.begin()
+				, resume_data.trackers.end());
+			atp.tracker_tiers.insert(atp.tracker_tiers.end()
+				, resume_data.tracker_tiers.begin()
+				, resume_data.tracker_tiers.end());
+			if (!(resume_data.flags & add_torrent_params::flag_merge_resume_trackers))
+				atp.flags |= add_torrent_params::flag_override_trackers;
+		}
 
-			// now, merge resume_data into atp according to the merge flags
-			if (atp.flags & add_torrent_params::flag_use_resume_save_path
-				&& !resume_data.save_path.empty())
-			{
-				atp.save_path = resume_data.save_path;
-			}
+		if (!resume_data.url_seeds.empty())
+		{
+			if (!(atp.flags & add_torrent_params::flag_merge_resume_http_seeds))
+				atp.url_seeds.clear();
 
-			if (!resume_data.trackers.empty())
-			{
-				atp.tracker_tiers.resize(atp.trackers.size(), 0);
-				atp.trackers.insert(atp.trackers.end()
-					, resume_data.trackers.begin()
-					, resume_data.trackers.end());
-				atp.tracker_tiers.insert(atp.tracker_tiers.end()
-					, resume_data.tracker_tiers.begin()
-					, resume_data.tracker_tiers.end());
-				if ((resume_data.flags & add_torrent_params::flag_merge_resume_trackers) == 0)
-					atp.flags |= add_torrent_params::flag_override_trackers;
-			}
+			atp.url_seeds.insert(atp.url_seeds.end()
+				, resume_data.url_seeds.begin()
+				, resume_data.url_seeds.end());
+			if (!(atp.flags & add_torrent_params::flag_merge_resume_http_seeds))
+				atp.flags |= add_torrent_params::flag_override_web_seeds;
+		}
 
-			if (!resume_data.url_seeds.empty())
-			{
-				if ((atp.flags & add_torrent_params::flag_merge_resume_http_seeds) == 0)
-					atp.url_seeds.clear();
+		if (!resume_data.http_seeds.empty())
+		{
+			if (!(atp.flags & add_torrent_params::flag_merge_resume_http_seeds))
+				atp.http_seeds.clear();
 
-				atp.url_seeds.insert(atp.url_seeds.end()
-					, resume_data.url_seeds.begin()
-					, resume_data.url_seeds.end());
-				if ((atp.flags & add_torrent_params::flag_merge_resume_http_seeds) == 0)
-					atp.flags |= add_torrent_params::flag_override_web_seeds;
-			}
+			atp.http_seeds.insert(atp.http_seeds.end()
+				, resume_data.http_seeds.begin()
+				, resume_data.http_seeds.end());
+			if (!(atp.flags & add_torrent_params::flag_merge_resume_http_seeds))
+				atp.flags |= add_torrent_params::flag_override_web_seeds;
+		}
 
-			if (!resume_data.http_seeds.empty())
-			{
-				if ((atp.flags & add_torrent_params::flag_merge_resume_http_seeds) == 0)
-					atp.http_seeds.clear();
+		atp.total_uploaded = resume_data.total_uploaded;
+		atp.total_downloaded = resume_data.total_downloaded;
+		atp.num_complete = resume_data.num_complete;
+		atp.num_incomplete = resume_data.num_incomplete;
+		atp.num_downloaded = resume_data.num_downloaded;
+		atp.active_time = resume_data.active_time;
+		atp.finished_time = resume_data.finished_time;
+		atp.seeding_time = resume_data.seeding_time;
 
-				atp.http_seeds.insert(atp.http_seeds.end()
-					, resume_data.http_seeds.begin()
-					, resume_data.http_seeds.end());
-				if ((atp.flags & add_torrent_params::flag_merge_resume_http_seeds) == 0)
-					atp.flags |= add_torrent_params::flag_override_web_seeds;
-			}
+		atp.last_seen_complete = resume_data.last_seen_complete;
+		atp.url = resume_data.url;
+		atp.uuid = resume_data.uuid;
 
-			atp.total_uploaded = resume_data.total_uploaded;
-			atp.total_downloaded = resume_data.total_downloaded;
-			atp.num_complete = resume_data.num_complete;
-			atp.num_incomplete = resume_data.num_incomplete;
-			atp.num_downloaded = resume_data.num_downloaded;
-			atp.total_uploaded = resume_data.total_uploaded;
-			atp.total_downloaded = resume_data.total_downloaded;
-			atp.active_time = resume_data.active_time;
-			atp.finished_time = resume_data.finished_time;
-			atp.seeding_time = resume_data.seeding_time;
+		atp.added_time = resume_data.added_time;
+		atp.completed_time = resume_data.completed_time;
 
-			atp.last_seen_complete = resume_data.last_seen_complete;
-			atp.url = resume_data.url;
-			atp.uuid = resume_data.uuid;
+		atp.peers.swap(resume_data.peers);
+		atp.banned_peers.swap(resume_data.banned_peers);
 
-			atp.added_time = resume_data.added_time;
-			atp.completed_time = resume_data.completed_time;
+		atp.unfinished_pieces.swap(resume_data.unfinished_pieces);
+		atp.have_pieces.swap(resume_data.have_pieces);
+		atp.verified_pieces.swap(resume_data.verified_pieces);
+		atp.piece_priorities.swap(resume_data.piece_priorities);
 
-			atp.peers.swap(resume_data.peers);
-			atp.banned_peers.swap(resume_data.banned_peers);
+		atp.merkle_tree = std::move(resume_data.merkle_tree);
 
-			atp.unfinished_pieces.swap(resume_data.unfinished_pieces);
-			atp.have_pieces.swap(resume_data.have_pieces);
-			atp.verified_pieces.swap(resume_data.verified_pieces);
-			atp.piece_priorities.swap(resume_data.piece_priorities);
+		atp.renamed_files = std::move(resume_data.renamed_files);
 
-			atp.merkle_tree.swap(resume_data.merkle_tree);
+		if (!(atp.flags & add_torrent_params::flag_override_resume_data))
+		{
+			atp.download_limit = resume_data.download_limit;
+			atp.upload_limit = resume_data.upload_limit;
+			atp.max_connections = resume_data.max_connections;
+			atp.max_uploads = resume_data.max_uploads;
+			atp.trackerid = resume_data.trackerid;
+			if (!resume_data.file_priorities.empty())
+				atp.file_priorities = resume_data.file_priorities;
 
-			atp.renamed_files.swap(resume_data.renamed_files);
+			torrent_flags_t const mask =
+				add_torrent_params::flag_seed_mode
+				| add_torrent_params::flag_super_seeding
+				| add_torrent_params::flag_auto_managed
+				| add_torrent_params::flag_sequential_download
+				| add_torrent_params::flag_paused;
 
-			if ((atp.flags & add_torrent_params::flag_override_resume_data) == 0)
-			{
-				atp.download_limit = resume_data.download_limit;
-				atp.upload_limit = resume_data.upload_limit;
-				atp.max_connections = resume_data.max_connections;
-				atp.max_uploads = resume_data.max_uploads;
-				atp.trackerid = resume_data.trackerid;
-				if (!resume_data.file_priorities.empty())
-					atp.file_priorities = resume_data.file_priorities;
-
-				std::uint64_t const mask =
-					add_torrent_params::flag_seed_mode
-					| add_torrent_params::flag_super_seeding
-					| add_torrent_params::flag_auto_managed
-					| add_torrent_params::flag_sequential_download
-					| add_torrent_params::flag_paused;
-
-				atp.flags &= ~mask;
-				atp.flags |= resume_data.flags & mask;
-			}
-			else
-			{
-				if (atp.file_priorities.empty())
-					atp.file_priorities = resume_data.file_priorities;
-			}
+			atp.flags &= ~mask;
+			atp.flags |= resume_data.flags & mask;
+		}
+		else
+		{
+			if (atp.file_priorities.empty())
+				atp.file_priorities = resume_data.file_priorities;
 		}
 	}
+
+} // anonymous namespace
+
 #endif
 
 #ifndef BOOST_NO_EXCEPTIONS
@@ -349,7 +398,7 @@ namespace {
 		// we cannot capture a unique_ptr into a lambda in c++11, so we use a raw
 		// pointer for now. async_call uses a lambda expression to post the call
 		// to the main thread
-		add_torrent_params* p = new add_torrent_params(std::move(params));
+		auto* p = new add_torrent_params(std::move(params));
 		p->save_path = complete(p->save_path);
 
 #ifndef TORRENT_NO_DEPRECATE
@@ -370,7 +419,7 @@ namespace {
 		, bool paused
 		, storage_constructor_type sc)
 	{
-		add_torrent_params p(sc);
+		add_torrent_params p(std::move(sc));
 		p.ti = std::make_shared<torrent_info>(ti);
 		p.save_path = save_path;
 		if (resume_data.type() != entry::undefined_t)
@@ -396,7 +445,7 @@ namespace {
 	{
 		TORRENT_ASSERT_PRECOND(!save_path.empty());
 
-		add_torrent_params p(sc);
+		add_torrent_params p(std::move(sc));
 		p.trackers.push_back(tracker_url);
 		p.info_hash = info_hash;
 		p.save_path = save_path;
@@ -480,7 +529,7 @@ namespace {
 	}
 #endif // TORRENT_NO_DEPRECATE
 
-	void session_handle::set_dht_settings(dht_settings const& settings)
+	void session_handle::set_dht_settings(dht::dht_settings const& settings)
 	{
 #ifndef TORRENT_DISABLE_DHT
 		async_call(&session_impl::set_dht_settings, settings);
@@ -489,12 +538,12 @@ namespace {
 #endif
 	}
 
-	dht_settings session_handle::get_dht_settings() const
+	dht::dht_settings session_handle::get_dht_settings() const
 	{
 #ifndef TORRENT_DISABLE_DHT
-		return sync_call_ret<dht_settings>(&session_impl::get_dht_settings);
+		return sync_call_ret<dht::dht_settings>(&session_impl::get_dht_settings);
 #else
-		return dht_settings();
+		return dht::dht_settings();
 #endif
 	}
 
@@ -613,6 +662,16 @@ namespace {
 #endif
 	}
 
+	void session_handle::dht_sample_infohashes(udp::endpoint const& ep, sha1_hash const& target)
+	{
+#ifndef TORRENT_DISABLE_DHT
+		async_call(&session_impl::dht_sample_infohashes, ep, target);
+#else
+		TORRENT_UNUSED(ep);
+		TORRENT_UNUSED(target);
+#endif
+	}
+
 	void session_handle::dht_direct_request(udp::endpoint const& ep, entry const& e, void* userdata)
 	{
 #ifndef TORRENT_DISABLE_DHT
@@ -670,13 +729,11 @@ namespace {
 	int session_handle::as_for_ip(address const&)
 	{ return 0; }
 
-#if TORRENT_USE_WSTRING
 	void session_handle::load_asnum_db(wchar_t const*) {}
 	void session_handle::load_country_db(wchar_t const*) {}
-#endif // TORRENT_USE_WSTRING
 
 	void session_handle::load_state(entry const& ses_state
-		, std::uint32_t const flags)
+		, save_state_flags_t const flags)
 	{
 		if (ses_state.type() == entry::undefined_t) return;
 		std::vector<char> buf;
@@ -699,12 +756,12 @@ namespace {
 	{
 		entry ret;
 		auto retp = &ret;
-		sync_call(&session_impl::save_state, retp, 0xffffffff);
+		sync_call(&session_impl::save_state, retp, save_state_flags_t::all());
 		return ret;
 	}
 
 	void session_handle::load_state(lazy_entry const& ses_state
-		, std::uint32_t const flags)
+		, save_state_flags_t const flags)
 	{
 		if (ses_state.type() == lazy_entry::none_t) return;
 		std::pair<char const*, int> buf = ses_state.data_section();
@@ -746,26 +803,29 @@ namespace {
 		p.set_str(settings_pack::peer_fingerprint, id.to_string());
 		apply_settings(std::move(p));
 	}
-#endif
+
+	void session_handle::set_key(std::uint32_t)
+	{
+		// this is just a dummy function now, as we generate the key automatically
+		// per listen interface
+	}
 
 	peer_id session_handle::id() const
 	{
-		return sync_call_ret<peer_id>(&session_impl::get_peer_id);
+		return sync_call_ret<peer_id>(&session_impl::deprecated_get_peer_id);
 	}
-
-	void session_handle::set_key(std::uint32_t key)
-	{
-		async_call(&session_impl::set_key, key);
-	}
+#endif
 
 	unsigned short session_handle::listen_port() const
 	{
-		return sync_call_ret<unsigned short>(&session_impl::listen_port);
+		return sync_call_ret<unsigned short, unsigned short(session_impl::*)() const>
+			(&session_impl::listen_port);
 	}
 
 	unsigned short session_handle::ssl_listen_port() const
 	{
-		return sync_call_ret<unsigned short>(&session_impl::ssl_listen_port);
+		return sync_call_ret<unsigned short, unsigned short(session_impl::*)() const>
+			(&session_impl::ssl_listen_port);
 	}
 
 	bool session_handle::is_listening() const
@@ -778,9 +838,19 @@ namespace {
 		async_call(&session_impl::set_peer_class_filter, f);
 	}
 
+	ip_filter session_handle::get_peer_class_filter() const
+	{
+		return sync_call_ret<ip_filter>(&session_impl::get_peer_class_filter);
+	}
+
 	void session_handle::set_peer_class_type_filter(peer_class_type_filter const& f)
 	{
 		async_call(&session_impl::set_peer_class_type_filter, f);
+	}
+
+	peer_class_type_filter session_handle::get_peer_class_type_filter() const
+	{
+		return sync_call_ret<peer_class_type_filter>(&session_impl::get_peer_class_type_filter);
 	}
 
 	peer_class_t session_handle::create_peer_class(char const* name)
@@ -793,7 +863,7 @@ namespace {
 		async_call(&session_impl::delete_peer_class, cid);
 	}
 
-	peer_class_info session_handle::get_peer_class(peer_class_t cid)
+	peer_class_info session_handle::get_peer_class(peer_class_t cid) const
 	{
 		return sync_call_ret<peer_class_info>(&session_impl::get_peer_class, cid);
 	}
@@ -821,7 +891,7 @@ namespace {
 		if (net_interface == nullptr || strlen(net_interface) == 0)
 			net_interface = "0.0.0.0";
 
-		interfaces_str = print_endpoint(tcp::endpoint(address::from_string(net_interface, ec), std::uint16_t(port_range.first)));
+		interfaces_str = print_endpoint(tcp::endpoint(make_address(net_interface, ec), std::uint16_t(port_range.first)));
 		if (ec) return;
 
 		p.set_str(settings_pack::listen_interfaces, interfaces_str);
@@ -831,7 +901,7 @@ namespace {
 	}
 #endif
 
-	void session_handle::remove_torrent(const torrent_handle& h, int options)
+	void session_handle::remove_torrent(const torrent_handle& h, remove_flags_t const options)
 	{
 		if (!h.is_valid())
 #ifdef BOOST_NO_EXCEPTIONS
@@ -1053,23 +1123,36 @@ namespace {
 	// the alerts are const, they may not be deleted by the client
 	void session_handle::pop_alerts(std::vector<alert*>* alerts)
 	{
-		m_impl->pop_alerts(alerts);
+		std::shared_ptr<session_impl> s = m_impl.lock();
+		if (!s) aux::throw_ex<system_error>(errors::invalid_session_handle);
+		s->pop_alerts(alerts);
 	}
 
 	alert* session_handle::wait_for_alert(time_duration max_wait)
 	{
-		return m_impl->wait_for_alert(max_wait);
+		std::shared_ptr<session_impl> s = m_impl.lock();
+		if (!s) aux::throw_ex<system_error>(errors::invalid_session_handle);
+		return s->wait_for_alert(max_wait);
 	}
 
 	void session_handle::set_alert_notify(std::function<void()> const& fun)
 	{
-		m_impl->alerts().set_notify_function(fun);
+		std::shared_ptr<session_impl> s = m_impl.lock();
+		if (!s) aux::throw_ex<system_error>(errors::invalid_session_handle);
+		s->alerts().set_notify_function(fun);
+	}
+
+	dropped_alerts_t session_handle::dropped_alerts()
+	{
+		std::shared_ptr<session_impl> s = m_impl.lock();
+		if (!s) aux::throw_ex<system_error>(errors::invalid_session_handle);
+		return s->alerts().dropped_alerts();
 	}
 
 #ifndef TORRENT_NO_DEPRECATE
 	void session_handle::set_severity_level(alert::severity_t s)
 	{
-		int m = 0;
+		alert_category_t m = {};
 		switch (s)
 		{
 			case alert::debug: m = alert::all_categories; break;
@@ -1080,7 +1163,7 @@ namespace {
 				| alert::dht_notification); break;
 			case alert::critical: m = alert::error_notification | alert::storage_notification; break;
 			case alert::fatal: m = alert::error_notification; break;
-			case alert::none: m = 0; break;
+			case alert::none: m = {}; break;
 		}
 
 		settings_pack p;
@@ -1148,14 +1231,20 @@ namespace {
 	}
 #endif // TORRENT_NO_DEPRECATE
 
-	int session_handle::add_port_mapping(session::protocol_type t, int external_port, int local_port)
+	port_mapping_t session_handle::add_port_mapping(portmap_protocol const t
+		, int external_port, int local_port)
 	{
-		return sync_call_ret<int>(&session_impl::add_port_mapping, int(t), external_port, local_port);
+		return sync_call_ret<port_mapping_t>(&session_impl::add_port_mapping, t, external_port, local_port);
 	}
 
-	void session_handle::delete_port_mapping(int handle)
+	void session_handle::delete_port_mapping(port_mapping_t handle)
 	{
 		async_call(&session_impl::delete_port_mapping, handle);
+	}
+
+	void session_handle::reopen_network_sockets(reopen_network_flags_t const options)
+	{
+		async_call(&session_impl::reopen_network_sockets, options);
 	}
 
 } // namespace libtorrent

@@ -472,6 +472,8 @@ namespace {
 		METRIC(dht, dht_get_out)
 		METRIC(dht, dht_put_in)
 		METRIC(dht, dht_put_out)
+		METRIC(dht, dht_sample_infohashes_in)
+		METRIC(dht, dht_sample_infohashes_out)
 
 		// the number of failed incoming DHT requests by kind of request
 		METRIC(dht, dht_invalid_announce)
@@ -479,6 +481,7 @@ namespace {
 		METRIC(dht, dht_invalid_find_node)
 		METRIC(dht, dht_invalid_put)
 		METRIC(dht, dht_invalid_get)
+		METRIC(dht, dht_invalid_sample_infohashes)
 
 		// uTP counters. Each counter represents the number of time each event
 		// has occurred.
@@ -568,15 +571,13 @@ namespace {
 		return stats;
 	}
 
-	// TODO: 3 use string_view for name
-	int find_metric_idx(char const* name)
+	int find_metric_idx(string_view name)
 	{
 		auto const i = std::find_if(std::begin(metrics), std::end(metrics)
 			, [name](stats_metric_impl const& metr)
-			{ return std::strcmp(metr.name, name) == 0; });
+			{ return metr.name == name; });
 
 		if (i == std::end(metrics)) return -1;
 		return i->value_index;
 	}
-
 }

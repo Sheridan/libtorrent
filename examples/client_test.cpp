@@ -35,6 +35,8 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <cstring>
 #include <utility>
 #include <deque>
+#include <fstream>
+#include <regex>
 
 #include "libtorrent/config.hpp"
 
@@ -44,11 +46,6 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <sys/stat.h>
 #endif
 
-#include "libtorrent/extensions/ut_metadata.hpp"
-#include "libtorrent/extensions/ut_pex.hpp"
-#include "libtorrent/extensions/smart_ban.hpp"
-
-#include "libtorrent/aux_/max_path.hpp"
 #include "libtorrent/torrent_info.hpp"
 #include "libtorrent/announce_entry.hpp"
 #include "libtorrent/entry.hpp"
@@ -58,28 +55,43 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/alert_types.hpp"
 #include "libtorrent/ip_filter.hpp"
 #include "libtorrent/magnet_uri.hpp"
-#include "libtorrent/bitfield.hpp"
 #include "libtorrent/peer_info.hpp"
 #include "libtorrent/bdecode.hpp"
 #include "libtorrent/add_torrent_params.hpp"
 #include "libtorrent/time.hpp"
-#include "libtorrent/create_torrent.hpp"
 #include "libtorrent/read_resume_data.hpp"
 #include "libtorrent/write_resume_data.hpp"
 #include "libtorrent/string_view.hpp"
+#include "libtorrent/disk_interface.hpp" // for open_file_state
 
 #include "torrent_view.hpp"
 #include "session_view.hpp"
 #include "print.hpp"
 
-using libtorrent::total_milliseconds;
+using lt::total_milliseconds;
+using lt::alert;
+using lt::piece_index_t;
+using lt::file_index_t;
+using lt::torrent_handle;
+using lt::add_torrent_params;
+using lt::cache_status;
+using lt::total_seconds;
+using lt::torrent_flags_t;
+using lt::seconds;
+using lt::operator""_sv;
+using lt::address_v4;
+#if TORRENT_USE_IPV6
+using lt::address_v6;
+#endif
+
+using std::chrono::duration_cast;
 
 #ifdef _WIN32
 
 #include <windows.h>
 #include <conio.h>
 
-bool sleep_and_input(int* c, int sleep)
+bool sleep_and_input(int* c, lt::time_duration const sleep)
 {
 	for (int i = 0; i < 2; ++i)
 	{
@@ -88,7 +100,7 @@ bool sleep_and_input(int* c, int sleep)
 			*c = _getch();
 			return true;
 		}
-		Sleep(sleep / 2);
+		std::this_thread::sleep_for(sleep / 2);
 	}
 	return false;
 };
@@ -99,6 +111,7 @@ bool sleep_and_input(int* c, int sleep)
 #include <sys/ioctl.h>
 #include <csignal>
 #include <utility>
+#include <dirent.h>
 
 struct set_keypress
 {
@@ -129,15 +142,16 @@ private:
 	termios stored_settings;
 };
 
-bool sleep_and_input(int* c, int sleep)
+bool sleep_and_input(int* c, lt::time_duration const sleep)
 {
-	libtorrent::time_point const start = libtorrent::clock_type::now();
+	lt::time_point const done = lt::clock_type::now() + sleep;
 	int ret = 0;
 retry:
 	fd_set set;
 	FD_ZERO(&set);
 	FD_SET(0, &set);
-	timeval tv = {sleep/ 1000, (sleep % 1000) * 1000 };
+	int const delay = total_milliseconds(done - lt::clock_type::now());
+	timeval tv = {delay / 1000, (delay % 1000) * 1000 };
 	ret = select(1, &set, nullptr, nullptr, &tv);
 	if (ret > 0)
 	{
@@ -146,7 +160,7 @@ retry:
 	}
 	if (errno == EINTR)
 	{
-		if (total_milliseconds(libtorrent::clock_type::now() - start) < sleep)
+		if (lt::clock_type::now() < done)
 			goto retry;
 		return false;
 	}
@@ -185,8 +199,8 @@ bool print_disk_stats = false;
 int num_outstanding_resume_data = 0;
 
 #ifndef TORRENT_DISABLE_DHT
-std::vector<libtorrent::dht_lookup> dht_active_requests;
-std::vector<libtorrent::dht_routing_bucket> dht_routing_table;
+std::vector<lt::dht_lookup> dht_active_requests;
+std::vector<lt::dht_routing_bucket> dht_routing_table;
 #endif
 
 std::string to_hex(lt::sha1_hash const& s)
@@ -196,66 +210,18 @@ std::string to_hex(lt::sha1_hash const& s)
 	return ret.str();
 }
 
-int load_file(std::string const& filename, std::vector<char>& v
-	, libtorrent::error_code& ec, int limit = 8000000)
+bool load_file(std::string const& filename, std::vector<char>& v
+	, int limit = 8000000)
 {
-	ec.clear();
-	FILE* f = std::fopen(filename.c_str(), "rb");
-	if (f == nullptr)
-	{
-		ec.assign(errno, boost::system::system_category());
-		return -1;
-	}
-
-	int r = fseek(f, 0, SEEK_END);
-	if (r != 0)
-	{
-		ec.assign(errno, boost::system::system_category());
-		std::fclose(f);
-		return -1;
-	}
-	long s = ftell(f);
-	if (s < 0)
-	{
-		ec.assign(errno, boost::system::system_category());
-		std::fclose(f);
-		return -1;
-	}
-
-	if (s > limit)
-	{
-		std::fclose(f);
-		return -2;
-	}
-
-	r = fseek(f, 0, SEEK_SET);
-	if (r != 0)
-	{
-		ec.assign(errno, boost::system::system_category());
-		std::fclose(f);
-		return -1;
-	}
-
-	v.resize(s);
-	if (s == 0)
-	{
-		std::fclose(f);
-		return 0;
-	}
-
-	r = int(std::fread(&v[0], 1, v.size(), f));
-	if (r < 0)
-	{
-		ec.assign(errno, boost::system::system_category());
-		std::fclose(f);
-		return -1;
-	}
-
-	std::fclose(f);
-
-	if (r != s) return -3;
-
-	return 0;
+	std::fstream f(filename, std::ios_base::in | std::ios_base::binary);
+	f.seekg(0, std::ios_base::end);
+	auto const s = f.tellg();
+	if (s > limit || s < 0) return false;
+	f.seekg(0, std::ios_base::beg);
+	v.resize(static_cast<std::size_t>(s));
+	if (s == std::fstream::pos_type(0)) return !f.fail();
+	f.read(v.data(), v.size());
+	return !f.fail();
 }
 
 bool is_absolute_path(std::string const& f)
@@ -309,10 +275,10 @@ std::string make_absolute_path(std::string const& p)
 	return ret;
 }
 
-std::string print_endpoint(libtorrent::tcp::endpoint const& ep)
+std::string print_endpoint(lt::tcp::endpoint const& ep)
 {
-	using namespace libtorrent;
-	error_code ec;
+	using namespace lt;
+	lt::error_code ec;
 	char buf[200];
 	address const& addr = ep.address();
 #if TORRENT_USE_IPV6
@@ -324,13 +290,13 @@ std::string print_endpoint(libtorrent::tcp::endpoint const& ep)
 	return buf;
 }
 
-using libtorrent::torrent_status;
+using lt::torrent_status;
 
 FILE* g_log_file = nullptr;
 
-int peer_index(libtorrent::tcp::endpoint addr, std::vector<libtorrent::peer_info> const& peers)
+int peer_index(lt::tcp::endpoint addr, std::vector<lt::peer_info> const& peers)
 {
-	using namespace libtorrent;
+	using namespace lt;
 	std::vector<peer_info>::const_iterator i = std::find_if(peers.begin(), peers.end()
 		, [&addr](peer_info const& pi) { return pi.ip == addr; });
 	if (i == peers.end()) return -1;
@@ -340,9 +306,9 @@ int peer_index(libtorrent::tcp::endpoint addr, std::vector<libtorrent::peer_info
 
 // returns the number of lines printed
 int print_peer_info(std::string& out
-	, std::vector<libtorrent::peer_info> const& peers, int max_lines)
+	, std::vector<lt::peer_info> const& peers, int max_lines)
 {
-	using namespace libtorrent;
+	using namespace lt;
 	int pos = 0;
 	if (print_ip) out += "IP                             ";
 	out += "progress        down     (total | peak   )  up      (total | peak   ) sent-req tmo bsy rcv flags         dn  up  source  ";
@@ -423,7 +389,7 @@ int print_peer_info(std::string& out
 
 		if (print_fails)
 		{
-			std::snprintf(str, sizeof(str), "%3d %3d "
+			std::snprintf(str, sizeof(str), "%4d %4d "
 				, i->failcount, i->num_hashfails);
 			out += str;
 		}
@@ -476,7 +442,7 @@ int print_peer_info(std::string& out
 
 		if (print_peer_rate)
 		{
-			bool unchoked = (i->flags & peer_info::choked) == 0;
+			bool const unchoked = !(i->flags & lt::peer_info::choked);
 
 			std::snprintf(str, sizeof(str), " %s"
 				, unchoked ? add_suffix(i->estimated_reciprocation_rate, "/s").c_str() : "      ");
@@ -484,13 +450,13 @@ int print_peer_info(std::string& out
 		}
 		out += " ";
 
-		if (i->flags & peer_info::handshake)
+		if (i->flags & lt::peer_info::handshake)
 		{
 			out += esc("31");
 			out += " waiting for handshake";
 			out += esc("0");
 		}
-		else if (i->flags & peer_info::connecting)
+		else if (i->flags & lt::peer_info::connecting)
 		{
 			out += esc("31");
 			out += " connecting to peer";
@@ -508,7 +474,7 @@ int print_peer_info(std::string& out
 	return pos;
 }
 
-int allocation_mode = libtorrent::storage_mode_sparse;
+int allocation_mode = lt::storage_mode_sparse;
 std::string save_path(".");
 int torrent_upload_limit = 0;
 int torrent_download_limit = 0;
@@ -537,7 +503,7 @@ void print_settings(int const start, int const num
 {
 	for (int i = start; i < start + num; ++i)
 	{
-		char const* name = libtorrent::name_for_setting(i);
+		char const* name = lt::name_for_setting(i);
 		if (!name || name[0] == '\0') continue;
 		std::printf(fmt, name);
 	}
@@ -551,9 +517,8 @@ std::string resume_file(lt::sha1_hash const& info_hash)
 
 void add_magnet(lt::session& ses, lt::string_view uri)
 {
-	lt::add_torrent_params p;
 	lt::error_code ec;
-	lt::parse_magnet_uri(uri.to_string(), p, ec);
+	lt::add_torrent_params p = lt::parse_magnet_uri(uri.to_string(), ec);
 
 	if (ec)
 	{
@@ -563,12 +528,10 @@ void add_magnet(lt::session& ses, lt::string_view uri)
 	}
 
 	std::vector<char> resume_data;
-	load_file(resume_file(p.info_hash), resume_data, ec);
-	if (!ec)
+	if (load_file(resume_file(p.info_hash), resume_data))
 	{
 		p = lt::read_resume_data(resume_data, ec);
 		if (ec) std::printf("  failed to load resume data: %s\n", ec.message().c_str());
-		parse_magnet_uri(uri.to_string(), p, ec);
 	}
 	ec.clear();
 
@@ -577,9 +540,9 @@ void add_magnet(lt::session& ses, lt::string_view uri)
 	p.upload_limit = torrent_upload_limit;
 	p.download_limit = torrent_download_limit;
 
-	if (seed_mode) p.flags |= lt::add_torrent_params::flag_seed_mode;
+	if (seed_mode) p.flags |= lt::torrent_flags::seed_mode;
 	if (disable_storage) p.storage = lt::disabled_storage_constructor;
-	if (share_mode) p.flags |= lt::add_torrent_params::flag_share_mode;
+	if (share_mode) p.flags |= lt::torrent_flags::share_mode;
 	p.save_path = save_path;
 	p.storage_mode = static_cast<lt::storage_mode_t>(allocation_mode);
 
@@ -588,15 +551,17 @@ void add_magnet(lt::session& ses, lt::string_view uri)
 }
 
 // return false on failure
-bool add_torrent(libtorrent::session& ses, std::string torrent)
+bool add_torrent(lt::session& ses, std::string torrent)
 {
-	using namespace libtorrent;
+	using lt::add_torrent_params;
+	using lt::storage_mode_t;
+
 	static int counter = 0;
 
 	std::printf("[%d] %s\n", counter++, torrent.c_str());
 
-	error_code ec;
-	auto ti = std::make_shared<torrent_info>(torrent, ec);
+	lt::error_code ec;
+	auto ti = std::make_shared<lt::torrent_info>(torrent, ec);
 	if (ec)
 	{
 		std::printf("failed to load torrent \"%s\": %s\n"
@@ -607,17 +572,16 @@ bool add_torrent(libtorrent::session& ses, std::string torrent)
 	add_torrent_params p;
 
 	std::vector<char> resume_data;
-	load_file(resume_file(ti->info_hash()), resume_data, ec);
-	if (!ec)
+	if (load_file(resume_file(ti->info_hash()), resume_data))
 	{
 		p = lt::read_resume_data(resume_data, ec);
 		if (ec) std::printf("  failed to load resume data: %s\n", ec.message().c_str());
 	}
 	ec.clear();
 
-	if (seed_mode) p.flags |= add_torrent_params::flag_seed_mode;
-	if (disable_storage) p.storage = disabled_storage_constructor;
-	if (share_mode) p.flags |= add_torrent_params::flag_share_mode;
+	if (seed_mode) p.flags |= lt::torrent_flags::seed_mode;
+	if (disable_storage) p.storage = lt::disabled_storage_constructor;
+	if (share_mode) p.flags |= lt::torrent_flags::share_mode;
 
 	p.max_connections = max_connections_per_torrent;
 	p.max_uploads = -1;
@@ -626,7 +590,7 @@ bool add_torrent(libtorrent::session& ses, std::string torrent)
 	p.ti = ti;
 	p.save_path = save_path;
 	p.storage_mode = (storage_mode_t)allocation_mode;
-	p.flags &= ~add_torrent_params::flag_duplicate_is_error;
+	p.flags &= ~lt::torrent_flags::duplicate_is_error;
 	p.userdata = static_cast<void*>(new std::string(torrent));
 	ses.async_add_torrent(std::move(p));
 	return true;
@@ -634,7 +598,7 @@ bool add_torrent(libtorrent::session& ses, std::string torrent)
 
 std::vector<std::string> list_dir(std::string path
 	, bool (*filter_fun)(lt::string_view)
-	, libtorrent::error_code& ec)
+	, lt::error_code& ec)
 {
 	std::vector<std::string> ret;
 #ifdef TORRENT_WINDOWS
@@ -669,13 +633,10 @@ std::vector<std::string> list_dir(std::string path
 		return ret;
 	}
 
-	struct dirent de;
-	dirent* dummy;
-	while (readdir_r(handle, &de, &dummy) == 0)
+	struct dirent* de;
+	while ((de = readdir(handle)))
 	{
-		if (dummy == nullptr) break;
-
-		lt::string_view p(de.d_name);
+		lt::string_view p(de->d_name);
 		if (filter_fun(p))
 			ret.push_back(p.to_string());
 	}
@@ -684,9 +645,9 @@ std::vector<std::string> list_dir(std::string path
 	return ret;
 }
 
-void scan_dir(std::string const& dir_path, libtorrent::session& ses)
+void scan_dir(std::string const& dir_path, lt::session& ses)
 {
-	using namespace libtorrent;
+	using namespace lt;
 
 	error_code ec;
 	std::vector<std::string> ents = list_dir(dir_path
@@ -723,9 +684,9 @@ char const* timestamp()
 	return str;
 }
 
-void print_alert(libtorrent::alert const* a, std::string& str)
+void print_alert(lt::alert const* a, std::string& str)
 {
-	using namespace libtorrent;
+	using namespace lt;
 
 	if (a->category() & alert::error_notification)
 	{
@@ -747,28 +708,21 @@ void print_alert(libtorrent::alert const* a, std::string& str)
 
 int save_file(std::string const& filename, std::vector<char> const& v)
 {
-	FILE* f = std::fopen(filename.c_str(), "wb");
-	if (f == nullptr)
-		return -1;
-
-	int w = int(std::fwrite(&v[0], 1, v.size(), f));
-	std::fclose(f);
-
-	if (w < 0) return -1;
-	if (w != int(v.size())) return -3;
-	return 0;
+	std::fstream f(filename, std::ios_base::trunc | std::ios_base::out | std::ios_base::binary);
+	f.write(v.data(), v.size());
+	return !f.fail();
 }
 
 // returns true if the alert was handled (and should not be printed to the log)
 // returns false if the alert was not handled
 bool handle_alert(torrent_view& view, session_view& ses_view
-	, libtorrent::session& ses, libtorrent::alert* a)
+	, lt::session&, lt::alert* a)
 {
-	using namespace libtorrent;
+	using namespace lt;
 
 	if (session_stats_alert* s = alert_cast<session_stats_alert>(a))
 	{
-		ses_view.update_counters(s->values.data(), int(s->values.size())
+		ses_view.update_counters(s->counters()
 			, duration_cast<microseconds>(s->timestamp().time_since_epoch()).count());
 		return true;
 	}
@@ -839,7 +793,7 @@ bool handle_alert(torrent_view& view, session_view& ses_view
 		// ignore failures to connect and peers not responding with a
 		// handshake. The peers that we successfully connect to and then
 		// disconnect is more interesting.
-		if (pd->operation == op_connect
+		if (pd->op == operation_t::connect
 			|| pd->error == errors::timed_out_no_handshake)
 			return true;
 	}
@@ -927,6 +881,10 @@ bool handle_alert(torrent_view& view, session_view& ses_view
 		view.update_torrents(std::move(p->status));
 		return true;
 	}
+	else if (torrent_removed_alert* p = alert_cast<torrent_removed_alert>(a))
+	{
+		view.remove_torrent(std::move(p->handle));
+	}
 	return false;
 
 #ifdef _MSC_VER
@@ -936,7 +894,7 @@ bool handle_alert(torrent_view& view, session_view& ses_view
 }
 
 void pop_alerts(torrent_view& view, session_view& ses_view
-	, libtorrent::session& ses, std::deque<std::string>& events)
+	, lt::session& ses, std::deque<std::string>& events)
 {
 	std::vector<lt::alert*> alerts;
 	ses.pop_alerts(&alerts);
@@ -952,12 +910,12 @@ void pop_alerts(torrent_view& view, session_view& ses_view
 	}
 }
 
-void print_piece(libtorrent::partial_piece_info const* pp
-	, libtorrent::cached_piece_info const* cs
-	, std::vector<libtorrent::peer_info> const& peers
+void print_piece(lt::partial_piece_info const* pp
+	, lt::cached_piece_info const* cs
+	, std::vector<lt::peer_info> const& peers
 	, std::string& out)
 {
-	using namespace libtorrent;
+	using namespace lt;
 
 	char str[1024];
 	assert(pp == nullptr || cs == nullptr || cs->piece == pp->piece_index);
@@ -966,21 +924,19 @@ void print_piece(libtorrent::partial_piece_info const* pp
 
 	std::snprintf(str, sizeof(str), "%5d:[", piece);
 	out += str;
-	char const* last_color = nullptr;
+	string_view last_color;
 	for (int j = 0; j < num_blocks; ++j)
 	{
-		int index = pp ? peer_index(pp->blocks[j].peer(), peers) % 36 : -1;
-		char chr = '+';
-		if (index >= 0)
-			chr = char((index < 10)?'0' + index:'A' + index - 10);
-		bool snubbed = index >= 0 ? ((peers[index].flags & peer_info::snubbed) != 0) : false;
+		int const index = pp ? peer_index(pp->blocks[j].peer(), peers) % 36 : -1;
+		char const* chr = " ";
+		bool const snubbed = index >= 0 ? bool(peers[index].flags & lt::peer_info::snubbed) : false;
 
 		char const* color = "";
 
 		if (pp == nullptr)
 		{
 			color = cs->blocks[j] ? esc("34;7") : esc("0");
-			chr = ' ';
+			chr = " ";
 		}
 		else
 		{
@@ -989,27 +945,50 @@ void print_piece(libtorrent::partial_piece_info const* pp
 			else if (pp->blocks[j].bytes_progress > 0
 					&& pp->blocks[j].state == block_info::requested)
 			{
-				if (pp->blocks[j].num_peers > 1) color = esc("1;7");
-				else color = snubbed ? esc("35;7") : esc("33;7");
-				chr = char('0' + (pp->blocks[j].bytes_progress * 10 / pp->blocks[j].block_size));
+				if (pp->blocks[j].num_peers > 1) color = esc("0;1");
+				else color = snubbed ? esc("0;35") : esc("0;33");
+
+#ifndef TORRENT_WINDOWS
+				static char const* const progress[] = {
+					"\u2581", "\u2582", "\u2583", "\u2584",
+					"\u2585", "\u2586", "\u2587", "\u2588"
+				};
+				chr = progress[pp->blocks[j].bytes_progress * 8 / pp->blocks[j].block_size];
+#else
+				static char const* const progress[] = { "\xb0", "\xb1", "\xb2" };
+				chr = progress[pp->blocks[j].bytes_progress * 3 / pp->blocks[j].block_size];
+#endif
 			}
 			else if (pp->blocks[j].state == block_info::finished) color = esc("32;7");
 			else if (pp->blocks[j].state == block_info::writing) color = esc("36;7");
-			else if (pp->blocks[j].state == block_info::requested) color = snubbed ? esc("35;7") : esc("0");
-			else { color = esc("0"); chr = ' '; }
+			else if (pp->blocks[j].state == block_info::requested)
+			{
+				color = snubbed ? esc("0;35") : esc("0");
+				chr = "=";
+			}
+			else { color = esc("0"); chr = " "; }
 		}
-		if (last_color == nullptr || std::strcmp(last_color, color) != 0)
+		if (last_color != color)
 		{
-			std::snprintf(str, sizeof(str), "%s%c", color, chr);
-			out += str;
+			out += color;
+			last_color = color;
 		}
-		else
-			out += chr;
-
-		last_color = color;
+		out += chr;
 	}
 	out += esc("0");
 	out += "]";
+}
+
+bool is_resume_file(std::string const& s)
+{
+	static std::string const hex_digit = "0123456789abcdef";
+	if (s.size() != 40 + 7) return false;
+	if (s.substr(40) != ".resume") return false;
+	for (char const c : s.substr(0, 40))
+	{
+		if (hex_digit.find(c) == std::string::npos) return false;
+	}
+	return true;
 }
 
 int main(int argc, char* argv[])
@@ -1069,30 +1048,65 @@ DISK OPTIONS
 
 TORRENT is a path to a .torrent file
 MAGNETURL is a magnet link
+
+example alert_masks:
+   dht | errors                   =  1025
+   peer-log | errors              = 32769
+   torrent-log | errors           = 16385
+   ses-log | errors               =  8193
+   ses-log | torrent-log | errors = 24578
 )") ;
 		return 0;
 	}
 
-	using namespace libtorrent;
-	namespace lt = libtorrent;
+	using lt::settings_pack;
+	using lt::session_handle;
 
 	torrent_view view;
 	session_view ses_view;
 
-	settings_pack settings;
+	lt::session_params params;
+
+	lt::error_code ec;
+
+#ifndef TORRENT_DISABLE_DHT
+	params.dht_settings.privacy_lookups = true;
+
+	std::vector<char> in;
+	if (load_file(".ses_state", in))
+	{
+		lt::bdecode_node e;
+		if (bdecode(&in[0], &in[0] + in.size(), e, ec) == 0)
+			params = read_session_params(e, session_handle::save_dht_state);
+	}
+#endif
+
+	auto& settings = params.settings;
 	settings.set_int(settings_pack::cache_size, cache_size);
 	settings.set_int(settings_pack::choking_algorithm, settings_pack::rate_based_choker);
 
-	int refresh_delay = 500;
+	settings.set_str(settings_pack::user_agent, "client_test/" LIBTORRENT_VERSION);
+	settings.set_int(settings_pack::alert_mask, alert::all_categories
+		& ~(alert::dht_notification
+		| alert::progress_notification
+		| alert::stats_notification
+		| alert::session_log_notification
+		| alert::torrent_log_notification
+		| alert::peer_log_notification
+		| alert::dht_log_notification
+		| alert::picker_log_notification
+		));
+
+	lt::time_duration refresh_delay = lt::milliseconds(500);
 	bool rate_limit_locals = false;
 
 	std::deque<std::string> events;
 
-	time_point next_dir_scan = clock_type::now();
+	lt::time_point next_dir_scan = lt::clock_type::now();
 
 	// load the torrents given on the commandline
 	std::vector<lt::string_view> torrents;
-	ip_filter loaded_ip_filter;
+	lt::ip_filter loaded_ip_filter;
 
 	for (int i = 1; i < argc; ++i)
 	{
@@ -1126,7 +1140,7 @@ MAGNETURL is a magnet link
 			std::string const key(start, equal - start);
 			char const* value = equal + 1;
 
-			int const sett_name = setting_by_name(key);
+			int const sett_name = lt::setting_by_name(key);
 			if (sett_name < 0)
 			{
 				std::fprintf(stderr, "unknown setting: \"%s\"\n", key.c_str());
@@ -1165,7 +1179,7 @@ MAGNETURL is a magnet link
 		switch (argv[i][1])
 		{
 			case 'f': g_log_file = std::fopen(arg, "w+"); break;
-			case 'k': settings = high_performance_seed(); --i; break;
+			case 'k': settings = lt::high_performance_seed(); --i; break;
 			case 'G': seed_mode = true; --i; break;
 			case 's': save_path = make_absolute_path(arg); break;
 			case 'U': torrent_upload_limit = atoi(arg) * 1000; break;
@@ -1173,27 +1187,30 @@ MAGNETURL is a magnet link
 			case 'm': monitor_dir = make_absolute_path(arg); break;
 			case 'Q': share_mode = true; --i; break;
 			case 't': poll_interval = atoi(arg); break;
-			case 'F': refresh_delay = atoi(arg); break;
+			case 'F': refresh_delay = lt::milliseconds(atoi(arg)); break;
 			case 'a': allocation_mode = (arg == std::string("sparse"))
-				? libtorrent::storage_mode_sparse
-				: libtorrent::storage_mode_allocate;
+				? lt::storage_mode_sparse
+				: lt::storage_mode_allocate;
 				break;
 			case 'x':
 				{
-					FILE* filter = std::fopen(arg, "r");
-					if (filter)
+					std::fstream filter(arg, std::ios_base::in);
+					if (!filter.fail())
 					{
-						unsigned int a,b,c,d,e,f,g,h, flags;
-						while (std::fscanf(filter, "%u.%u.%u.%u - %u.%u.%u.%u %u\n"
-							, &a, &b, &c, &d, &e, &f, &g, &h, &flags) == 9)
+						std::regex regex(R"(^\s*([0-9]+)\.([0-9]+)\.([0-9]+)\.([0-9]+)\s*-\s*([0-9]+)\.([0-9]+)\.([0-9]+)\.([0-9]+)\s+([0-9]+)$)");
+
+						std::string line;
+						while (std::getline(filter, line))
 						{
-							address_v4 start((a << 24) + (b << 16) + (c << 8) + d);
-							address_v4 last((e << 24) + (f << 16) + (g << 8) + h);
-							if (flags <= 127) flags = ip_filter::blocked;
-							else flags = 0;
-							loaded_ip_filter.add_rule(start, last, flags);
+							std::smatch m;
+							if (std::regex_match(line, m, regex))
+							{
+								address_v4 start((stoi(m[1]) << 24) | (stoi(m[2]) << 16) | (stoi(m[3]) << 8) | stoi(m[4]));
+								address_v4 last((stoi(m[5]) << 24) | (stoi(m[6]) << 16) | (stoi(m[7]) << 8) | stoi(m[8]));
+								loaded_ip_filter.add_rule(start, last
+									, stoi(m[9]) <= 127 ? lt::ip_filter::blocked : 0);
+							}
 						}
-						std::fclose(filter);
 					}
 				}
 				break;
@@ -1222,23 +1239,11 @@ MAGNETURL is a magnet link
 			, errno, strerror(errno));
 	}
 
-	settings.set_str(settings_pack::user_agent, "client_test/" LIBTORRENT_VERSION);
-	settings.set_int(settings_pack::alert_mask, alert::all_categories
-		& ~(alert::dht_notification
-		+ alert::progress_notification
-		+ alert::stats_notification
-		+ alert::session_log_notification
-		+ alert::torrent_log_notification
-		+ alert::peer_log_notification
-		+ alert::dht_log_notification
-		+ alert::picker_log_notification
-		));
-
-	libtorrent::session ses(settings);
+	lt::session ses(std::move(params));
 
 	if (rate_limit_locals)
 	{
-		ip_filter pcf;
+		lt::ip_filter pcf;
 		pcf.add_rule(address_v4::from_string("0.0.0.0")
 			, address_v4::from_string("255.255.255.255")
 			, 1 << static_cast<std::uint32_t>(lt::session::global_peer_class_id));
@@ -1251,81 +1256,59 @@ MAGNETURL is a magnet link
 
 	ses.set_ip_filter(loaded_ip_filter);
 
-	error_code ec;
-
-#ifndef TORRENT_DISABLE_DHT
-	dht_settings dht;
-	dht.privacy_lookups = true;
-	ses.set_dht_settings(dht);
-
-	std::vector<char> in;
-	if (load_file(".ses_state", in, ec) == 0)
-	{
-		bdecode_node e;
-		if (bdecode(&in[0], &in[0] + in.size(), e, ec) == 0)
-			ses.load_state(e, session::save_dht_state);
-	}
-#endif
-
 	for (auto const& i : torrents)
 	{
 		if (i.substr(0, 7) == "magnet:") add_magnet(ses, i);
 		else add_torrent(ses, i.to_string());
 	}
 
-	// load resume files
-	std::string const resume_dir = path_append(save_path, ".resume");
-	std::vector<std::string> ents = list_dir(resume_dir
-		, [](lt::string_view p) { return p.size() > 7 && p.substr(p.size() - 7) == ".resume"; }, ec);
-	if (ec)
+	std::thread resume_data_loader([&ses]
 	{
+		// load resume files
+		lt::error_code ec;
+		std::string const resume_dir = path_append(save_path, ".resume");
+		std::vector<std::string> ents = list_dir(resume_dir
+			, [](lt::string_view p) { return p.size() > 7 && p.substr(p.size() - 7) == ".resume"; }, ec);
+		if (ec)
+		{
 		std::fprintf(stderr, "failed to list resume directory \"%s\": (%s : %d) %s\n"
 			, resume_dir.c_str(), ec.category().name(), ec.value(), ec.message().c_str());
-	}
-	else
-	{
-		int idx = 0;
-		for (auto const& e : ents)
+		}
+		else
 		{
-			std::string const file = path_append(resume_dir, e);
-
-			std::vector<char> resume_data;
-			load_file(file, resume_data, ec);
-			if (ec)
+			for (auto const& e : ents)
 			{
-				std::printf("  failed to load resume file \"%s\": %s\n"
-					, file.c_str(), ec.message().c_str());
-				continue;
-			}
-			add_torrent_params p = lt::read_resume_data(resume_data, ec);
-			if (ec)
-			{
-				std::printf("  failed to parse resume data \"%s\": %s\n"
-					, file.c_str(), ec.message().c_str());
-				continue;
-			}
+				// only load resume files of the form <info-hash>.resume
+				if (!is_resume_file(e)) continue;
+				std::string const file = path_append(resume_dir, e);
 
-			// we're loading this torrent from resume data. There's no need to
-			// re-save the resume data immediately.
-			p.flags &= ~add_torrent_params::flag_need_save_resume;
+				std::vector<char> resume_data;
+				if (!load_file(file, resume_data))
+				{
+					std::printf("  failed to load resume file \"%s\": %s\n"
+						, file.c_str(), ec.message().c_str());
+					continue;
+				}
+				add_torrent_params p = lt::read_resume_data(resume_data, ec);
+				if (ec)
+				{
+					std::printf("  failed to parse resume data \"%s\": %s\n"
+						, file.c_str(), ec.message().c_str());
+					continue;
+				}
 
-			ses.async_add_torrent(std::move(p));
+				// we're loading this torrent from resume data. There's no need to
+				// re-save the resume data immediately.
+				p.flags &= ~lt::torrent_flags::need_save_resume;
 
-			++idx;
-			if ((idx % 32) == 0)
-			{
-				// regularly, pop and handle alerts, to avoid the alert queue from
-				// filling up with add_torrent_alerts
-				pop_alerts(view, ses_view, ses, events);
+				ses.async_add_torrent(std::move(p));
 			}
 		}
-	}
+	});
 
 	// main loop
-	std::vector<peer_info> peers;
-	std::vector<partial_piece_info> queue;
-
-	int tick = 0;
+	std::vector<lt::peer_info> peers;
+	std::vector<lt::partial_piece_info> queue;
 
 #ifndef _WIN32
 	signal(SIGTERM, signal_handler);
@@ -1334,33 +1317,38 @@ MAGNETURL is a magnet link
 
 	while (!quit)
 	{
-		++tick;
 		ses.post_torrent_updates();
 		ses.post_session_stats();
 		ses.post_dht_stats();
 
 		int terminal_width = 80;
 		int terminal_height = 50;
-		terminal_size(&terminal_width, &terminal_height);
-		view.set_size(terminal_width, terminal_height / 3);
-		ses_view.set_pos(terminal_height / 3);
+		std::tie(terminal_width, terminal_height) = terminal_size();
+
+		// the ratio of torrent-list and details below depend on the number of
+		// torrents we have in the session
+		int const height = std::min(terminal_height / 2
+			, std::max(5, view.num_visible_torrents() + 2));
+		view.set_size(terminal_width, height);
+		ses_view.set_pos(height);
+		ses_view.set_width(terminal_width);
 
 		int c = 0;
 		if (sleep_and_input(&c, refresh_delay))
 		{
 
 #ifdef _WIN32
-#define ESCAPE_SEQ 224
-#define LEFT_ARROW 75
-#define RIGHT_ARROW 77
-#define UP_ARROW 72
-#define DOWN_ARROW 80
+			constexpr int escape_seq = 224;
+			constexpr int left_arrow = 75;
+			constexpr int right_arrow = 77;
+			constexpr int up_arrow = 72;
+			constexpr int down_arrow = 80;
 #else
-#define ESCAPE_SEQ 27
-#define LEFT_ARROW 68
-#define RIGHT_ARROW 67
-#define UP_ARROW 65
-#define DOWN_ARROW 66
+			constexpr int escape_seq = 27;
+			constexpr int left_arrow = 68;
+			constexpr int right_arrow = 67;
+			constexpr int up_arrow = 65;
+			constexpr int down_arrow = 66;
 #endif
 
 			torrent_handle h = view.get_active_handle();
@@ -1368,7 +1356,7 @@ MAGNETURL is a magnet link
 			if (c == EOF) { break; }
 			do
 			{
-				if (c == ESCAPE_SEQ)
+				if (c == escape_seq)
 				{
 					// escape code, read another character
 #ifdef _WIN32
@@ -1380,37 +1368,31 @@ MAGNETURL is a magnet link
 					c2 = getc(stdin);
 #endif
 					if (c2 == EOF) break;
-					if (c2 == LEFT_ARROW)
+					if (c2 == left_arrow)
 					{
-						// arrow left
-						int filter = view.filter();
+						int const filter = view.filter();
 						if (filter > 0)
 						{
-							--filter;
-							view.set_filter(filter);
+							view.set_filter(filter - 1);
 							h = view.get_active_handle();
 						}
 					}
-					else if (c2 == RIGHT_ARROW)
+					else if (c2 == right_arrow)
 					{
-						// arrow right
-						int filter = view.filter();
+						int const filter = view.filter();
 						if (filter < torrent_view::torrents_max - 1)
 						{
-							++filter;
-							view.set_filter(filter);
+							view.set_filter(filter + 1);
 							h = view.get_active_handle();
 						}
 					}
-					else if (c2 == UP_ARROW)
+					else if (c2 == up_arrow)
 					{
-						// arrow up
 						view.arrow_up();
 						h = view.get_active_handle();
 					}
-					else if (c2 == DOWN_ARROW)
+					else if (c2 == down_arrow)
 					{
-						// arrow down
 						view.arrow_down();
 						h = view.get_active_handle();
 					}
@@ -1504,15 +1486,15 @@ MAGNETURL is a magnet link
 				if (c == 's' && h.is_valid())
 				{
 					torrent_status const& ts = view.get_active_torrent();
-					h.set_sequential_download(!ts.sequential_download);
+					h.set_flags(~ts.flags, lt::torrent_flags::sequential_download);
 				}
 
 				if (c == 'R')
 				{
 					// save resume data for all torrents
-					std::vector<torrent_status> torr;
-					ses.get_torrent_status(&torr, [](torrent_status const& st)
-					{ return st.need_save_resume; }, 0);
+					std::vector<torrent_status> const torr = ses.get_torrent_status(
+						[](torrent_status const& st)
+						{ return st.need_save_resume; }, {});
 					for (torrent_status const& st : torr)
 					{
 						st.handle.save_resume_data(torrent_handle::save_info_dict);
@@ -1540,13 +1522,14 @@ MAGNETURL is a magnet link
 				if (c == 'p' && h.is_valid())
 				{
 					torrent_status const& ts = view.get_active_torrent();
-					if (!ts.auto_managed && ts.paused)
+					if ((ts.flags & (lt::torrent_flags::auto_managed
+						| lt::torrent_flags::paused)) == lt::torrent_flags::paused)
 					{
-						h.auto_managed(true);
+						h.set_flags(lt::torrent_flags::auto_managed);
 					}
 					else
 					{
-						h.auto_managed(false);
+						h.unset_flags(lt::torrent_flags::auto_managed);
 						h.pause(torrent_handle::graceful_pause);
 					}
 				}
@@ -1555,8 +1538,14 @@ MAGNETURL is a magnet link
 				if (c == 'k' && h.is_valid())
 				{
 					torrent_status const& ts = view.get_active_torrent();
-					h.auto_managed(!ts.auto_managed);
-					if (ts.auto_managed && ts.paused) h.resume();
+					h.set_flags(
+						~(ts.flags & lt::torrent_flags::auto_managed),
+						lt::torrent_flags::auto_managed);
+					if ((ts.flags & lt::torrent_flags::auto_managed)
+						&& (ts.flags & lt::torrent_flags::paused))
+					{
+						h.resume();
+					}
 				}
 
 				if (c == 'c' && h.is_valid())
@@ -1573,7 +1562,6 @@ MAGNETURL is a magnet link
 				if (c == 'f') print_file_progress = !print_file_progress;
 				if (c == 'P') show_pad_files = !show_pad_files;
 				if (c == 'g') show_dht_status = !show_dht_status;
-				if (c == 'u') ses_view.print_utp_stats(!ses_view.print_utp_stats());
 				if (c == 'x') print_disk_stats = !print_disk_stats;
 				// toggle columns
 				if (c == '1') print_ip = !print_ip;
@@ -1594,39 +1582,41 @@ MAGNETURL is a magnet link
 					clear_screen();
 					set_cursor_pos(0,0);
 					print(
-						"HELP SCREEN (press any key to dismiss)\n\n"
-						"CLIENT OPTIONS\n"
-						"[q] quit client                                 [m] add magnet link\n"
-						"\n"
-						"TORRENT ACTIONS\n"
-						"[p] pause/unpause selected torrent              [C] toggle disk cache\n"
-						"[s] toggle sequential download                  [j] force recheck\n"
-						"[space] toggle session pause                    [c] clear error\n"
-						"[v] scrape                                      [D] delete torrent and data\n"
-						"[r] force reannounce                            [R] save resume data for all torrents\n"
-						"[o] set piece deadlines (sequential dl)         [P] toggle auto-managed\n"
-						"[k] toggle force-started                        [W] remove all web seeds\n"
-						"\n"
-						"DISPLAY OPTIONS\n"
-						"left/right arrow keys: select torrent filter\n"
-						"up/down arrow keys: select torrent\n"
-						"[i] toggle show peers                           [d] toggle show downloading pieces\n"
-						"[u] show uTP stats                              [f] toggle show files\n"
-						"[g] show DHT                                    [x] toggle disk cache stats\n"
-						"[t] show trackers                               [l] toggle show log\n"
-						"[P] show pad files (in file list)               [y] toggle show piece matrix\n"
-						"\n"
-						"COLUMN OPTIONS\n"
-						"[1] toggle IP column                            [2]\n"
-						"[3] toggle timers column                        [4] toggle block progress column\n"
-						"[5] toggle peer rate column                     [6] toggle failures column\n"
-						"[7] toggle send buffers column\n"
-						);
+R"(HELP SCREEN (press any key to dismiss)
+
+CLIENT OPTIONS
+
+[q] quit client                                 [m] add magnet link
+
+TORRENT ACTIONS
+[p] pause/resume selected torrent               [C] toggle disk cache
+[s] toggle sequential download                  [j] force recheck
+[space] toggle session pause                    [c] clear error
+[v] scrape                                      [D] delete torrent and data
+[r] force reannounce                            [R] save resume data for all torrents
+[o] set piece deadlines (sequential dl)         [P] toggle auto-managed
+[k] toggle force-started                        [W] remove all web seeds
+
+DISPLAY OPTIONS
+left/right arrow keys: select torrent filter
+up/down arrow keys: select torrent
+[i] toggle show peers                           [d] toggle show downloading pieces
+[P] show pad files (in file list)               [f] toggle show files
+[g] show DHT                                    [x] toggle disk cache stats
+[t] show trackers                               [l] toggle show log
+[y] toggle show piece matrix
+
+COLUMN OPTIONS
+[1] toggle IP column                            [2]
+[3] toggle timers column                        [4] toggle block progress column
+[5] toggle peer rate column                     [6] toggle failures column
+[7] toggle send buffers column
+)");
 					int tmp;
-					while (sleep_and_input(&tmp, 500) == false);
+					while (sleep_and_input(&tmp, lt::milliseconds(500)) == false);
 				}
 
-			} while (sleep_and_input(&c, 0));
+			} while (sleep_and_input(&c, lt::milliseconds(0)));
 			if (c == 'q') break;
 		}
 
@@ -1658,7 +1648,7 @@ MAGNETURL is a magnet link
 */
 
 			int bucket = 0;
-			for (dht_routing_bucket const& n : dht_routing_table)
+			for (lt::dht_routing_bucket const& n : dht_routing_table)
 			{
 				char const* progress_bar =
 					"################################"
@@ -1675,7 +1665,7 @@ MAGNETURL is a magnet link
 				pos += 1;
 			}
 
-			for (dht_lookup const& l : dht_active_requests)
+			for (lt::dht_lookup const& l : dht_active_requests)
 			{
 				std::snprintf(str, sizeof(str)
 					, "  %10s target: %s "
@@ -1701,12 +1691,12 @@ MAGNETURL is a magnet link
 			}
 		}
 #endif
-		time_point const now = clock_type::now();
+		lt::time_point const now = lt::clock_type::now();
 		if (h.is_valid())
 		{
 			torrent_status const& s = view.get_active_torrent();
 
-			print((piece_bar(s.pieces, 126) + "\x1b[K\n").c_str());
+			print((piece_bar(s.pieces, terminal_width - 2) + "\x1b[K\n").c_str());
 			pos += 1;
 
 			if ((print_downloads && s.state != torrent_status::seeding)
@@ -1718,16 +1708,26 @@ MAGNETURL is a magnet link
 
 			if (print_trackers)
 			{
-				for (announce_entry const& ae : h.trackers())
+				snprintf(str, sizeof(str), "next_announce: %4" PRId64 " | current tracker: %s\x1b[K\n"
+					, std::int64_t(duration_cast<seconds>(s.next_announce).count())
+					, s.current_tracker.c_str());
+				out += str;
+				pos += 1;
+				std::vector<lt::announce_entry> tr = h.trackers();
+				lt::time_point now = lt::clock_type::now();
+				for (lt::announce_entry const& ae : h.trackers())
 				{
+					auto best_ae = std::min_element(ae.endpoints.begin(), ae.endpoints.end()
+						, [](lt::announce_endpoint const& l, lt::announce_endpoint const& r) { return l.fails < r.fails; } );
+
 					if (pos + 1 >= terminal_height) break;
 					std::snprintf(str, sizeof(str), "%2d %-55s fails: %-3d (%-3d) %s %s %5d \"%s\" %s\x1b[K\n"
-						, ae.tier, ae.url.c_str(), ae.fails, ae.fail_limit, ae.verified?"OK ":"-  "
-						, ae.updating?"updating"
-							:to_string(int(total_seconds(ae.next_announce - now)), 8).c_str()
-						, int(ae.min_announce > now ? total_seconds(ae.min_announce - now) : 0)
-						, ae.last_error ? ae.last_error.message().c_str() : ""
-						, ae.message.c_str());
+						, ae.tier, ae.url.c_str()
+						, best_ae != ae.endpoints.end() ? best_ae->fails : 0, ae.fail_limit, ae.verified?"OK ":"-  "
+						, to_string(best_ae != ae.endpoints.end() ? int(total_seconds(best_ae->next_announce - now)) : 0, 8).c_str()
+						, best_ae != ae.endpoints.end() && best_ae->min_announce > now ? int(total_seconds(best_ae->min_announce - now)) : 0
+						, best_ae != ae.endpoints.end() && best_ae->last_error ? best_ae->last_error.message().c_str() : ""
+						, best_ae != ae.endpoints.end() ? best_ae->message.c_str() : "");
 					out += str;
 					pos += 1;
 				}
@@ -1745,24 +1745,24 @@ MAGNETURL is a magnet link
 				h.get_download_queue(queue);
 
 				std::sort(queue.begin(), queue.end()
-					, [] (partial_piece_info const& lhs, partial_piece_info const& rhs)
+					, [] (lt::partial_piece_info const& lhs, lt::partial_piece_info const& rhs)
 					{ return lhs.piece_index < rhs.piece_index; });
 
 				std::sort(cs.pieces.begin(), cs.pieces.end()
-					, [](cached_piece_info const& lhs, cached_piece_info const& rhs)
+					, [](lt::cached_piece_info const& lhs, lt::cached_piece_info const& rhs)
 					{ return lhs.piece < rhs.piece; });
 
 				int p = 0; // this is horizontal position
-				for (cached_piece_info const& i : cs.pieces)
+				for (lt::cached_piece_info const& i : cs.pieces)
 				{
 					if (pos + 3 >= terminal_height) break;
 
-					partial_piece_info* pp = nullptr;
-					partial_piece_info tmp;
+					lt::partial_piece_info* pp = nullptr;
+					lt::partial_piece_info tmp;
 					tmp.piece_index = i.piece;
-					std::vector<partial_piece_info>::iterator ppi
+					std::vector<lt::partial_piece_info>::iterator ppi
 						= std::lower_bound(queue.begin(), queue.end(), tmp
-						, [](partial_piece_info const& lhs, partial_piece_info const& rhs)
+						, [](lt::partial_piece_info const& lhs, lt::partial_piece_info const& rhs)
 						{ return lhs.piece_index < rhs.piece_index; });
 
 					if (ppi != queue.end() && ppi->piece_index == i.piece) pp = &*ppi;
@@ -1790,7 +1790,7 @@ MAGNETURL is a magnet link
 					if (pp) queue.erase(ppi);
 				}
 
-				for (partial_piece_info const& i : queue)
+				for (lt::partial_piece_info const& i : queue)
 				{
 					if (pos + 3 >= terminal_height) break;
 
@@ -1820,7 +1820,7 @@ MAGNETURL is a magnet link
 					pos += 1;
 				}
 
-				std::snprintf(str, sizeof(str), "%s %s read cache | %s %s downloading | %s %s cached | %s %s flushed | %s %s snubbed\x1b[K\n"
+				std::snprintf(str, sizeof(str), "%s %s read cache | %s %s downloading | %s %s cached | %s %s flushed | %s %s snubbed | = requested\x1b[K\n"
 					, esc("34;7"), esc("0") // read cache
 					, esc("33;7"), esc("0") // downloading
 					, esc("36;7"), esc("0") // cached
@@ -1835,10 +1835,10 @@ MAGNETURL is a magnet link
 			{
 				std::vector<std::int64_t> file_progress;
 				h.file_progress(file_progress);
-				std::vector<open_file_state> file_status = h.file_status();
-				std::vector<int> file_prio = h.file_priorities();
+				std::vector<lt::open_file_state> file_status = h.file_status();
+				std::vector<lt::download_priority_t> file_prio = h.get_file_priorities();
 				auto f = file_status.begin();
-				std::shared_ptr<const torrent_info> ti = h.torrent_file();
+				std::shared_ptr<const lt::torrent_info> ti = h.torrent_file();
 
 				int p = 0; // this is horizontal position
 				for (file_index_t i(0); i < file_index_t(ti->num_files()); ++i)
@@ -1876,12 +1876,11 @@ MAGNETURL is a magnet link
 					if (f != file_status.end() && f->file_index == i)
 					{
 						title += " [ ";
-						if ((f->open_mode & file_open_mode::rw_mask) == file::read_write) title += "read/write ";
-						else if ((f->open_mode & file_open_mode::rw_mask) == file::read_only) title += "read ";
-						else if ((f->open_mode & file_open_mode::rw_mask) == file::write_only) title += "write ";
-						if (f->open_mode & file_open_mode::random_access) title += "random_access ";
-						if (f->open_mode & file_open_mode::locked) title += "locked ";
-						if (f->open_mode & file_open_mode::sparse) title += "sparse ";
+						if ((f->open_mode & lt::file_open_mode::rw_mask) == lt::file_open_mode::read_write) title += "read/write ";
+						else if ((f->open_mode & lt::file_open_mode::rw_mask) == lt::file_open_mode::read_only) title += "read ";
+						else if ((f->open_mode & lt::file_open_mode::rw_mask) == lt::file_open_mode::write_only) title += "write ";
+						if (f->open_mode & lt::file_open_mode::random_access) title += "random_access ";
+						if (f->open_mode & lt::file_open_mode::sparse) title += "sparse ";
 						title += "]";
 						++f;
 					}
@@ -1900,7 +1899,7 @@ MAGNETURL is a magnet link
 						progress_bar(progress, file_progress_width, complete ? col_green : col_yellow, '-', '#'
 							, title.c_str()).c_str()
 						, add_suffix(file_progress[idx]).c_str()
-						, file_prio[idx]);
+						, static_cast<std::uint8_t>(file_prio[idx]));
 
 					p += file_progress_width + 13;
 					out += str;
@@ -1938,18 +1937,20 @@ MAGNETURL is a magnet link
 		}
 	}
 
+	resume_data_loader.join();
+
 	ses.pause();
 	std::printf("saving resume data\n");
 
 	// get all the torrent handles that we need to save resume data for
-	std::vector<torrent_status> temp;
-	ses.get_torrent_status(&temp, [](torrent_status const& st)
-	{
-		if (!st.handle.is_valid()) return false;
-		if (!st.has_metadata) return false;
-		if (!st.need_save_resume) return false;
-		return true;
-	}, 0);
+	std::vector<torrent_status> const temp = ses.get_torrent_status(
+		[](torrent_status const& st)
+		{
+			if (!st.handle.is_valid()) return false;
+			if (!st.has_metadata) return false;
+			if (!st.need_save_resume) return false;
+			return true;
+		}, {});
 
 	int idx = 0;
 	for (auto const& st : temp)
@@ -1979,8 +1980,8 @@ MAGNETURL is a magnet link
 #ifndef TORRENT_DISABLE_DHT
 	std::printf("\nsaving session state\n");
 	{
-		entry session_state;
-		ses.save_state(session_state, session::save_dht_state);
+		lt::entry session_state;
+		ses.save_state(session_state, lt::session::save_dht_state);
 
 		std::vector<char> out;
 		bencode(std::back_inserter(out), session_state);

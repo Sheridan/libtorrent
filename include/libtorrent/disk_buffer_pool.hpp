@@ -35,15 +35,6 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #include "libtorrent/config.hpp"
 
-#include "libtorrent/aux_/disable_warnings_push.hpp"
-
-#ifndef TORRENT_DISABLE_POOL_ALLOCATOR
-#include "libtorrent/allocator.hpp" // for page_aligned_allocator
-#include <boost/pool/pool.hpp>
-#endif
-
-#include "libtorrent/aux_/disable_warnings_pop.hpp"
-
 #if TORRENT_USE_INVARIANT_CHECKS
 #include <set>
 #endif
@@ -64,8 +55,7 @@ namespace libtorrent {
 
 	struct TORRENT_EXTRA_EXPORT disk_buffer_pool
 	{
-		disk_buffer_pool(int block_size, io_service& ios
-			, std::function<void()> const& trigger_trim);
+		disk_buffer_pool(io_service& ios, std::function<void()> const& trigger_trim);
 		disk_buffer_pool(disk_buffer_pool const&) = delete;
 		disk_buffer_pool& operator=(disk_buffer_pool const&) = delete;
 		~disk_buffer_pool();
@@ -85,10 +75,6 @@ namespace libtorrent {
 		int allocate_iovec(span<iovec_t> iov);
 		void free_iovec(span<iovec_t const> iov);
 
-		int block_size() const { return m_block_size; }
-
-		void release_memory();
-
 		int in_use() const
 		{
 			std::unique_lock<std::mutex> l(m_pool_mutex);
@@ -102,10 +88,6 @@ namespace libtorrent {
 
 		void free_buffer_impl(char* buf, std::unique_lock<std::mutex>& l);
 		char* allocate_buffer_impl(std::unique_lock<std::mutex>& l, char const* category);
-
-		// number of bytes per block. The BitTorrent
-		// protocol defines the block size to 16 KiB.
-		const int m_block_size;
 
 		// number of disk buffers currently allocated
 		int m_in_use;
@@ -141,30 +123,6 @@ namespace libtorrent {
 		void remove_buffer_in_use(char* buf);
 
 		mutable std::mutex m_pool_mutex;
-
-		int m_cache_buffer_chunk_size;
-
-#ifndef TORRENT_DISABLE_POOL_ALLOCATOR
-		// if this is true, all buffers are allocated
-		// from m_pool. If this is false, all buffers
-		// are allocated using page_aligned_allocator.
-		// if the settings change to prefer the other
-		// allocator, this bool will not switch over
-		// to match the settings until all buffers have
-		// been freed. That way, we never have a mixture
-		// of buffers allocated from different sources.
-		// in essence, this make the setting only take
-		// effect after a restart (which seems fine).
-		// or once the client goes idle for a while.
-		bool m_using_pool_allocator;
-
-		// this is the actual user setting
-		bool m_want_pool_allocator;
-
-		// memory pool for read and write operations
-		// and disk cache
-		boost::pool<page_aligned_allocator> m_pool;
-#endif
 
 		// this is specifically exempt from release_asserts
 		// since it's a quite costly check. Only for debug

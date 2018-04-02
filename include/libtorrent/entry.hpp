@@ -176,7 +176,7 @@ namespace aux {
 
 		// hidden
 		entry(entry const& e);
-		entry(entry&& e);
+		entry(entry&& e) noexcept;
 
 		// hidden
 		entry();
@@ -195,7 +195,7 @@ namespace aux {
 #endif
 		entry& operator=(bdecode_node const&);
 		entry& operator=(entry const&);
-		entry& operator=(entry&&);
+		entry& operator=(entry&&) noexcept;
 		entry& operator=(dictionary_type);
 		entry& operator=(span<char const>);
 		template <typename U, typename Cond = typename std::enable_if<

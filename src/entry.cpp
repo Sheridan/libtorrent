@@ -31,15 +31,11 @@ POSSIBILITY OF SUCH DAMAGE.
 */
 
 #include "libtorrent/config.hpp"
-
-#if TORRENT_USE_IOSTREAM
-#include <iostream>
-#endif
-
 #ifndef TORRENT_NO_DEPRECATE
 #include "libtorrent/lazy_entry.hpp"
 #endif
 #include "libtorrent/bdecode.hpp"
+#include "libtorrent/bencode.hpp"
 #include "libtorrent/entry.hpp"
 #include "libtorrent/hex.hpp"
 #include "libtorrent/string_util.hpp"
@@ -48,45 +44,57 @@ POSSIBILITY OF SUCH DAMAGE.
 namespace libtorrent {
 
 namespace detail {
-		char const* integer_to_str(char* buf, int size
-			, entry::integer_type val)
+
+	char const* integer_to_str(char* buf, int size
+		, entry::integer_type val)
+	{
+		int sign = 0;
+		if (val < 0)
 		{
-			int sign = 0;
-			if (val < 0)
-			{
-				sign = 1;
-				val = -val;
-			}
-			buf[--size] = '\0';
-			if (val == 0) buf[--size] = '0';
-			for (; size > sign && val != 0;)
-			{
-				buf[--size] = '0' + char(val % 10);
-				val /= 10;
-			}
-			if (sign) buf[--size] = '-';
-			return buf + size;
+			sign = 1;
+			val = -val;
 		}
+		buf[--size] = '\0';
+		if (val == 0) buf[--size] = '0';
+		while (size > sign && val != 0)
+		{
+			buf[--size] = '0' + char(val % 10);
+			val /= 10;
+		}
+		if (sign) buf[--size] = '-';
+		return buf + size;
+	}
+} // detail
+
+	entry bdecode(span<char const> buffer)
+	{
+		entry e;
+		bool err = false;
+		auto it = buffer.begin();
+		detail::bdecode_recursive(it, buffer.end(), e, err, 0);
+		TORRENT_ASSERT(e.m_type_queried == false);
+		if (err) return entry();
+		return e;
 	}
 
 namespace {
 
-		inline void TORRENT_NO_RETURN throw_error()
-		{ aux::throw_ex<system_error>(errors::invalid_entry_type); }
+	inline void TORRENT_NO_RETURN throw_error()
+	{ aux::throw_ex<system_error>(errors::invalid_entry_type); }
 
-		template <class T>
-		void call_destructor(T* o)
-		{
-			TORRENT_ASSERT(o);
-			o->~T();
-		}
+	template <class T>
+	void call_destructor(T* o)
+	{
+		TORRENT_ASSERT(o);
+		o->~T();
 	}
+} // anonymous
 
 	entry& entry::operator[](string_view key)
 	{
-		dictionary_type::iterator i = dict().find(key);
+		auto const i = dict().find(key);
 		if (i != dict().end()) return i->second;
-		dictionary_type::iterator ret = dict().emplace(
+		auto const ret = dict().emplace(
 			std::piecewise_construct,
 			std::forward_as_tuple(key),
 			std::forward_as_tuple()).first;
@@ -95,21 +103,21 @@ namespace {
 
 	const entry& entry::operator[](string_view key) const
 	{
-		dictionary_type::const_iterator i = dict().find(key);
+		auto const i = dict().find(key);
 		if (i == dict().end()) throw_error();
 		return i->second;
 	}
 
 	entry* entry::find_key(string_view key)
 	{
-		dictionary_type::iterator i = dict().find(key);
+		auto const i = dict().find(key);
 		if (i == dict().end()) return nullptr;
 		return &i->second;
 	}
 
 	entry const* entry::find_key(string_view key) const
 	{
-		dictionary_type::const_iterator i = dict().find(key);
+		auto const i = dict().find(key);
 		if (i == dict().end()) return nullptr;
 		return &i->second;
 	}
@@ -132,9 +140,35 @@ namespace {
 		return *this;
 	}
 
-	entry& entry::operator=(entry&& e)
+	entry& entry::operator=(entry&& e) noexcept
 	{
-		swap(e);
+		if (&e == this) return *this;
+		destruct();
+		const auto t = e.type();
+		switch (t)
+		{
+		case int_t:
+			new (&data) integer_type(std::move(e.integer()));
+			break;
+		case string_t:
+			new (&data) string_type(std::move(e.string()));
+			break;
+		case list_t:
+			new (&data) list_type(std::move(e.list()));
+			break;
+		case dictionary_t:
+			new (&data) dictionary_type(std::move(e.dict()));
+			break;
+		case undefined_t:
+			break;
+		case preformatted_t:
+			new (&data) preformatted_type(std::move(e.preformatted()));
+			break;
+		}
+		m_type = t;
+#if TORRENT_USE_ASSERTS
+		m_type_queried = true;
+#endif
 		return *this;
 	}
 
@@ -269,16 +303,10 @@ namespace {
 #endif
 	}
 
-	entry::entry(entry&& e)
+	entry::entry(entry&& e) noexcept
 		: m_type(undefined_t)
 	{
-#if TORRENT_USE_ASSERTS
-		uint8_t type_queried = e.m_type_queried;
-#endif
-		swap(e);
-#if TORRENT_USE_ASSERTS
-		m_type_queried = type_queried;
-#endif
+		this->operator=(std::move(e));
 	}
 
 	entry::entry(dictionary_type v)
@@ -357,7 +385,7 @@ namespace {
 				list_type& l = this->list();
 				for (int i = 0; i < e.list_size(); ++i)
 				{
-					l.push_back(entry());
+					l.emplace_back();
 					l.back() = e.list_at(i);
 				}
 				break;
@@ -396,7 +424,7 @@ namespace {
 				list_type& l = this->list();
 				for (int i = 0; i < e.list_size(); ++i)
 				{
-					l.push_back(entry());
+					l.emplace_back();
 					l.back() = *e.list_at(i);
 				}
 				break;
@@ -637,26 +665,27 @@ namespace {
 	std::string entry::to_string() const
 	{
 		std::string ret;
+		if (type() == dictionary_t) ret.reserve(280);
 		to_string_impl(ret, 0);
 		return ret;
 	}
 
-	void entry::to_string_impl(std::string& out, int indent) const
+	void entry::to_string_impl(std::string& out, int const indent) const
 	{
 		TORRENT_ASSERT(indent >= 0);
-		for (int i = 0; i < indent; ++i) out += " ";
+		for (int i = 0; i < indent; ++i) out += ' ';
 		switch (type())
 		{
 		case int_t:
 			out += libtorrent::to_string(integer()).data();
-			out += "\n";
+			out += '\n';
 			break;
 		case string_t:
 			{
 				bool binary_string = false;
-				for (std::string::const_iterator i = string().begin(); i != string().end(); ++i)
+				for (auto const i : string())
 				{
-					if (!is_print(*i))
+					if (!is_print(i))
 					{
 						binary_string = true;
 						break;
@@ -665,47 +694,47 @@ namespace {
 				if (binary_string)
 				{
 					out += aux::to_hex(string());
-					out += "\n";
+					out += '\n';
 				}
 				else
 				{
 					out += string();
-					out += "\n";
+					out += '\n';
 				}
 			} break;
 		case list_t:
 			{
 				out += "list\n";
-				for (list_type::const_iterator i = list().begin(); i != list().end(); ++i)
+				for (auto const& i : list())
 				{
-					i->to_string_impl(out, indent + 1);
+					i.to_string_impl(out, indent + 1);
 				}
 			} break;
 		case dictionary_t:
 			{
 				out += "dictionary\n";
-				for (dictionary_type::const_iterator i = dict().begin(); i != dict().end(); ++i)
+				for (auto const& i : dict())
 				{
 					bool binary_string = false;
-					for (std::string::const_iterator k = i->first.begin(); k != i->first.end(); ++k)
+					for (auto const k : i.first)
 					{
-						if (!is_print(*k))
+						if (!is_print(k))
 						{
 							binary_string = true;
 							break;
 						}
 					}
-					for (int j = 0; j < indent + 1; ++j) out += " ";
-					out += "[";
-					if (binary_string) out += aux::to_hex(i->first);
-					else out += i->first;
-					out += "]";
+					for (int j = 0; j < indent + 1; ++j) out += ' ';
+					out += '[';
+					if (binary_string) out += aux::to_hex(i.first);
+					else out += i.first;
+					out += ']';
 
-					if (i->second.type() != entry::string_t
-						&& i->second.type() != entry::int_t)
-						out += "\n";
-					else out += " ";
-					i->second.to_string_impl(out, indent + 2);
+					if (i.second.type() != entry::string_t
+						&& i.second.type() != entry::int_t)
+						out += '\n';
+					else out += ' ';
+					i.second.to_string_impl(out, indent + 2);
 				}
 			} break;
 		case preformatted_t:

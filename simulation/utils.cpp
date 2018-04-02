@@ -42,7 +42,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/io_service.hpp"
 #include "setup_swarm.hpp"
 
-using namespace libtorrent;
+using namespace lt;
 
 void utp_only(lt::session& ses)
 {
@@ -89,8 +89,8 @@ int get_cache_size(lt::session& ses)
 	{
 		if (auto const* st = alert_cast<session_stats_alert>(a))
 		{
-			cache_size = st->values[read_cache_idx];
-			cache_size += st->values[write_cache_idx];
+			cache_size = st->counters()[read_cache_idx];
+			cache_size += st->counters()[write_cache_idx];
 			break;
 		}
 	}
@@ -124,11 +124,13 @@ void print_alerts(lt::session& ses
 {
 	lt::time_point start_time = lt::clock_type::now();
 
+	static std::vector<lt::alert*> alerts;
+
 	ses.set_alert_notify([&ses,start_time,on_alert] {
 		ses.get_io_service().post([&ses,start_time,on_alert] {
 
 		try {
-			std::vector<lt::alert*> alerts;
+			alerts.clear();
 			ses.pop_alerts(&alerts);
 
 			for (lt::alert const* a : alerts)

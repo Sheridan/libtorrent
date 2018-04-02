@@ -46,7 +46,6 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <libtorrent/error_code.hpp>
 #include <libtorrent/magnet_uri.hpp>
 
-namespace lt = libtorrent;
 using clk = std::chrono::steady_clock;
 
 // return the name of a torrent status enum
@@ -64,7 +63,7 @@ char const* state(lt::torrent_status::state_t s)
 	}
 }
 
-int main(int argc, char const* argv[])
+int main(int argc, char const* argv[]) try
 {
 	if (argc != 2) {
 		std::cerr << "usage: " << argv[0] << " <magnet-url>" << std::endl;
@@ -92,10 +91,9 @@ int main(int argc, char const* argv[])
 		std::cerr << "failed to read resume data: " << ec.message() << std::endl;
 		return 1;
 	}
-	lt::parse_magnet_uri(argv[1], atp, ec);
-	if (ec) {
-		std::cerr << "invalid magnet URI: " << ec.message() << std::endl;
-		return 1;
+	lt::add_torrent_params magnet = lt::parse_magnet_uri(argv[1]);
+	if (atp.info_hash != magnet.info_hash) {
+		atp = std::move(magnet);
 	}
 	atp.save_path = "."; // save in current dir
 	ses.async_add_torrent(std::move(atp));
@@ -159,5 +157,9 @@ int main(int argc, char const* argv[])
 
 done:
 	std::cout << "\ndone, shutting down" << std::endl;
+}
+catch (std::exception& e)
+{
+	std::cerr << "Error: " << e.what() << std::endl;
 }
 

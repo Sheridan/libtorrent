@@ -36,6 +36,9 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/config.hpp"
 #include "libtorrent/address.hpp"
 #include "libtorrent/socket.hpp"
+#include "libtorrent/peer_info.hpp" // for peer_source_flags_t
+#include "libtorrent/aux_/string_ptr.hpp"
+#include "libtorrent/string_view.hpp"
 
 namespace libtorrent {
 
@@ -50,7 +53,12 @@ namespace libtorrent {
 
 	struct TORRENT_EXTRA_EXPORT torrent_peer
 	{
-		torrent_peer(std::uint16_t port, bool connectable, int src);
+		torrent_peer(std::uint16_t port, bool connectable, peer_source_flags_t src);
+#if TORRENT_USE_ASSERTS
+		torrent_peer(torrent_peer const&) = default;
+		torrent_peer& operator=(torrent_peer const&) = default;
+		~torrent_peer() { TORRENT_ASSERT(in_use); in_use = false; }
+#endif
 
 		std::int64_t total_download() const;
 		std::int64_t total_upload() const;
@@ -58,7 +66,7 @@ namespace libtorrent {
 		std::uint32_t rank(external_ip const& external, int external_port) const;
 
 		libtorrent::address address() const;
-		char const* dest() const;
+		string_view dest() const;
 
 		tcp::endpoint ip() const { return tcp::endpoint(address(), port); }
 
@@ -146,6 +154,9 @@ namespace libtorrent {
 		// from peer_info.
 		std::uint32_t source:6;
 
+		peer_source_flags_t peer_source() const
+		{ return peer_source_flags_t(source); }
+
 #if !defined(TORRENT_DISABLE_ENCRYPTION) && !defined(TORRENT_DISABLE_EXTENSIONS)
 		// Hints encryption support of torrent_peer. Only effective
 		// for and when the outgoing encryption policy
@@ -193,13 +204,13 @@ namespace libtorrent {
 		// never considered a connect candidate
 		bool web_seed:1;
 #if TORRENT_USE_ASSERTS
-		bool in_use:1;
+		bool in_use = true;
 #endif
 	};
 
 	struct TORRENT_EXTRA_EXPORT ipv4_peer : torrent_peer
 	{
-		ipv4_peer(tcp::endpoint const& ip, bool connectable, int src);
+		ipv4_peer(tcp::endpoint const& ip, bool connectable, peer_source_flags_t src);
 		ipv4_peer(ipv4_peer const& p);
 		ipv4_peer& operator=(ipv4_peer const& p);
 
@@ -209,19 +220,20 @@ namespace libtorrent {
 #if TORRENT_USE_I2P
 	struct TORRENT_EXTRA_EXPORT i2p_peer : torrent_peer
 	{
-		i2p_peer(char const* destination, bool connectable, int src);
-		i2p_peer(i2p_peer const&);
-		~i2p_peer();
-		i2p_peer& operator=(i2p_peer const&);
+		i2p_peer(string_view dst, bool connectable, peer_source_flags_t src);
+		i2p_peer(i2p_peer const&) = delete;
+		i2p_peer& operator=(i2p_peer const&) = delete;
+		i2p_peer(i2p_peer&&) = default;
+		i2p_peer& operator=(i2p_peer&&) = default;
 
-		char* destination;
+		aux::string_ptr destination;
 	};
 #endif
 
 #if TORRENT_USE_IPV6
 	struct TORRENT_EXTRA_EXPORT ipv6_peer : torrent_peer
 	{
-		ipv6_peer(tcp::endpoint const& ip, bool connectable, int src);
+		ipv6_peer(tcp::endpoint const& ip, bool connectable, peer_source_flags_t src);
 		ipv6_peer(ipv6_peer const& p);
 
 		const address_v6::bytes_type addr;
@@ -230,38 +242,33 @@ namespace libtorrent {
 
 	struct peer_address_compare
 	{
-		bool operator()(
-			torrent_peer const* lhs, libtorrent::address const& rhs) const
+		bool operator()(torrent_peer const* lhs, address const& rhs) const
 		{
 			return lhs->address() < rhs;
 		}
 
-		bool operator()(
-				libtorrent::address const& lhs, torrent_peer const* rhs) const
+		bool operator()(address const& lhs, torrent_peer const* rhs) const
 		{
 			return lhs < rhs->address();
 		}
 
 #if TORRENT_USE_I2P
-		bool operator()(
-				torrent_peer const* lhs, char const* rhs) const
+		bool operator()(torrent_peer const* lhs, string_view rhs) const
 		{
-			return strcmp(lhs->dest(), rhs) < 0;
+			return lhs->dest().compare(rhs) < 0;
 		}
 
-		bool operator()(
-				char const* lhs, torrent_peer const* rhs) const
+		bool operator()(string_view lhs, torrent_peer const* rhs) const
 		{
-			return strcmp(lhs, rhs->dest()) < 0;
+			return lhs.compare(rhs->dest()) < 0;
 		}
 #endif
 
-		bool operator()(
-				torrent_peer const* lhs, torrent_peer const* rhs) const
+		bool operator()(torrent_peer const* lhs, torrent_peer const* rhs) const
 		{
 #if TORRENT_USE_I2P
 			if (rhs->is_i2p_addr == lhs->is_i2p_addr)
-				return strcmp(lhs->dest(), rhs->dest()) < 0;
+				return lhs->dest().compare(rhs->dest()) < 0;
 #endif
 			return lhs->address() < rhs->address();
 		}
@@ -269,4 +276,3 @@ namespace libtorrent {
 }
 
 #endif
-

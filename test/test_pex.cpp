@@ -46,10 +46,11 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "setup_transfer.hpp"
 #include <iostream>
 
+namespace {
+
 void test_pex()
 {
-	using namespace libtorrent;
-	namespace lt = libtorrent;
+	using namespace lt;
 
 	// these are declared before the session objects
 	// so that they are destructed last. This enables
@@ -58,7 +59,7 @@ void test_pex()
 	session_proxy p2;
 	session_proxy p3;
 
-	int mask = alert::all_categories
+	auto const mask = alert::all_categories
 		& ~(alert::progress_notification
 			| alert::performance_warning
 			| alert::stats_notification);
@@ -76,6 +77,9 @@ void test_pex()
 	pack.set_bool(settings_pack::enable_dht, false);
 	pack.set_bool(settings_pack::enable_upnp, false);
 	pack.set_bool(settings_pack::enable_natpmp, false);
+#ifndef TORRENT_NO_DEPRECATE
+	pack.set_bool(settings_pack::rate_limit_utp, true);
+#endif
 
 	pack.set_int(settings_pack::out_enc_policy, settings_pack::pe_forced);
 	pack.set_int(settings_pack::in_enc_policy, settings_pack::pe_forced);
@@ -146,12 +150,13 @@ void test_pex()
 	p2 = ses2.abort();
 	p3 = ses3.abort();
 }
+} // anonymous namespace
 #endif // TORRENT_DISABLE_EXTENSIONS
 
 TORRENT_TEST(pex)
 {
 #ifndef TORRENT_DISABLE_EXTENSIONS
-	using namespace libtorrent;
+	using namespace lt;
 
 	// in case the previous run was terminated
 	error_code ec;

@@ -41,7 +41,7 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #include <iostream>
 
-using namespace libtorrent;
+using namespace lt;
 
 #ifndef TORRENT_DISABLE_MUTABLE_TORRENTS
 TORRENT_TEST(mutable_torrents)
@@ -50,7 +50,7 @@ TORRENT_TEST(mutable_torrents)
 
 	fs.add_file("test/temporary.txt", 0x4000);
 
-	libtorrent::create_torrent t(fs, 0x4000);
+	lt::create_torrent t(fs, 0x4000);
 
 	// calculate the hash for all pieces
 	sha1_hash ph;
@@ -69,7 +69,7 @@ TORRENT_TEST(mutable_torrents)
 	entry tor = t.generate();
 	bencode(out, tor);
 
-	torrent_info ti(&tmp[0], int(tmp.size()));
+	torrent_info ti(tmp, from_span);
 
 	std::vector<sha1_hash> similar;
 	similar.push_back(sha1_hash("abababababababababab"));
@@ -84,12 +84,14 @@ TORRENT_TEST(mutable_torrents)
 }
 #endif
 
+namespace {
+
 struct test_torrent_t
 {
 	char const* file;
 };
 
-using namespace libtorrent;
+using namespace lt;
 
 static test_torrent_t test_torrents[] =
 {
@@ -126,6 +128,10 @@ static test_torrent_t test_torrents[] =
 	{ "unordered.torrent" },
 	{ "symlink_zero_size.torrent" },
 	{ "pad_file_no_path.torrent" },
+	{ "large.torrent" },
+	{ "absolute_filename.torrent" },
+	{ "invalid_filename.torrent" },
+	{ "invalid_filename2.torrent" },
 };
 
 struct test_failing_torrent_t
@@ -140,6 +146,7 @@ test_failing_torrent_t test_error_torrents[] =
 	{ "invalid_piece_len.torrent", errors::torrent_missing_piece_length },
 	{ "negative_piece_len.torrent", errors::torrent_missing_piece_length },
 	{ "no_name.torrent", errors::torrent_missing_name },
+	{ "bad_name.torrent", errors::torrent_missing_name },
 	{ "invalid_name.torrent", errors::torrent_missing_name },
 	{ "invalid_info.torrent", errors::torrent_missing_info },
 	{ "string.torrent", errors::torrent_is_no_dict },
@@ -151,9 +158,14 @@ test_failing_torrent_t test_error_torrents[] =
 	{ "unaligned_pieces.torrent", errors::torrent_invalid_hashes },
 	{ "invalid_root_hash.torrent", errors::torrent_invalid_hashes },
 	{ "invalid_root_hash2.torrent", errors::torrent_missing_pieces },
+	{ "invalid_merkle.torrent", errors::no_files_in_torrent},
 	{ "invalid_file_size.torrent", errors::torrent_invalid_length },
 	{ "invalid_symlink.torrent", errors::torrent_invalid_name },
+	{ "many_pieces.torrent", errors::too_many_pieces_in_torrent },
+	{ "no_files.torrent", errors::no_files_in_torrent},
 };
+
+} // anonymous namespace
 
 // TODO: test remap_files
 // TODO: merkle torrents. specifically torrent_info::add_merkle_nodes and torrent with "root hash"
@@ -177,6 +189,29 @@ test_failing_torrent_t test_error_torrents[] =
 // TODO: torrent_info::add_tracker
 // TODO: torrent_info constructor that takes an invalid bencoded buffer
 // TODO: verify_encoding with a string that triggers character replacement
+
+TORRENT_TEST(url_list_and_httpseeds)
+{
+	entry info;
+	info["pieces"] = "aaaaaaaaaaaaaaaaaaaa";
+	info["name.utf-8"] = "test1";
+	info["name"] = "test__";
+	info["piece length"] = 16 * 1024;
+	info["length"] = 3245;
+	entry::list_type l;
+	l.push_back(entry("http://foo.com/bar1"));
+	l.push_back(entry("http://foo.com/bar1"));
+	l.push_back(entry("http://foo.com/bar2"));
+	entry const e(l);
+	entry torrent;
+	torrent["url-list"] = e;
+	torrent["httpseeds"] = e;
+	torrent["info"] = info;
+	std::vector<char> buf;
+	bencode(std::back_inserter(buf), torrent);
+	torrent_info ti(buf, from_span);
+	TEST_EQUAL(ti.web_seeds().size(), 4);
+}
 
 TORRENT_TEST(add_url_seed)
 {
@@ -327,6 +362,10 @@ TORRENT_TEST(sanitize_path_trailing_spaces)
 TORRENT_TEST(sanitize_path)
 {
 	std::string path;
+	sanitize_append_path_element(path, "\0\0\xed\0\x80");
+	TEST_EQUAL(path, "_");
+
+	path.clear();
 	sanitize_append_path_element(path, "/a/");
 	sanitize_append_path_element(path, "b");
 	sanitize_append_path_element(path, "c");
@@ -356,7 +395,7 @@ TORRENT_TEST(sanitize_path)
 	path.clear();
 	sanitize_append_path_element(path, "dev:");
 #ifdef TORRENT_WINDOWS
-	TEST_EQUAL(path, "dev");
+	TEST_EQUAL(path, "dev_");
 #else
 	TEST_EQUAL(path, "dev:");
 #endif
@@ -365,7 +404,7 @@ TORRENT_TEST(sanitize_path)
 	sanitize_append_path_element(path, "c:");
 	sanitize_append_path_element(path, "b");
 #ifdef TORRENT_WINDOWS
-	TEST_EQUAL(path, "c" SEPARATOR "b");
+	TEST_EQUAL(path, "c_" SEPARATOR "b");
 #else
 	TEST_EQUAL(path, "c:" SEPARATOR "b");
 #endif
@@ -375,7 +414,7 @@ TORRENT_TEST(sanitize_path)
 	sanitize_append_path_element(path, ".");
 	sanitize_append_path_element(path, "c");
 #ifdef TORRENT_WINDOWS
-	TEST_EQUAL(path, "c" SEPARATOR "c");
+	TEST_EQUAL(path, "c_" SEPARATOR "c");
 #else
 	TEST_EQUAL(path, "c:" SEPARATOR "c");
 #endif
@@ -469,7 +508,7 @@ TORRENT_TEST(sanitize_path)
 	// 5-byte utf-8 sequence (not allowed)
 	path.clear();
 	sanitize_append_path_element(path, "filename\xf8\x9f\x9f\x9f\x9f" "foobar");
-	TEST_EQUAL(path, "filename_____foobar");
+	TEST_EQUAL(path, "filename_foobar");
 
 	// redundant (overlong) 2-byte sequence
 	// ascii code 0x2e encoded with a leading 0
@@ -488,6 +527,45 @@ TORRENT_TEST(sanitize_path)
 	path.clear();
 	sanitize_append_path_element(path, "filename\xf0\x80\x80\xae");
 	TEST_EQUAL(path, "filename_");
+
+	// a filename where every character is filtered is not replaced by an understcore
+	path.clear();
+	sanitize_append_path_element(path, "//\\");
+	TEST_EQUAL(path, "");
+
+	// make sure suspicious unicode characters are filtered out
+	path.clear();
+	// that's utf-8 for U+200e LEFT-TO-RIGHT MARK
+	sanitize_append_path_element(path, "foo\xe2\x80\x8e" "bar");
+	TEST_EQUAL(path, "foobar");
+
+	// make sure suspicious unicode characters are filtered out
+	path.clear();
+	// that's utf-8 for U+202b RIGHT-TO-LEFT EMBEDDING
+	sanitize_append_path_element(path, "foo\xe2\x80\xab" "bar");
+	TEST_EQUAL(path, "foobar");
+}
+
+TORRENT_TEST(sanitize_path_zeroes)
+{
+	std::string path;
+	sanitize_append_path_element(path, "\0foo");
+	TEST_EQUAL(path, "_");
+
+	path.clear();
+	sanitize_append_path_element(path, "\0\0\0\0");
+	TEST_EQUAL(path, "_");
+}
+
+TORRENT_TEST(sanitize_path_colon)
+{
+	std::string path;
+	sanitize_append_path_element(path, "foo:bar");
+#ifdef TORRENT_WINDOWS
+	TEST_EQUAL(path, "foo_bar");
+#else
+	TEST_EQUAL(path, "foo:bar");
+#endif
 }
 
 TORRENT_TEST(verify_encoding)
@@ -569,12 +647,16 @@ TORRENT_TEST(verify_encoding)
 	TEST_CHECK(!verify_encoding(test));
 	std::printf("%s\n", test.c_str());
 	TEST_CHECK(test == "filename____");
+
+	// missing byte header
+	test = "filename\xed\0\x80";
+	TEST_CHECK(!verify_encoding(test));
+	fprintf(stdout, "%s\n", test.c_str());
+	TEST_CHECK(test == "filename_");
 }
 
 TORRENT_TEST(parse_torrents)
 {
-	error_code ec;
-
 	// test torrent parsing
 
 	entry info;
@@ -588,9 +670,9 @@ TORRENT_TEST(parse_torrents)
 
 	std::vector<char> buf;
 	bencode(std::back_inserter(buf), torrent);
-	torrent_info ti(&buf[0], int(buf.size()), ec);
-	std::cout << ti.name() << std::endl;
-	TEST_CHECK(ti.name() == "test1");
+	torrent_info ti1(buf, from_span);
+	std::cout << ti1.name() << std::endl;
+	TEST_CHECK(ti1.name() == "test1");
 
 #ifdef TORRENT_WINDOWS
 	info["name.utf-8"] = "c:/test1/test2/test3";
@@ -600,10 +682,10 @@ TORRENT_TEST(parse_torrents)
 	torrent["info"] = info;
 	buf.clear();
 	bencode(std::back_inserter(buf), torrent);
-	torrent_info ti2(&buf[0], int(buf.size()), ec);
+	torrent_info ti2(buf, from_span);
 	std::cout << ti2.name() << std::endl;
 #ifdef TORRENT_WINDOWS
-	TEST_EQUAL(ti2.name(), "ctest1test2test3");
+	TEST_EQUAL(ti2.name(), "c_test1test2test3");
 #else
 	TEST_EQUAL(ti2.name(), "test1test2test3");
 #endif
@@ -612,7 +694,7 @@ TORRENT_TEST(parse_torrents)
 	torrent["info"] = info;
 	buf.clear();
 	bencode(std::back_inserter(buf), torrent);
-	torrent_info ti3(&buf[0], int(buf.size()), ec);
+	torrent_info ti3(buf, from_span);
 	std::cout << ti3.name() << std::endl;
 	TEST_EQUAL(ti3.name(), "test2..test3.......test4");
 
@@ -622,6 +704,7 @@ TORRENT_TEST(parse_torrents)
 		std::printf("loading %s\n", test_torrents[i].file);
 		std::string filename = combine_path(combine_path(root_dir, "test_torrents")
 			, test_torrents[i].file);
+		error_code ec;
 		auto ti = std::make_shared<torrent_info>(filename, ec);
 		TEST_CHECK(!ec);
 		if (ec) std::printf(" loading(\"%s\") -> failed %s\n", filename.c_str()
@@ -644,8 +727,8 @@ TORRENT_TEST(parse_torrents)
 		else if (std::string(test_torrents[i].file) == "pad_file.torrent")
 		{
 			TEST_EQUAL(ti->num_files(), 2);
-			TEST_EQUAL(ti->files().file_flags(file_index_t{0}) & file_storage::flag_pad_file, false);
-			TEST_EQUAL(ti->files().file_flags(file_index_t{1}) & file_storage::flag_pad_file, true);
+			TEST_EQUAL(bool(ti->files().file_flags(file_index_t{0}) & file_storage::flag_pad_file), false);
+			TEST_EQUAL(bool(ti->files().file_flags(file_index_t{1}) & file_storage::flag_pad_file), true);
 		}
 		else if (std::string(test_torrents[i].file) == "creation_date.torrent")
 		{
@@ -731,26 +814,40 @@ TORRENT_TEST(parse_torrents)
 			TEST_EQUAL(ti->num_files(), 2);
 			TEST_EQUAL(ti->files().file_path(file_index_t{1}), combine_path(".pad", "0"));
 		}
+		else if (std::string(test_torrents[i].file) == "absolute_filename.torrent")
+		{
+			TEST_EQUAL(ti->num_files(), 2);
+			TEST_EQUAL(ti->files().file_path(file_index_t{0}), combine_path("temp", "abcde"));
+			TEST_EQUAL(ti->files().file_path(file_index_t{1}), combine_path("temp", "foobar"));
+		}
+		else if (std::string(test_torrents[i].file) == "invalid_filename.torrent")
+		{
+			TEST_EQUAL(ti->num_files(), 2);
+		}
+		else if (std::string(test_torrents[i].file) == "invalid_filename2.torrent")
+		{
+			TEST_EQUAL(ti->num_files(), 3);
+		}
 
 		file_storage const& fs = ti->files();
-		for (file_index_t i{0}; i != file_index_t(fs.num_files()); ++i)
+		for (file_index_t idx{0}; idx != file_index_t(fs.num_files()); ++idx)
 		{
-			piece_index_t const first = ti->map_file(i, 0, 0).piece;
-			piece_index_t const last = ti->map_file(i, std::max(fs.file_size(i)-1, std::int64_t(0)), 0).piece;
-			int const flags = fs.file_flags(i);
-			sha1_hash const ih = fs.hash(i);
+			piece_index_t const first = ti->map_file(idx, 0, 0).piece;
+			piece_index_t const last = ti->map_file(idx, std::max(fs.file_size(idx)-1, std::int64_t(0)), 0).piece;
+			file_flags_t const flags = fs.file_flags(idx);
+			sha1_hash const ih = fs.hash(idx);
 			std::printf("  %11" PRId64 " %c%c%c%c [ %4d, %4d ] %7u %s %s %s%s\n"
-				, fs.file_size(i)
+				, fs.file_size(idx)
 				, (flags & file_storage::flag_pad_file)?'p':'-'
 				, (flags & file_storage::flag_executable)?'x':'-'
 				, (flags & file_storage::flag_hidden)?'h':'-'
 				, (flags & file_storage::flag_symlink)?'l':'-'
 				, static_cast<int>(first), static_cast<int>(last)
-				, std::uint32_t(fs.mtime(i))
+				, std::uint32_t(fs.mtime(idx))
 				, ih != sha1_hash(nullptr) ? aux::to_hex(ih).c_str() : ""
-				, fs.file_path(i).c_str()
+				, fs.file_path(idx).c_str()
 				, flags & file_storage::flag_symlink ? "-> ": ""
-				, flags & file_storage::flag_symlink ? fs.symlink(i).c_str() : "");
+				, flags & file_storage::flag_symlink ? fs.symlink(idx).c_str() : "");
 		}
 	}
 
@@ -766,6 +863,8 @@ TORRENT_TEST(parse_torrents)
 		TEST_EQUAL(ti->is_valid(), false);
 	}
 }
+
+namespace {
 
 void test_resolve_duplicates(int test_case)
 {
@@ -799,7 +898,7 @@ void test_resolve_duplicates(int test_case)
 			break;
 	}
 
-	libtorrent::create_torrent t(fs, 0x4000);
+	lt::create_torrent t(fs, 0x4000);
 
 	// calculate the hash for all pieces
 	sha1_hash ph;
@@ -812,9 +911,9 @@ void test_resolve_duplicates(int test_case)
 	entry tor = t.generate();
 	bencode(out, tor);
 
-	torrent_info ti(&tmp[0], int(tmp.size()));
+	torrent_info ti(tmp, from_span);
 
-	std::vector<aux::vector<char const*, file_index_t>> const filenames
+	aux::vector<aux::vector<char const*, file_index_t>> const filenames
 	{
 		{ // case 0
 			"test/temporary.txt",
@@ -855,6 +954,8 @@ void test_resolve_duplicates(int test_case)
 	}
 }
 
+} // anonymous namespace
+
 TORRENT_TEST(resolve_duplicates)
 {
 	for (int i = 0; i < 4; ++i)
@@ -864,7 +965,7 @@ TORRENT_TEST(resolve_duplicates)
 TORRENT_TEST(empty_file)
 {
 	error_code ec;
-	auto ti = std::make_shared<torrent_info>("", 0, ec);
+	auto ti = std::make_shared<torrent_info>("", ec, from_span);
 	TEST_CHECK(ec);
 }
 
@@ -872,7 +973,7 @@ TORRENT_TEST(empty_file2)
 {
 	try
 	{
-		auto ti = std::make_shared<torrent_info>("", 0);
+		auto ti = std::make_shared<torrent_info>("", from_span);
 		TEST_ERROR("expected exception thrown");
 	}
 	catch (system_error const& e)
@@ -883,7 +984,7 @@ TORRENT_TEST(empty_file2)
 
 TORRENT_TEST(copy)
 {
-	using namespace libtorrent;
+	using namespace lt;
 
 	std::shared_ptr<torrent_info> a = std::make_shared<torrent_info>(
 		combine_path(parent_path(current_working_directory())
@@ -920,7 +1021,7 @@ TORRENT_TEST(copy)
 	// clear out the  buffer for a, just to make sure b doesn't have any
 	// references into it by mistake
 	int s = a->metadata_size();
-	std::memset(a->metadata().get(), 0, s);
+	std::memset(a->metadata().get(), 0, std::size_t(s));
 
 	a.reset();
 
@@ -936,4 +1037,20 @@ TORRENT_TEST(copy)
 
 		TEST_EQUAL(fs2.hash(i), file_hashes[i]);
 	}
+}
+
+struct A
+{
+	int val;
+};
+
+TORRENT_TEST(copy_ptr)
+{
+	copy_ptr<A> a(new A{4});
+	copy_ptr<A> b(a);
+
+	TEST_EQUAL(a->val, b->val);
+	TEST_CHECK(&*a != &*b);
+	a->val = 5;
+	TEST_EQUAL(b->val, 4);
 }

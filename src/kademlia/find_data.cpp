@@ -45,7 +45,7 @@ namespace libtorrent { namespace dht {
 
 void find_data_observer::reply(msg const& m)
 {
-	bdecode_node r = m.message.dict_find_dict("r");
+	bdecode_node const r = m.message.dict_find_dict("r");
 	if (!r)
 	{
 #ifndef TORRENT_DISABLE_LOGGING
@@ -147,11 +147,11 @@ void find_data::done()
 
 	std::vector<std::pair<node_entry, std::string>> results;
 	int num_results = m_node.m_table.bucket_size();
-	for (std::vector<observer_ptr>::iterator i = m_results.begin()
+	for (auto i = m_results.begin()
 		, end(m_results.end()); i != end && num_results > 0; ++i)
 	{
 		observer_ptr const& o = *i;
-		if ((o->flags & observer::flag_alive) == 0)
+		if (!(o->flags & observer::flag_alive))
 		{
 #ifndef TORRENT_DISABLE_LOGGING
 			if (logger != nullptr && logger->should_log(dht_logger::traversal))
@@ -174,7 +174,7 @@ void find_data::done()
 #endif
 			continue;
 		}
-		results.push_back(std::make_pair(node_entry(o->id(), o->target_ep()), j->second));
+		results.emplace_back(node_entry(o->id(), o->target_ep()), j->second);
 #ifndef TORRENT_DISABLE_LOGGING
 		if (logger != nullptr && logger->should_log(dht_logger::traversal))
 		{

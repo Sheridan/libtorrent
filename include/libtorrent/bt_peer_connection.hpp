@@ -53,10 +53,9 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/piece_block_progress.hpp"
 #include "libtorrent/config.hpp"
 #include "libtorrent/pe_crypto.hpp"
+#include "libtorrent/io.hpp"
 
 namespace libtorrent {
-
-	class torrent;
 
 #ifndef TORRENT_DISABLE_EXTENSIONS
 	struct TORRENT_EXTRA_EXPORT ut_pex_peer_store
@@ -91,10 +90,9 @@ namespace libtorrent {
 		// this is the constructor where the we are the active part.
 		// The peer_connection should handshake and verify that the
 		// other end has the correct id
-		bt_peer_connection(peer_connection_args const& pack
-			, peer_id const& pid);
+		explicit bt_peer_connection(peer_connection_args const& pack);
 
-		virtual void start() override;
+		void start() override;
 
 		enum
 		{
@@ -108,7 +106,7 @@ namespace libtorrent {
 			share_mode_msg = 8
 		};
 
-		~bt_peer_connection();
+		~bt_peer_connection() override;
 
 #if !defined(TORRENT_DISABLE_ENCRYPTION) && !defined(TORRENT_DISABLE_EXTENSIONS)
 		bool supports_encryption() const
@@ -120,12 +118,12 @@ namespace libtorrent {
 		void switch_recv_crypto(std::shared_ptr<crypto_plugin> crypto);
 #endif
 
-		virtual connection_type type() const override
+		connection_type type() const override
 		{ return connection_type::bittorrent; }
 
 		enum message_type
 		{
-	// standard messages
+			// standard messages
 			msg_choke = 0,
 			msg_unchoke,
 			msg_interested,
@@ -175,13 +173,12 @@ namespace libtorrent {
 
 #if !defined(TORRENT_DISABLE_ENCRYPTION) && !defined(TORRENT_DISABLE_EXTENSIONS)
 		// next_barrier, buffers-to-prepend
-		virtual
 		std::tuple<int, span<span<char const>>>
 		hit_send_barrier(span<span<char>> iovec) override;
 #endif
 
-		virtual void get_specific_peer_info(peer_info& p) const override;
-		virtual bool in_handshake() const override;
+		void get_specific_peer_info(peer_info& p) const override;
+		bool in_handshake() const override;
 		bool packet_finished() const { return m_recv_buffer.packet_finished(); }
 
 #ifndef TORRENT_DISABLE_EXTENSIONS
@@ -202,7 +199,6 @@ namespace libtorrent {
 		// be called. i.e. most handlers need
 		// to check how much of the packet they
 		// have received before any processing
-		void on_keepalive();
 		void on_choke(int received);
 		void on_unchoke(int received);
 		void on_interested(int received);
@@ -244,15 +240,12 @@ namespace libtorrent {
 		void write_piece(peer_request const& r, disk_buffer_holder buffer) override;
 		void write_keepalive() override;
 		void write_handshake();
+		void write_upload_only(bool enabled) override;
 #ifndef TORRENT_DISABLE_EXTENSIONS
 		void write_extensions();
-		void write_upload_only();
 		void write_share_mode();
 		void write_holepunch_msg(int type, tcp::endpoint const& ep, int error);
 #endif
-		void write_metadata(std::pair<int, int> req);
-		void write_metadata_request(std::pair<int, int> req);
-
 		// DHT extension
 		void write_dht_port(int listen_port);
 
@@ -272,14 +265,30 @@ namespace libtorrent {
 #endif
 
 	private:
+
+		template <typename... Args>
+		void send_message(message_type const type
+			, counters::stats_counter_t const counter
+			, std::uint32_t flags
+			, Args... args)
+		{
+			TORRENT_ASSERT(m_sent_handshake);
+			TORRENT_ASSERT(m_sent_bitfield);
+
+			char msg[5 + sizeof...(Args) * 4]
+				= { 0,0,0,1 + sizeof...(Args) * 4, static_cast<char>(type) };
+			char* ptr = msg + 5;
+			TORRENT_UNUSED(ptr);
+
+			int tmp[] = {0, (detail::write_int32(args, ptr), 0)...};
+			TORRENT_UNUSED(tmp);
+
+			send_buffer(msg, flags);
+
+			stats_counters().inc_stats_counter(counter);
+		}
+
 		void write_dht_port();
-		void send_simple_message(message_type type,
-			counters::stats_counter_t counter);
-		void send_piece_message(message_type type,
-			counters::stats_counter_t counter, piece_index_t index);
-		void send_request_message(message_type type,
-			counters::stats_counter_t counter, peer_request const& r,
-			int flag);
 
 		bool dispatch_message(int received);
 		// returns the block currently being
@@ -303,14 +312,8 @@ namespace libtorrent {
 		void write_pe3_sync();
 		void write_pe4_sync(int crypto_select);
 
-		void write_pe_vc_cryptofield(char* write_buf, int len
-			, int crypto_field, int pad_size);
-
-		// Returns offset at which bytestream (src, src + src_size)
-		// matches bytestream(target, target + target_size).
-		// If no sync found, return -1
-		int get_syncoffset(char const* src, int src_size
-			, char const* target, int target_size) const;
+		void write_pe_vc_cryptofield(span<char> write_buf
+			, int crypto_field, std::size_t pad_size);
 
 		// helper to cut down on boilerplate
 		void rc4_decrypt(span<char> buf);
@@ -322,21 +325,20 @@ namespace libtorrent {
 		// is true, otherwise it passes the call to the
 		// peer_connection functions of the same names
 		template <typename Holder>
-		void append_const_send_buffer(Holder buffer, int size)
+		void append_const_send_buffer(Holder holder, int size)
 		{
 #if !defined(TORRENT_DISABLE_ENCRYPTION) && !defined(TORRENT_DISABLE_EXTENSIONS)
 			if (!m_enc_handler.is_send_plaintext())
 			{
 				// if we're encrypting this buffer, we need to make a copy
 				// since we'll mutate it
-				std::unique_ptr<char[]> buf(new char[size]);
-				std::copy(buffer.get(), buffer.get() + size, buf.get());
+				buffer buf(std::size_t(size), {holder.data(), std::size_t(size)});
 				append_send_buffer(std::move(buf), size);
 			}
 			else
 #endif
 			{
-				append_send_buffer(std::move(buffer), size);
+				append_send_buffer(std::move(holder), size);
 			}
 		}
 
@@ -398,7 +400,20 @@ namespace libtorrent {
 		// true if rc4, false if plaintext
 		bool m_rc4_encrypted:1;
 
+// this is a legitimate use of a shadow field
+#ifdef __clang__
+#pragma clang diagnostic push
+// macOS clang doesn't have -Wshadow-field
+#pragma clang diagnostic ignored "-Wunknown-pragmas"
+// Xcode 9 needs this
+#pragma clang diagnostic ignored "-Wunknown-warning-option"
+#pragma clang diagnostic ignored "-Wshadow-field"
+#endif
 		crypto_receive_buffer m_recv_buffer;
+#ifdef __clang__
+#pragma clang diagnostic pop
+#endif
+
 #endif
 
 		std::string m_client_version;
@@ -477,11 +492,6 @@ namespace libtorrent {
 
 		std::array<char, 8> m_reserved_bits;
 #endif
-
-#if TORRENT_USE_ASSERTS
-		bool m_in_constructor = true;
-#endif
-
 	};
 }
 

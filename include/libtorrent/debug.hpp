@@ -49,6 +49,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <map>
 #include <cstring>
 #include <deque>
+#include <mutex>
 
 #ifdef __MACH__
 #include <mach/task_info.h>
@@ -207,6 +208,21 @@ namespace libtorrent {
 		void thread_started() {}
 		bool is_not_thread() const {return true; }
 	};
+#endif
+
+#if TORRENT_USE_ASSERTS
+	struct increment_guard
+	{
+		int& m_cnt;
+		explicit increment_guard(int& c) : m_cnt(c) { TORRENT_ASSERT(m_cnt >= 0); ++m_cnt; }
+		~increment_guard() { --m_cnt; TORRENT_ASSERT(m_cnt >= 0); }
+	private:
+		increment_guard(increment_guard const&);
+		increment_guard operator=(increment_guard const&);
+	};
+#define TORRENT_INCREMENT(x) increment_guard inc_(x)
+#else
+#define TORRENT_INCREMENT(x) do {} while (false)
 #endif
 }
 

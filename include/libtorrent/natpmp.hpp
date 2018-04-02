@@ -55,10 +55,10 @@ struct TORRENT_EXTRA_EXPORT natpmp
 
 	// maps the ports, if a port is set to 0
 	// it will not be mapped
-	int add_mapping(aux::portmap_protocol p, int external_port, int local_port);
-	void delete_mapping(int mapping_index);
-	bool get_mapping(int mapping_index, int& local_port, int& external_port
-		, aux::portmap_protocol& protocol) const;
+	port_mapping_t add_mapping(portmap_protocol p, int external_port, tcp::endpoint local_ep);
+	void delete_mapping(port_mapping_t mapping_index);
+	bool get_mapping(port_mapping_t mapping_index, int& local_port, int& external_port
+		, portmap_protocol& protocol) const;
 
 	void close();
 
@@ -66,45 +66,24 @@ private:
 
 	std::shared_ptr<natpmp> self() { return shared_from_this(); }
 
-	void update_mapping(int i);
-	void send_map_request(int i);
+	void update_mapping(port_mapping_t i);
+	void send_map_request(port_mapping_t i);
 	void send_get_ip_address_request();
-	void resend_request(int i, error_code const& e);
+	void resend_request(port_mapping_t i, error_code const& e);
 	void on_reply(error_code const& e
 		, std::size_t bytes_transferred);
-	void try_next_mapping(int i);
+	void try_next_mapping(port_mapping_t i);
 	void update_expiration_timer();
-	void mapping_expired(error_code const& e, int i);
+	void mapping_expired(error_code const& e, port_mapping_t i);
 	void close_impl();
-
-#ifndef TORRENT_DISABLE_LOGGING
-	bool should_log() const;
-	void log(char const* fmt, ...) const TORRENT_FORMAT(2, 3);
-#endif
 
 	void disable(error_code const& ec);
 
-	struct mapping_t
+	struct mapping_t : aux::base_mapping
 	{
-		enum class action : std::uint8_t { none, add, del };
-
-		// indicates that the mapping has changed
-		// and needs an update
-		action act = action::none;
-
-		// the time the port mapping will expire
-		time_point expires;
-
 		// the local port for this mapping. If this is set
 		// to 0, the mapping is not in use
 		int local_port = 0;
-
-		// the external (on the NAT router) port
-		// for the mapping. This is the port we
-		// should announce to others
-		int external_port = 0;
-
-		aux::portmap_protocol protocol = aux::portmap_protocol::none;
 
 		// set to true when the first map request is sent
 		bool map_sent = false;
@@ -113,9 +92,15 @@ private:
 		bool outstanding_request = false;
 	};
 
+#ifndef TORRENT_DISABLE_LOGGING
+	bool should_log() const;
+	void log(char const* fmt, ...) const TORRENT_FORMAT(2, 3);
+	void mapping_log(char const* op, mapping_t const& m) const;
+#endif
+
 	aux::portmap_callback& m_callback;
 
-	aux::vector<mapping_t> m_mappings;
+	aux::vector<mapping_t, port_mapping_t> m_mappings;
 
 	// the endpoint to the nat router
 	udp::endpoint m_nat_endpoint;
@@ -123,7 +108,7 @@ private:
 	// this is the mapping that is currently
 	// being updated. It is -1 in case no
 	// mapping is being updated at the moment
-	int m_currently_mapping = -1;
+	port_mapping_t m_currently_mapping{-1};
 
 	// current retry count
 	int m_retry_count = 0;
@@ -149,7 +134,7 @@ private:
 	deadline_timer m_refresh_timer;
 
 	// the mapping index that will expire next
-	int m_next_refresh = -1;
+	port_mapping_t m_next_refresh{-1};
 
 	bool m_disabled = false;
 

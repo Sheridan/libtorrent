@@ -30,13 +30,16 @@ POSSIBILITY OF SUCH DAMAGE.
 
 */
 
+#include <iostream>
 #include "test.hpp"
 #include "setup_transfer.hpp"
 
 #include "libtorrent/file_storage.hpp"
 #include "libtorrent/aux_/path.hpp"
 
-using namespace libtorrent;
+using namespace lt;
+
+namespace {
 
 void setup_test_storage(file_storage& st)
 {
@@ -73,6 +76,38 @@ void setup_test_storage(file_storage& st)
 	TEST_EQUAL(st.piece_length(), 0x4000);
 	std::printf("%d\n", st.num_pieces());
 	TEST_EQUAL(st.num_pieces(), (100000 + 0x3fff) / 0x4000);
+}
+
+} // anonymous namespace
+
+TORRENT_TEST(coalesce_path)
+{
+	file_storage st;
+	st.add_file(combine_path("test", "a"), 10000);
+	TEST_EQUAL(st.paths().size(), 1);
+	TEST_EQUAL(st.paths()[0], "");
+	st.add_file(combine_path("test", "b"), 20000);
+	TEST_EQUAL(st.paths().size(), 1);
+	TEST_EQUAL(st.paths()[0], "");
+	st.add_file(combine_path("test", combine_path("c", "a")), 30000);
+	TEST_EQUAL(st.paths().size(), 2);
+	TEST_EQUAL(st.paths()[0], "");
+	TEST_EQUAL(st.paths()[1], "c");
+
+	// make sure that two files with the same path shares the path entry
+	st.add_file(combine_path("test", combine_path("c", "b")), 40000);
+	TEST_EQUAL(st.paths().size(), 2);
+	TEST_EQUAL(st.paths()[0], "");
+	TEST_EQUAL(st.paths()[1], "c");
+
+	// cause pad files to be created, to make sure the pad files also share the
+	// same path entries
+	st.optimize(0, 1024, true);
+
+	TEST_EQUAL(st.paths().size(), 3);
+	TEST_EQUAL(st.paths()[0], "");
+	TEST_EQUAL(st.paths()[1], "c");
+	TEST_EQUAL(st.paths()[2], ".pad");
 }
 
 TORRENT_TEST(rename_file)
@@ -146,12 +181,13 @@ TORRENT_TEST(pointer_offset)
 	file_storage st;
 	char const filename[] = "test1fooba";
 
-	st.add_file_borrow(filename, 5, combine_path("test-torrent-1", "test1")
+	st.add_file_borrow({filename, 5}, combine_path("test-torrent-1", "test1")
 		, 10);
 
 	// test filename_ptr and filename_len
 	TEST_EQUAL(st.file_name_ptr(file_index_t{0}), filename);
 	TEST_EQUAL(st.file_name_len(file_index_t{0}), 5);
+	TEST_EQUAL(st.file_name(file_index_t{0}), string_view(filename, 5));
 
 	TEST_EQUAL(st.file_path(file_index_t{0}, ""), combine_path("test-torrent-1", "test1"));
 	TEST_EQUAL(st.file_path(file_index_t{0}, "tmp"), combine_path("tmp"
@@ -169,6 +205,32 @@ TORRENT_TEST(pointer_offset)
 	// test filename_ptr and filename_len
 	TEST_EQUAL(st.file_name_ptr(file_index_t{0}), filename + 5);
 	TEST_EQUAL(st.file_name_len(file_index_t{0}), 5);
+}
+
+TORRENT_TEST(invalid_path1)
+{
+	file_storage st;
+#ifdef TORRENT_WINDOWS
+	st.add_file_borrow({}, R"(+\\\()", 10);
+#else
+	st.add_file_borrow({}, "+///(", 10);
+#endif
+
+	TEST_EQUAL(st.file_name(file_index_t{0}), "(");
+	TEST_EQUAL(st.file_path(file_index_t{0}, ""), combine_path("+", "("));
+}
+
+TORRENT_TEST(invalid_path2)
+{
+	file_storage st;
+#ifdef TORRENT_WINDOWS
+	st.add_file_borrow({}, R"(+\\\+\\()", 10);
+#else
+	st.add_file_borrow({}, "+///+//(", 10);
+#endif
+
+	TEST_EQUAL(st.file_name(file_index_t{0}), "(");
+	TEST_EQUAL(st.file_path(file_index_t{0}, ""), combine_path("+", combine_path("+", "(")));
 }
 
 TORRENT_TEST(map_file)
@@ -368,12 +430,200 @@ TORRENT_TEST(piece_range)
 	TEST_CHECK(aux::file_piece_range_exclusive(fs, file_index_t(1)) == std::make_tuple(piece_index_t(3), piece_index_t(7)));
 }
 
-// TODO: test file_storage::optimize
-// TODO: test map_block
-// TODO: test piece_size(int piece)
-// TODO: test file_index_at_offset
+namespace {
+
+void test_optimize(std::vector<int> file_sizes
+	, int const alignment
+	, int const pad_file_limit
+	, bool const tail_padding
+	, std::vector<int> const expected_order)
+{
+	file_storage fs;
+	int i = 0;
+	for (int s : file_sizes)
+	{
+		fs.add_file(combine_path("test", std::to_string(i++)), s);
+	}
+	fs.optimize(pad_file_limit, alignment, tail_padding);
+
+	TEST_EQUAL(fs.num_files(), int(expected_order.size()));
+	if (fs.num_files() != int(expected_order.size())) return;
+
+	std::cout << "{ ";
+	for (file_index_t idx{0}; idx != fs.end_file(); ++idx)
+	{
+		if (fs.file_flags(idx) & file_storage::flag_pad_file) std::cout << "*";
+		std::cout << fs.file_size(idx) << " ";
+	}
+	std::cout << "}\n";
+
+	file_index_t idx{0};
+	int num_pad_files = 0;
+	for (int expect : expected_order)
+	{
+		if (expect == -1)
+		{
+			TEST_CHECK(fs.file_flags(idx) & file_storage::flag_pad_file);
+			TEST_EQUAL(fs.file_name(idx), std::to_string(num_pad_files++));
+		}
+		else
+		{
+			TEST_EQUAL(fs.file_name(idx), std::to_string(expect));
+			TEST_EQUAL(fs.file_size(idx), file_sizes[std::size_t(expect)]);
+		}
+		++idx;
+	}
+}
+
+} // anonymous namespace
+
+TORRENT_TEST(optimize_order_large_first)
+{
+	test_optimize({1000, 3000, 10000}, 1024, 1024, false, {2, -1, 1, 0});
+}
+
+TORRENT_TEST(optimize_tail_padding2)
+{
+	// when tail padding is enabled, a pad file is added at the end
+	test_optimize({2000}, 1024, 1024, true, {0, -1});
+}
+
+TORRENT_TEST(optimize_tail_padding3)
+{
+	// when tail padding is enabled, a pad file is added at the end, even if the
+	// file is smaller than the alignment, as long as pad_file_limit is 0 *(which
+	// means files are aligned unconditionally)
+	test_optimize({1000}, 1024, 0, true, {0, -1});
+}
+
+TORRENT_TEST(optimize_tail_padding_small_files)
+{
+	// files smaller than the pad file limit are not tail-padded
+	test_optimize({1000, 1, 2}, 1024, 50, true, {0, -1, 2, 1});
+}
+
+TORRENT_TEST(optimize_tail_padding_small_files2)
+{
+	// files larger than the pad file limit are not tail-padded
+	test_optimize({1000, 1, 2}, 1024, 0, true, {0, -1, 2, -1, 1, -1});
+}
+
+TORRENT_TEST(optimize_prioritize_aligned_size)
+{
+	// file 0 of size 1024 will be chosen over the larger file, since it won't
+	// affect the alignment of the next file
+	test_optimize({1024, 3000, 10}, 1024, 1024, false, {0, 1, 2});
+}
+
+TORRENT_TEST(optimize_fill_with_small_files)
+{
+	// fill in space that otherwise would just be a pad file with other small
+	// files.
+	test_optimize({2000, 5000, 48, 120}, 1024, 1024, false, {1, 3, 0, 2});
+}
+
+TORRENT_TEST(optimize_pad_all)
+{
+	// when pad_size_limit is 0, every file is padded to alignment, regardless of
+	// how big it is
+	// the empty file is first, since it doesn't affect alignment of the next
+	// file
+	test_optimize({48, 1, 0, 5000}, 1024, 0, false, {2, 3, -1, 0, -1, 1});
+}
+
+TORRENT_TEST(optimize_pad_all_with_tail)
+{
+	// when pad_size_limit is 0, every file is padded to alignment, regardless of
+	// how big it is, also with tail-padding enabled
+	test_optimize({48, 1, 0, 5000}, 1024, 0, true, {2, 3, -1, 0, -1, 1, -1});
+}
+
+TORRENT_TEST(piece_size_last_piece)
+{
+	file_storage fs;
+	fs.set_piece_length(1024);
+	fs.add_file("0", 100);
+	fs.set_num_pieces(int((fs.total_size() + 1023) / 1024));
+	TEST_EQUAL(fs.piece_size(piece_index_t{0}), 100);
+}
+
+TORRENT_TEST(piece_size_middle_piece)
+{
+	file_storage fs;
+	fs.set_piece_length(1024);
+	fs.add_file("0", 2000);
+	fs.set_num_pieces(int((fs.total_size() + 1023) / 1024));
+	TEST_EQUAL(fs.piece_size(piece_index_t{0}), 1024);
+	TEST_EQUAL(fs.piece_size(piece_index_t{1}), 2000 - 1024);
+}
+
+TORRENT_TEST(file_index_at_offset)
+{
+	file_storage fs;
+	fs.set_piece_length(1024);
+	fs.add_file("test/0", 1);
+	fs.add_file("test/1", 2);
+	fs.add_file("test/2", 3);
+	fs.add_file("test/3", 4);
+	fs.add_file("test/4", 5);
+	std::int64_t offset = 0;
+	for (int f : {0, 1, 1, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 4})
+	{
+		TEST_EQUAL(fs.file_index_at_offset(offset++), file_index_t{f});
+	}
+}
+
+TORRENT_TEST(map_block_start)
+{
+	file_storage fs;
+	fs.set_piece_length(1024);
+	fs.add_file("test/0", 1);
+	fs.add_file("test/1", 2);
+	fs.add_file("test/2", 3);
+	fs.add_file("test/3", 4);
+	fs.add_file("test/4", 5);
+	fs.set_num_pieces(int((fs.total_size() + 1023) / 1024));
+	int len = 0;
+	for (int f : {0, 1, 2, 2, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 5})
+	{
+		std::vector<file_slice> const map = fs.map_block(piece_index_t{0}, 0, len);
+		TEST_EQUAL(int(map.size()), f);
+		file_index_t file_index{0};
+		std::int64_t actual_len = 0;
+		for (auto file : map)
+		{
+			TEST_EQUAL(file.file_index, file_index++);
+			TEST_EQUAL(file.offset, 0);
+			actual_len += file.size;
+		}
+		TEST_EQUAL(actual_len, len);
+		++len;
+	}
+}
+
+TORRENT_TEST(map_block_mid)
+{
+	file_storage fs;
+	fs.set_piece_length(1024);
+	fs.add_file("test/0", 1);
+	fs.add_file("test/1", 2);
+	fs.add_file("test/2", 3);
+	fs.add_file("test/3", 4);
+	fs.add_file("test/4", 5);
+	fs.set_num_pieces(int((fs.total_size() + 1023) / 1024));
+	int offset = 0;
+	for (int f : {0, 1, 1, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 4})
+	{
+		std::vector<file_slice> const map = fs.map_block(piece_index_t{0}, offset, 1);
+		TEST_EQUAL(int(map.size()), 1);
+		auto const& file = map[0];
+		TEST_EQUAL(file.file_index, file_index_t{f});
+		TEST_CHECK(file.offset <= offset);
+		TEST_EQUAL(file.size, 1);
+		++offset;
+	}
+}
+
 // TODO: test file attributes
 // TODO: test symlinks
-// TODO: test pad_files
 // TODO: test reorder_file (make sure internal_file_entry::swap() is used)
-

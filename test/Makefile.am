@@ -7,6 +7,7 @@ test_programs = \
   test_file                  \
   test_privacy               \
   test_priority              \
+  test_remove_torrent        \
   test_auto_unchoke          \
   test_checking              \
   test_fast_extension        \
@@ -46,7 +47,9 @@ test_programs = \
   test_linked_list           \
   test_direct_dht            \
   test_ffs                   \
-  test_session_params
+  test_session_params        \
+  test_span                  \
+  test_alloca
 
 if ENABLE_TESTS
 check_PROGRAMS = $(test_programs)
@@ -68,6 +71,7 @@ EXTRA_DIST = Jamfile \
   test_torrents/httpseed.torrent \
   test_torrents/invalid_file_size.torrent \
   test_torrents/invalid_info.torrent \
+  test_torrents/invalid_merkle.torrent \
   test_torrents/invalid_name.torrent \
   test_torrents/invalid_name2.torrent \
   test_torrents/invalid_name3.torrent \
@@ -107,6 +111,8 @@ EXTRA_DIST = Jamfile \
   test_torrents/url_seed_multi_space.torrent \
   test_torrents/url_seed_multi_space_nolist.torrent \
   test_torrents/whitespace_url.torrent \
+  test_torrents/invalid_filename.torrent \
+  test_torrents/invalid_filename2.torrent \
   mutable_test_torrents/test1.torrent \
   mutable_test_torrents/test1_pad_files.torrent \
   mutable_test_torrents/test1_single.torrent\
@@ -192,13 +198,15 @@ test_primitives_SOURCES = \
   test_settings_pack.cpp \
   test_fence.cpp \
   test_dos_blocker.cpp \
-  test_upnp.cpp
+  test_upnp.cpp \
+  test_flags.cpp
 
 test_recheck_SOURCES = test_recheck.cpp
 test_stat_cache_SOURCES = test_stat_cache.cpp
 test_file_SOURCES = test_file.cpp
 test_privacy_SOURCES = test_privacy.cpp
 test_priority_SOURCES = test_priority.cpp
+test_remove_torrent_SOURCES = test_remove_torrent.cpp
 test_auto_unchoke_SOURCES = test_auto_unchoke.cpp
 test_checking_SOURCES = test_checking.cpp
 test_enum_net_SOURCES = test_enum_net.cpp
@@ -239,6 +247,8 @@ test_linked_list_SOURCES = test_linked_list.cpp
 test_direct_dht_SOURCES = test_direct_dht.cpp
 test_ffs_SOURCES = test_ffs.cpp
 test_session_params_SOURCES = test_session_params.cpp
+test_span_SOURCES = test_span.cpp
+test_alloca_SOURCES = test_alloca.cpp
 
 LDADD = libtest.la $(top_builddir)/src/libtorrent-rasterbar.la
 

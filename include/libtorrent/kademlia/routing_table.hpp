@@ -42,7 +42,6 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #include <libtorrent/kademlia/node_id.hpp>
 #include <libtorrent/kademlia/node_entry.hpp>
-#include <libtorrent/session_settings.hpp>
 #include <libtorrent/assert.hpp>
 #include <libtorrent/time.hpp>
 #include <libtorrent/aux_/vector.hpp>
@@ -57,9 +56,10 @@ namespace libtorrent {
 
 namespace libtorrent { namespace dht {
 
+struct dht_settings;
 struct dht_logger;
 
-typedef aux::vector<node_entry> bucket_t;
+using bucket_t = aux::vector<node_entry>;
 
 struct routing_table_node
 {
@@ -130,16 +130,6 @@ struct ip_set
 // 	bucket has failed, then it is put in the replacement
 // 	cache (just like in the paper).
 
-namespace impl
-{
-	template <typename F>
-	inline void forwarder(void* userdata, node_entry const& node)
-	{
-		F* f = reinterpret_cast<F*>(userdata);
-		(*f)(node);
-	}
-}
-
 TORRENT_EXTRA_EXPORT bool compare_ip_cidr(address const& lhs, address const& rhs);
 
 class TORRENT_EXTRA_EXPORT routing_table
@@ -171,7 +161,7 @@ public:
 	void add_router_node(udp::endpoint const& router);
 
 	// iterates over the router nodes added
-	typedef std::set<udp::endpoint>::const_iterator router_iterator;
+	using router_iterator = std::set<udp::endpoint>::const_iterator;
 	router_iterator begin() const { return m_router_nodes.begin(); }
 	router_iterator end() const { return m_router_nodes.end(); }
 

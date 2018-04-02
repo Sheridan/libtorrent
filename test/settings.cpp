@@ -34,11 +34,11 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/alert.hpp"
 #include "settings.hpp"
 
-using namespace libtorrent;
+using namespace lt;
 
-libtorrent::settings_pack settings()
+lt::settings_pack settings()
 {
-	const int mask = alert::all_categories
+	auto const mask = alert::all_categories
 		& ~(alert::progress_notification
 			| alert::performance_warning
 			| alert::stats_notification
@@ -55,6 +55,9 @@ libtorrent::settings_pack settings()
 	pack.set_int(settings_pack::in_enc_policy, settings_pack::pe_disabled);
 	pack.set_int(settings_pack::out_enc_policy, settings_pack::pe_disabled);
 	pack.set_int(settings_pack::allowed_enc_level, settings_pack::pe_both);
+#ifndef TORRENT_NO_DEPRECATE
+	pack.set_bool(settings_pack::rate_limit_utp, true);
+#endif
 
 	pack.set_int(settings_pack::alert_mask, mask);
 

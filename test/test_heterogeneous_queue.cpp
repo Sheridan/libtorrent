@@ -33,10 +33,13 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "test.hpp"
 #include "libtorrent/heterogeneous_queue.hpp"
 
+namespace {
+
 struct A
 {
 	int a;
 	explicit A(int a_) : a(a_) {}
+	A(A&&) noexcept = default;
 	virtual int type() = 0;
 	virtual ~A() = default;
 };
@@ -45,6 +48,7 @@ struct B : A
 {
 	int b;
 	explicit B(int a_, int b_) : A(a_), b(b_) {}
+	B(B&&) noexcept = default;
 	int type() override { return 1; }
 };
 
@@ -55,6 +59,7 @@ struct C : A
 	{
 		memset(c, c_, sizeof(c));
 	}
+	C(C&&) noexcept = default;
 	int type() override { return 2; }
 };
 
@@ -62,7 +67,8 @@ struct D
 {
 	static int instances;
 	D() { ++instances; }
-	D(D const& d) { ++instances; }
+	D(D const&) { ++instances; }
+	D(D&&) noexcept { ++instances; }
 
 	~D() { --instances; }
 };
@@ -70,6 +76,7 @@ struct D
 struct E
 {
 	explicit E(char const* msg) : string_member(msg) {}
+	E(E&&) noexcept = default;
 	std::string string_member;
 };
 
@@ -96,7 +103,7 @@ struct F
 		TEST_EQUAL(f_.gutted, false);
 	}
 
-	F(F&& f_)
+	F(F&& f_) noexcept
 		: self(this)
 		, f(f_.f)
 		, constructed(f_.constructed)
@@ -139,15 +146,18 @@ private:
 struct G : A
 {
 	G(int base, int v) : A(base), g(v) {}
+	G(G&&) noexcept = default;
 	int type() override { return 3; }
 	std::int64_t g;
 };
+
+} // anonymous namespace
 
 // test emplace_back of heterogeneous types
 // and retrieval of their pointers
 TORRENT_TEST(emplace_back)
 {
-	using namespace libtorrent;
+	using namespace lt;
 
 	heterogeneous_queue<A> q;
 	q.emplace_back<B>(0, 1);
@@ -195,7 +205,7 @@ TORRENT_TEST(emplace_back)
 
 TORRENT_TEST(emplace_back_over_aligned)
 {
-	using namespace libtorrent;
+	using namespace lt;
 
 	heterogeneous_queue<A> q;
 	q.emplace_back<G>(1, 2);
@@ -221,7 +231,7 @@ TORRENT_TEST(emplace_back_over_aligned)
 // test swap
 TORRENT_TEST(swap)
 {
-	using namespace libtorrent;
+	using namespace lt;
 
 	heterogeneous_queue<A> q1;
 	heterogeneous_queue<A> q2;
@@ -270,7 +280,7 @@ TORRENT_TEST(swap)
 // test destruction
 TORRENT_TEST(destruction)
 {
-	using namespace libtorrent;
+	using namespace lt;
 
 	heterogeneous_queue<D> q;
 	TEST_EQUAL(D::instances, 0);
@@ -292,7 +302,7 @@ TORRENT_TEST(destruction)
 // test copy/move
 TORRENT_TEST(copy_move)
 {
-	using namespace libtorrent;
+	using namespace lt;
 
 	heterogeneous_queue<F> q;
 
@@ -306,10 +316,10 @@ TORRENT_TEST(copy_move)
 
 	TEST_EQUAL(int(ptrs.size()), 1000);
 
-	for (int i = 0; i < int(ptrs.size()); ++i)
+	for (std::size_t i = 0; i < ptrs.size(); ++i)
 	{
 		ptrs[i]->check_invariant();
-		TEST_EQUAL(ptrs[i]->f, i);
+		TEST_EQUAL(ptrs[i]->f, int(i));
 	}
 
 	// destroy all objects, asserting that their invariant still holds
@@ -318,7 +328,7 @@ TORRENT_TEST(copy_move)
 
 TORRENT_TEST(nontrivial)
 {
-	using namespace libtorrent;
+	using namespace lt;
 
 	heterogeneous_queue<E> q;
 	for (int i = 0; i < 10000; ++i)

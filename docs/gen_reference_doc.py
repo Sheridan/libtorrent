@@ -7,6 +7,10 @@ import sys
 verbose = '--verbose' in sys.argv
 dump = '--dump' in sys.argv
 internal = '--internal' in sys.argv
+plain_output = '--plain-output' in sys.argv
+if plain_output:
+	plain_file = open('plain_text_out.txt', 'w+')
+in_code = None
 
 paths = ['include/libtorrent/*.hpp', 'include/libtorrent/kademlia/*.hpp', 'include/libtorrent/extensions/*.hpp']
 
@@ -33,6 +37,7 @@ symbols = {}
 preprocess_rst = \
 {
 	'manual.rst':'manual-ref.rst',
+	'upgrade_to_1.2.rst':'upgrade_to_1.2-ref.rst',
 	'settings.rst':'settings-ref.rst'
 }
 
@@ -206,6 +211,7 @@ def looks_like_variable(line):
 	if line.startswith(','): return False
 	if line.startswith(':'): return False
 	if line.startswith('typedef'): return False
+	if line.startswith('using'): return False
 	if ' = ' in line: return True
 	if line.endswith(';'): return True
 	return False
@@ -329,6 +335,24 @@ def parse_class(lno, lines, filename):
 
 		if l.startswith('//'):
 			if verbose: print 'desc  %s' % l
+
+			# plain output prints just descriptions and filters out c++ code.
+			# it's used to run spell checker over
+			if plain_output:
+				line = l.split('//')[1]
+				# if the first character is a space, strip it
+				if len(line) > 0 and line[0] == ' ': line = line[1:]
+				global in_code
+				if in_code != None and not line.startswith(in_code) and len(line) > 1:
+					in_code = None
+
+				if line.strip().startswith('.. code::'):
+					in_code = line.split('.. code::')[0] + '\t'
+
+				# strip out C++ code from the plain text output since it's meant for
+				# running spell checking over
+				if not line.strip().startswith('.. ') and in_code == None:
+					plain_file.write(line + '\n')
 			l = l[2:]
 			if len(l) and l[0] == ' ': l = l[1:]
 			context += l + '\n'
@@ -375,7 +399,11 @@ def parse_class(lno, lines, filename):
 			if not is_visible(context):
 				continue
 			l = l.split('//')[0].strip()
-			n = l.split(' ')[-1].split(':')[0].split(';')[0]
+			# the name may look like this:
+			# std::uint8_t fails : 7;
+			# int scrape_downloaded = -1;
+			# static constexpr peer_flags_t interesting{0x1};
+			n = l.split('=')[0].split('{')[0].strip().split(' : ')[0].split(' ')[-1].split(':')[0].split(';')[0]
 			if context == '' and blanks == 0 and len(fields):
 				fields[-1]['names'].append(n)
 				fields[-1]['signatures'].append(l)

@@ -33,7 +33,9 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "test.hpp"
 #include "libtorrent/linked_list.hpp"
 
-using namespace libtorrent;
+using namespace lt;
+
+namespace {
 
 struct test_node : list_node<test_node>
 {
@@ -51,6 +53,8 @@ void compare(linked_list<test_node> const& list, int* array, int size)
 		TEST_EQUAL(i->val, array[idx]);
 	}
 }
+
+} // anonymous namespace
 
 TORRENT_TEST(push_back)
 {
@@ -195,4 +199,3 @@ TORRENT_TEST(iterate_backward)
 	it.prev();
 	TEST_EQUAL(it.get(), static_cast<test_node*>(nullptr));
 }
-

@@ -31,6 +31,7 @@ POSSIBILITY OF SUCH DAMAGE.
 */
 
 #include "test.hpp"
+#include "test_utils.hpp"
 
 #include <vector>
 
@@ -42,8 +43,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/add_torrent_params.hpp"
 #include "libtorrent/read_resume_data.hpp"
 
-using namespace libtorrent;
-namespace lt = libtorrent;
+using namespace lt;
 
 TORRENT_TEST(read_resume)
 {
@@ -93,22 +93,26 @@ TORRENT_TEST(read_resume)
 	TEST_EQUAL(atp.download_limit, 1344);
 	TEST_EQUAL(atp.max_connections, 1345);
 	TEST_EQUAL(atp.max_uploads, 1346);
-	TEST_CHECK((atp.flags & add_torrent_params::flag_seed_mode) == 0);
-	TEST_CHECK((atp.flags & add_torrent_params::flag_super_seeding) == 0);
-	TEST_CHECK((atp.flags & add_torrent_params::flag_auto_managed) == 0);
-	TEST_CHECK((atp.flags & add_torrent_params::flag_sequential_download) == 0);
-	TEST_CHECK((atp.flags & add_torrent_params::flag_paused) == 0);
+
+	torrent_flags_t const flags_mask
+		= torrent_flags::seed_mode
+		| torrent_flags::super_seeding
+		| torrent_flags::auto_managed
+		| torrent_flags::paused
+		| torrent_flags::sequential_download;
+
+	TEST_CHECK(!(atp.flags & flags_mask));
 	TEST_EQUAL(atp.added_time, 1347);
 	TEST_EQUAL(atp.completed_time, 1348);
 	TEST_EQUAL(atp.finished_time, 1352);
 
 	TEST_EQUAL(atp.piece_priorities.size(), 6);
-	TEST_EQUAL(atp.piece_priorities[0], 1);
-	TEST_EQUAL(atp.piece_priorities[1], 2);
-	TEST_EQUAL(atp.piece_priorities[2], 3);
-	TEST_EQUAL(atp.piece_priorities[3], 4);
-	TEST_EQUAL(atp.piece_priorities[4], 5);
-	TEST_EQUAL(atp.piece_priorities[5], 6);
+	TEST_EQUAL(atp.piece_priorities[0], 1_pri);
+	TEST_EQUAL(atp.piece_priorities[1], 2_pri);
+	TEST_EQUAL(atp.piece_priorities[2], 3_pri);
+	TEST_EQUAL(atp.piece_priorities[3], 4_pri);
+	TEST_EQUAL(atp.piece_priorities[4], 5_pri);
+	TEST_EQUAL(atp.piece_priorities[5], 6_pri);
 }
 
 TORRENT_TEST(read_resume_missing_info_hash)
@@ -166,6 +170,7 @@ TORRENT_TEST(read_resume_mismatching_torrent)
 	TEST_CHECK(!atp.ti);
 }
 
+namespace {
 std::shared_ptr<torrent_info> generate_torrent()
 {
 	file_storage fs;
@@ -182,14 +187,15 @@ std::shared_ptr<torrent_info> generate_torrent()
 	for (piece_index_t i(0); i < fs.end_piece(); ++i)
 	{
 		sha1_hash ph;
-		for (int k = 0; k < 20; ++k) ph[k] = lt::random(0xff);
+		aux::random_bytes(ph);
 		t.set_hash(i, ph);
 	}
 
 	std::vector<char> buf;
 	bencode(std::back_inserter(buf), t.generate());
-	return std::make_shared<torrent_info>(&buf[0], buf.size());
+	return std::make_shared<torrent_info>(buf, from_span);
 }
+} // anonymous namespace
 
 TORRENT_TEST(read_resume_torrent)
 {

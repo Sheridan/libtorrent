@@ -40,6 +40,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/time.hpp" // for time_duration
 #include "libtorrent/storage_defs.hpp" // for storage_mode_t
 #include "libtorrent/error_code.hpp"
+#include "libtorrent/aux_/noexcept_movable.hpp"
 
 #include <cstdint>
 #include <string>
@@ -47,16 +48,28 @@ POSSIBILITY OF SUCH DAMAGE.
 
 namespace libtorrent {
 
+#ifndef TORRENT_NO_DEPRECATE
+#ifdef __GNUC__
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
+#endif
+
 	// holds a snapshot of the status of a torrent, as queried by
 	// torrent_handle::status().
 	struct TORRENT_EXPORT torrent_status
 	{
+#ifndef TORRENT_NO_DEPRECATE
+#ifdef __GNUC__
+#pragma GCC diagnostic pop
+#endif
+#endif
 		// hidden
-		torrent_status();
+		torrent_status() noexcept;
 		~torrent_status();
 		torrent_status(torrent_status const&);
 		torrent_status& operator=(torrent_status const&);
-		torrent_status(torrent_status&&);
+		torrent_status(torrent_status&&) noexcept;
 		torrent_status& operator=(torrent_status&&);
 
 		// compares if the torrent status objects come from the same torrent. i.e.
@@ -115,17 +128,18 @@ namespace libtorrent {
 			checking_resume_data
 		};
 
-		// may be set to an error code describing why the torrent was paused, in
-		// case it was paused by an error. If the torrent is not paused or if it's
-		// paused but not because of an error, this error_code is not set.
-		// if the error is attributed specifically to a file, error_file is set to
-		// the index of that file in the .torrent file.
 #ifndef TORRENT_NO_DEPRECATE
 		std::string error;
 #else
 		// internal
 		std::string _dummy_string_;
 #endif
+
+		// may be set to an error code describing why the torrent was paused, in
+		// case it was paused by an error. If the torrent is not paused or if it's
+		// paused but not because of an error, this error_code is not set.
+		// if the error is attributed specifically to a file, error_file is set to
+		// the index of that file in the .torrent file.
 		error_code errc;
 
 		file_index_t error_file = torrent_status::error_file_none;
@@ -135,19 +149,24 @@ namespace libtorrent {
 		// the error did not occur on a file
 		static constexpr file_index_t error_file_none{-1};
 
-		// the error occurred on m_url
-		static constexpr file_index_t error_file_url{-2};
-
 		// the error occurred setting up the SSL context
 		static constexpr file_index_t error_file_ssl_ctx{-3};
 
+#ifndef TORRENT_NO_DEPRECATE
 		// the error occurred while loading the .torrent file via the user
 		// supplied load function
-		static constexpr file_index_t error_file_metadata{-4};
+		static constexpr file_index_t TORRENT_DEPRECATED error_file_metadata{-4};
+
+		// the error occurred on m_url
+		static constexpr file_index_t TORRENT_DEPRECATED error_file_url{-2};
+#endif
 
 		// there was a serious error reported in this torrent. The error code
 		// or a torrent log alert may provide more information.
 		static constexpr file_index_t error_file_exception{-5};
+
+		// the error occurred with the partfile
+		static constexpr file_index_t error_file_partfile{-6};
 
 		// the path to the directory where this torrent's files are stored.
 		// It's typically the path as was given to async_add_torrent() or
@@ -281,7 +300,7 @@ namespace libtorrent {
 
 		// the position this torrent has in the download
 		// queue. If the torrent is a seed or finished, this is -1.
-		int queue_position = 0;
+		queue_position_t queue_position{};
 
 		// the total rates for all peers for this torrent. These will usually
 		// have better precision than summing the rates from all peers. The rates
@@ -405,8 +424,8 @@ namespace libtorrent {
 		// purpose of this counter. -1 means there either hasn't been any
 		// uploading/downloading, or it was too long ago for libtorrent to
 		// remember (currently forgetting happens after about 18 hours)
-		int time_since_upload = 0;
-		int time_since_download = 0;
+		int TORRENT_DEPRECATED_MEMBER time_since_upload = 0;
+		int TORRENT_DEPRECATED_MEMBER time_since_download = 0;
 
 		// These keep track of the number of seconds this torrent has been active
 		// (not paused) and the number of seconds it has been active while being
@@ -414,9 +433,9 @@ namespace libtorrent {
 		// ``finished_time`` which should be <= ``active_time``. They are all
 		// saved in and restored from resume data, to keep totals across
 		// sessions.
-		int active_time = 0;
-		int finished_time = 0;
-		int seeding_time = 0;
+		int TORRENT_DEPRECATED_MEMBER active_time = 0;
+		int TORRENT_DEPRECATED_MEMBER finished_time = 0;
+		int TORRENT_DEPRECATED_MEMBER seeding_time = 0;
 #else
 		int deprecated_time_since_upload = 0;
 		int deprecated_time_since_download = 0;
@@ -436,14 +455,14 @@ namespace libtorrent {
 
 		// the number of seconds since this torrent acquired scrape data.
 		// If it has never done that, this value is -1.
-		int last_scrape = 0;
+		int TORRENT_DEPRECATED_MEMBER last_scrape = 0;
 #else
 		int deprecated_last_scrape = 0;
 #endif
 
 #ifndef TORRENT_NO_DEPRECATE
 		// the priority of this torrent
-		int priority = 0;
+		int TORRENT_DEPRECATED_MEMBER priority = 0;
 #else
 		// hidden
 		int deprecated_priority = 0;
@@ -457,9 +476,10 @@ namespace libtorrent {
 		// was saved.
 		bool need_save_resume = false;
 
+#ifndef TORRENT_NO_DEPRECATE
 		// true if the session global IP filter applies
 		// to this torrent. This defaults to true.
-		bool ip_filter_applies = false;
+		bool TORRENT_DEPRECATED_MEMBER ip_filter_applies = false;
 
 		// true if the torrent is blocked from downloading. This typically
 		// happens when a disk write operation fails. If the torrent is
@@ -468,30 +488,40 @@ namespace libtorrent {
 		// has been resolved. If the torrent is not auto-managed, you have to
 		// explicitly take it out of the upload mode by calling set_upload_mode()
 		// on the torrent_handle.
-		bool upload_mode = false;
+		bool TORRENT_DEPRECATED_MEMBER upload_mode = false;
 
 		// true if the torrent is currently in share-mode, i.e. not downloading
 		// the torrent, but just helping the swarm out.
-		bool share_mode = false;
+		bool TORRENT_DEPRECATED_MEMBER share_mode = false;
 
 		// true if the torrent is in super seeding mode
-		bool super_seeding = false;
+		bool TORRENT_DEPRECATED_MEMBER super_seeding = false;
 
 		// set to true if the torrent is paused and false otherwise. It's only
 		// true if the torrent itself is paused. If the torrent is not running
 		// because the session is paused, this is still false. To know if a
 		// torrent is active or not, you need to inspect both
 		// ``torrent_status::paused`` and ``session::is_paused()``.
-		bool paused = false;
+		bool TORRENT_DEPRECATED_MEMBER paused = false;
 
 		// set to true if the torrent is auto managed, i.e. libtorrent is
 		// responsible for determining whether it should be started or queued.
 		// For more info see queuing_
-		bool auto_managed = false;
+		bool TORRENT_DEPRECATED_MEMBER auto_managed = false;
 
 		// true when the torrent is in sequential download mode. In this mode
 		// pieces are downloaded in order rather than rarest first.
-		bool sequential_download = false;
+		bool TORRENT_DEPRECATED_MEMBER sequential_download = false;
+#else
+		// hidden
+		bool deprecated_ip_filter_applies = false;
+		bool deprecated_upload_mode = false;
+		bool deprecated_share_mode = false;
+		bool deprecated_super_seeding = false;
+		bool deprecated_paused = false;
+		bool deprecated_auto_managed = false;
+		bool deprecated_sequential_download = false;
+#endif
 
 		// true if all pieces have been downloaded.
 		bool is_seeding = false;
@@ -512,10 +542,15 @@ namespace libtorrent {
 		// torrent.
 		bool has_incoming = false;
 
+#ifndef TORRENT_NO_DEPRECATE
 		// true if the torrent is in seed_mode. If the torrent was started in
 		// seed mode, it will leave seed mode once all pieces have been checked
 		// or as soon as one piece fails the hash check.
-		bool seed_mode = false;
+		bool TORRENT_DEPRECATED_MEMBER seed_mode = false;
+#else
+		// hidden
+		bool deprecated_seed_mode = false;
+#endif
 
 		// this is true if this torrent's storage is currently being moved from
 		// one location to another. This may potentially be a long operation
@@ -526,7 +561,7 @@ namespace libtorrent {
 		// true if this torrent is loaded into RAM. A torrent can be started
 		// and still not loaded into RAM, in case it has not had any peers interested in it
 		// yet. Torrents are loaded on demand.
-		bool is_loaded = false;
+		bool TORRENT_DEPRECATED_MEMBER is_loaded = false;
 #else
 		// hidden
 		bool deprecated_is_loaded;
@@ -540,10 +575,15 @@ namespace libtorrent {
 		bool announcing_to_lsd = false;
 		bool announcing_to_dht = false;
 
+#ifndef TORRENT_NO_DEPRECATE
 		// this reflects whether the ``stop_when_ready`` flag is currently enabled
 		// on this torrent. For more information, see
 		// torrent_handle::stop_when_ready().
-		bool stop_when_ready = false;
+		bool TORRENT_DEPRECATED_MEMBER stop_when_ready = false;
+#else
+		// hidden
+		bool deprecated_stop_when_ready = false;
+#endif
 
 		// the info-hash for this torrent
 		sha1_hash info_hash;
@@ -556,6 +596,10 @@ namespace libtorrent {
 		seconds active_duration;
 		seconds finished_duration;
 		seconds seeding_duration;
+
+		// reflects several of the torrent's flags. For more
+		// information, see ``torrent_handle::flags()``.
+		torrent_flags_t flags{};
 	};
 }
 

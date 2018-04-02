@@ -34,6 +34,9 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/upnp.hpp"
 #include "test.hpp"
 #include <iostream>
+#include <functional>
+
+namespace {
 
 char upnp_xml[] =
 "<root>"
@@ -263,7 +266,7 @@ char upnp_xml4[] =
 "</s:Body>"
 "</s:Envelope>";
 
-using namespace libtorrent;
+using namespace lt;
 using namespace std::placeholders;
 
 void parser_callback(std::string& out, int token, string_view s
@@ -304,6 +307,8 @@ void test_parse(char const* in, char const* expected)
 		, in, out.c_str(), expected);
 	TEST_EQUAL(out, expected);
 }
+
+} // anonymous namespace
 
 TORRENT_TEST(upnp_parser1)
 {

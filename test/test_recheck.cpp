@@ -47,10 +47,11 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <fstream>
 #include <iostream>
 
-using namespace libtorrent;
-namespace lt = libtorrent;
+using namespace lt;
 
-const int mask = alert::all_categories & ~(alert::performance_warning | alert::stats_notification);
+namespace {
+
+auto const mask = alert::all_categories & ~(alert::performance_warning | alert::stats_notification);
 
 void wait_for_complete(lt::session& ses, torrent_handle h)
 {
@@ -61,8 +62,8 @@ void wait_for_complete(lt::session& ses, torrent_handle h)
 		print_alerts(ses, "ses1");
 		torrent_status st = h.status();
 		std::printf("%f s -  %f %%\n"
-			, total_milliseconds(clock_type::now() - last_change) / 1000.f
-			, st.progress_ppm / 10000.f);
+			, total_milliseconds(clock_type::now() - last_change) / 1000.0
+			, st.progress_ppm / 10000.0);
 		if (st.progress_ppm == 1000000) return;
 		if (st.progress_ppm != last_progress)
 		{
@@ -74,6 +75,8 @@ void wait_for_complete(lt::session& ses, torrent_handle h)
 	}
 	TEST_ERROR("torrent did not finish");
 }
+
+} // anonymous namespace
 
 TORRENT_TEST(recheck)
 {
@@ -94,11 +97,11 @@ TORRENT_TEST(recheck)
 	file.close();
 
 	add_torrent_params param;
-	param.flags &= ~add_torrent_params::flag_paused;
-	param.flags &= ~add_torrent_params::flag_auto_managed;
+	param.flags &= ~torrent_flags::paused;
+	param.flags &= ~torrent_flags::auto_managed;
 	param.ti = t;
 	param.save_path = "tmp1_recheck";
-	param.flags |= add_torrent_params::flag_seed_mode;
+	param.flags |= torrent_flags::seed_mode;
 	torrent_handle tor1 = ses1.add_torrent(param, ec);
 	if (ec) std::printf("add_torrent: %s\n", ec.message().c_str());
 
@@ -116,4 +119,3 @@ TORRENT_TEST(recheck)
 	TEST_CHECK(st1.progress_ppm <= 1000000);
 	wait_for_complete(ses1, tor1);
 }
-

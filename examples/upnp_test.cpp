@@ -43,9 +43,9 @@ char const* timestamp()
 	return str;
 }
 
-void print_alert(libtorrent::alert const* a)
+void print_alert(lt::alert const* a)
 {
-	using namespace libtorrent;
+	using namespace lt;
 
 	if (alert_cast<portmap_error_alert>(a))
 	{
@@ -60,10 +60,9 @@ void print_alert(libtorrent::alert const* a)
 	std::printf("%s", "\x1b[0m");
 }
 
-int main(int argc, char* argv[])
+int main(int argc, char*[])
 {
-	using namespace libtorrent;
-	namespace lt = libtorrent;
+	using namespace lt;
 
 	if (argc != 1)
 	{

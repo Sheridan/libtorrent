@@ -30,14 +30,14 @@ POSSIBILITY OF SUCH DAMAGE.
 
 */
 
-#ifndef TORRENT_CREATE_TORRENT_HPP_INCLUDED
-#define TORRENT_CREATE_TORRENT_HPP_INCLUDED
+#ifndef TORRENT_SIM_CREATE_TORRENT_HPP_INCLUDED
+#define TORRENT_SIM_CREATE_TORRENT_HPP_INCLUDED
 
 #include <string>
 #include "libtorrent/add_torrent_params.hpp"
 
 std::string save_path(int idx);
-libtorrent::add_torrent_params create_torrent(int idx, bool seed = true
+lt::add_torrent_params create_torrent(int idx, bool seed = true
 	, int num_pieces = 9);
 
 #endif

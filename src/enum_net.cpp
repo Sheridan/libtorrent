@@ -34,7 +34,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/enum_net.hpp"
 #include "libtorrent/broadcast_socket.hpp"
 #include "libtorrent/assert.hpp"
-#include "libtorrent/socket_type.hpp"
+#include "libtorrent/aux_/socket_type.hpp"
 #ifdef TORRENT_WINDOWS
 #include "libtorrent/aux_/win_util.hpp"
 #endif
@@ -56,8 +56,17 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #if TORRENT_USE_SYSCTL
 #include <sys/sysctl.h>
+#ifdef __APPLE__
+#include "TargetConditionals.h"
+#endif
+
+#if defined TARGET_IPHONE_SIMULATOR || defined TARGET_OS_IPHONE
+// net/route.h is not included in the iphone sdk.
+#include "libtorrent/aux_/route.h"
+#else
 #include <net/route.h>
 #endif
+#endif // TORRENT_USE_SYSCTL
 
 #if TORRENT_USE_GETIPFORWARDTABLE || TORRENT_USE_GETADAPTERSADDRESSES
 #ifndef WIN32_LEAN_AND_MEAN
@@ -74,7 +83,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <netinet/ether.h>
 #include <netinet/in.h>
 #include <net/if.h>
-#include <stdio.h>
+#include <cstdio>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <sys/types.h>
@@ -83,6 +92,11 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <stdlib.h>
 #include <unistd.h>
 #include <sys/types.h>
+
+#if defined TORRENT_ANDROID && !defined IFA_F_DADFAILED
+#define IFA_F_DADFAILED 8
+#endif
+
 #endif
 
 #if TORRENT_USE_IFADDRS
@@ -100,14 +114,14 @@ const unsigned long siocgifmtu = SIOCGIFMTU;
 #define IF_NAMESIZE IFNAMSIZ
 #endif
 
-namespace libtorrent {namespace {
+namespace libtorrent {
+namespace {
 
 
 #if !defined TORRENT_BUILD_SIMULATOR
 	address_v4 inaddr_to_address(in_addr const* ina, int const len = 4)
 	{
-		boost::asio::ip::address_v4::bytes_type b;
-		b.fill(0);
+		boost::asio::ip::address_v4::bytes_type b = {};
 		if (len > 0) std::memcpy(b.data(), ina, std::min(std::size_t(len), b.size()));
 		return address_v4(b);
 	}
@@ -115,13 +129,13 @@ namespace libtorrent {namespace {
 #if TORRENT_USE_IPV6
 	address_v6 inaddr6_to_address(in6_addr const* ina6, int const len = 16)
 	{
-		boost::asio::ip::address_v6::bytes_type b;
-		b.fill(0);
+		boost::asio::ip::address_v6::bytes_type b = {};
 		if (len > 0) std::memcpy(b.data(), ina6, std::min(std::size_t(len), b.size()));
 		return address_v6(b);
 	}
 #endif
 
+#if !TORRENT_USE_NETLINK
 	int sockaddr_len(sockaddr const* sin)
 	{
 #if TORRENT_HAS_SALEN
@@ -148,6 +162,7 @@ namespace libtorrent {namespace {
 #endif
 		return address();
 	}
+#endif
 
 	bool valid_addr_family(int family)
 	{
@@ -160,18 +175,19 @@ namespace libtorrent {namespace {
 
 #if TORRENT_USE_NETLINK
 
-	int read_nl_sock(int sock, char *buf, int bufsize, std::uint32_t const seq, int const pid)
+	int read_nl_sock(int sock, span<char> buf, std::uint32_t const seq, std::uint32_t const pid)
 	{
 		nlmsghdr* nl_hdr;
 
 		int msg_len = 0;
 
-		do
+		for (;;)
 		{
-			int read_len = int(recv(sock, buf, std::size_t(bufsize - msg_len), 0));
+			auto next_msg = buf.subspan(std::size_t(msg_len));
+			int read_len = int(recv(sock, next_msg.data(), next_msg.size(), 0));
 			if (read_len < 0) return -1;
 
-			nl_hdr = reinterpret_cast<nlmsghdr*>(buf);
+			nl_hdr = reinterpret_cast<nlmsghdr*>(next_msg.data());
 
 #ifdef __clang__
 #pragma clang diagnostic push
@@ -184,15 +200,50 @@ namespace libtorrent {namespace {
 #pragma clang diagnostic pop
 #endif
 
+			// this function doesn't handle multiple requests at the same time
+			// so report an error if the message does not have the expected seq and pid
+			if (nl_hdr->nlmsg_seq != seq || nl_hdr->nlmsg_pid != pid)
+				return -1;
+
 			if (nl_hdr->nlmsg_type == NLMSG_DONE) break;
 
-			buf += read_len;
 			msg_len += read_len;
 
 			if ((nl_hdr->nlmsg_flags & NLM_F_MULTI) == 0) break;
-
-		} while((nl_hdr->nlmsg_seq != seq) || (int(nl_hdr->nlmsg_pid) != pid));
+		}
 		return msg_len;
+	}
+
+	constexpr int NL_BUFSIZE = 8192;
+
+	int nl_dump_request(int sock, std::uint16_t type, std::uint32_t seq, char family, span<char> msg, std::size_t msg_len)
+	{
+		nlmsghdr* nl_msg = reinterpret_cast<nlmsghdr*>(msg.data());
+		nl_msg->nlmsg_len = std::uint32_t(NLMSG_LENGTH(msg_len));
+		nl_msg->nlmsg_type = type;
+		nl_msg->nlmsg_flags = NLM_F_DUMP | NLM_F_REQUEST;
+		nl_msg->nlmsg_seq = seq;
+		// in theory nlmsg_pid should be set to the netlink port ID (NOT the process ID)
+		// of the sender, but the kernel ignores this field so it is typically set to
+		// zero
+		nl_msg->nlmsg_pid = 0;
+		// first byte of routing messages is always the family
+		msg[sizeof(nlmsghdr)] = family;
+
+		if (::send(sock, nl_msg, nl_msg->nlmsg_len, 0) < 0)
+		{
+			return -1;
+		}
+
+		// get the socket's port ID so that we can verify it in the repsonse
+		sockaddr_nl sock_addr;
+		socklen_t sock_addr_len = sizeof(sock_addr);
+		if (::getsockname(sock, reinterpret_cast<sockaddr*>(&sock_addr), &sock_addr_len) < 0)
+		{
+			return -1;
+		}
+
+		return read_nl_sock(sock, msg, seq, sock_addr.nl_pid);
 	}
 
 	bool parse_route(int s, nlmsghdr* nl_hdr, ip_route* rt_info)
@@ -247,15 +298,94 @@ namespace libtorrent {namespace {
 #pragma clang diagnostic pop
 #endif
 
-		if_indextoname(std::uint32_t(if_index), rt_info->name);
 		ifreq req = {};
-		if_indextoname(std::uint32_t(if_index), req.ifr_name);
-		ioctl(s, siocgifmtu, &req);
+		::if_indextoname(std::uint32_t(if_index), req.ifr_name);
+		static_assert(sizeof(rt_info->name) >= sizeof(req.ifr_name), "ip_route::name is too small");
+		std::memcpy(rt_info->name, req.ifr_name, sizeof(req.ifr_name));
+		::ioctl(s, ::siocgifmtu, &req);
 		rt_info->mtu = req.ifr_mtu;
 //		obviously this doesn't work correctly. How do you get the netmask for a route?
 //		if (ioctl(s, SIOCGIFNETMASK, &req) == 0) {
 //			rt_info->netmask = sockaddr_to_address(&req.ifr_addr, req.ifr_addr.sa_family);
 //		}
+		return true;
+	}
+
+	bool parse_nl_address(nlmsghdr* nl_hdr, ip_interface* ip_info)
+	{
+		ifaddrmsg* addr_msg = reinterpret_cast<ifaddrmsg*>(NLMSG_DATA(nl_hdr));
+
+		if (!valid_addr_family(addr_msg->ifa_family))
+			return false;
+
+		ip_info->preferred = (addr_msg->ifa_flags & (IFA_F_DADFAILED | IFA_F_DEPRECATED | IFA_F_TENTATIVE)) == 0;
+
+#if TORRENT_USE_IPV6
+		if (addr_msg->ifa_family == AF_INET6)
+		{
+			TORRENT_ASSERT(addr_msg->ifa_prefixlen <= 128);
+			if (addr_msg->ifa_prefixlen > 0)
+			{
+				address_v6::bytes_type mask = {};
+				auto it = mask.begin();
+				if (addr_msg->ifa_prefixlen > 64)
+				{
+					detail::write_uint64(0xffffffffffffffffULL, it);
+					addr_msg->ifa_prefixlen -= 64;
+				}
+				if (addr_msg->ifa_prefixlen > 0)
+				{
+					std::uint64_t const m = ~((1ULL << (64 - addr_msg->ifa_prefixlen)) - 1);
+					detail::write_uint64(m, it);
+				}
+				ip_info->netmask = address_v6(mask);
+			}
+		}
+		else
+#endif
+		{
+			TORRENT_ASSERT(addr_msg->ifa_prefixlen <= 32);
+			if (addr_msg->ifa_prefixlen != 0)
+			{
+				std::uint32_t const m = ~((1U << (32 - addr_msg->ifa_prefixlen)) - 1);
+				ip_info->netmask = address_v4(m);
+			}
+		}
+
+		int rt_len = int(IFA_PAYLOAD(nl_hdr));
+#ifdef __clang__
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcast-align"
+#endif
+		for (rtattr* rt_attr = reinterpret_cast<rtattr*>(IFA_RTA(addr_msg));
+			RTA_OK(rt_attr, rt_len); rt_attr = RTA_NEXT(rt_attr, rt_len))
+		{
+			switch(rt_attr->rta_type)
+			{
+			case IFA_ADDRESS:
+#if TORRENT_USE_IPV6
+				if (addr_msg->ifa_family == AF_INET6)
+				{
+					address_v6 addr = inaddr6_to_address(reinterpret_cast<in6_addr*>(RTA_DATA(rt_attr)));
+					if (addr_msg->ifa_scope == RT_SCOPE_LINK)
+						addr.scope_id(addr_msg->ifa_index);
+					ip_info->interface_address = addr;
+				}
+				else
+#endif
+				{
+					ip_info->interface_address = inaddr_to_address(reinterpret_cast<in_addr*>(RTA_DATA(rt_attr)));
+				}
+				break;
+			}
+		}
+#ifdef __clang__
+#pragma clang diagnostic pop
+#endif
+
+		static_assert(sizeof(ip_info->name) >= IF_NAMESIZE, "not enough space in ip_interface::name");
+		if_indextoname(addr_msg->ifa_index, ip_info->name);
+
 		return true;
 	}
 #endif // TORRENT_USE_NETLINK
@@ -266,10 +396,10 @@ namespace libtorrent {namespace {
 int _System __libsocket_sysctl(int* mib, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen);
 #endif
 
-	bool parse_route(int s, rt_msghdr* rtm, ip_route* rt_info)
+	bool parse_route(int, rt_msghdr* rtm, ip_route* rt_info)
 	{
 		sockaddr* rti_info[RTAX_MAX];
-		sockaddr* sa = reinterpret_cast<sockaddr*>(rtm + 1);
+		auto* sa = reinterpret_cast<sockaddr*>(rtm + 1);
 		for (int i = 0; i < RTAX_MAX; ++i)
 		{
 			if ((rtm->rtm_addrs & (1 << i)) == 0)
@@ -299,15 +429,6 @@ int _System __libsocket_sysctl(int* mib, u_int namelen, void *oldp, size_t *oldl
 		rt_info->netmask = sockaddr_to_address(rti_info[RTAX_NETMASK]
 			, rt_info->destination.is_v4() ? AF_INET : AF_INET6);
 		if_indextoname(rtm->rtm_index, rt_info->name);
-
-		// TODO: get the MTU (and other interesting metrics) from the rt_msghdr instead
-		ifreq req = {};
-		if_indextoname(rtm->rtm_index, req.ifr_name);
-
-		// ignore errors here. This is best-effort
-		ioctl(s, siocgifmtu, &req);
-		rt_info->mtu = req.ifr_mtu;
-
 		return true;
 	}
 #endif
@@ -320,8 +441,10 @@ int _System __libsocket_sysctl(int* mib, u_int namelen, void *oldp, size_t *oldl
 			return false;
 		}
 
-		strncpy(rv.name, ifa->ifa_name, sizeof(rv.name));
-		rv.name[sizeof(rv.name)-1] = 0;
+		std::strncpy(rv.name, ifa->ifa_name, sizeof(rv.name));
+		rv.name[sizeof(rv.name) - 1] = 0;
+		rv.friendly_name[0] = 0;
+		rv.description[0] = 0;
 
 		// determine address
 		rv.interface_address = sockaddr_to_address(ifa->ifa_addr);
@@ -334,9 +457,7 @@ int _System __libsocket_sysctl(int* mib, u_int namelen, void *oldp, size_t *oldl
 	}
 #endif
 
-}} // <anonymous>
-
-namespace libtorrent {
+} // <anonymous>
 
 	// return (a1 & mask) == (a2 & mask)
 	bool match_addr_mask(address const& a1, address const& a2, address const& mask)
@@ -348,12 +469,9 @@ namespace libtorrent {
 #if TORRENT_USE_IPV6
 		if (a1.is_v6())
 		{
-			address_v6::bytes_type b1;
-			address_v6::bytes_type b2;
-			address_v6::bytes_type m;
-			b1 = a1.to_v6().to_bytes();
-			b2 = a2.to_v6().to_bytes();
-			m = mask.to_v6().to_bytes();
+			address_v6::bytes_type b1 = a1.to_v6().to_bytes();
+			address_v6::bytes_type b2 = a2.to_v6().to_bytes();
+			address_v6::bytes_type m = mask.to_v6().to_bytes();
 			for (std::size_t i = 0; i < b1.size(); ++i)
 			{
 				b1[i] &= m[i];
@@ -388,7 +506,7 @@ namespace libtorrent {
 	{
 		if (family == AF_INET)
 		{
-			typedef boost::asio::ip::address_v4::bytes_type bytes_t;
+			using bytes_t = boost::asio::ip::address_v4::bytes_type;
 			bytes_t b;
 			std::memset(&b[0], 0xff, b.size());
 			for (int i = int(sizeof(bytes_t)) / 8 - 1; i > 0; --i)
@@ -406,7 +524,7 @@ namespace libtorrent {
 #if TORRENT_USE_IPV6
 		else if (family == AF_INET6)
 		{
-			typedef boost::asio::ip::address_v6::bytes_type bytes_t;
+			using bytes_t = boost::asio::ip::address_v6::bytes_type;
 			bytes_t b;
 			std::memset(&b[0], 0xff, b.size());
 			for (int i = int(sizeof(bytes_t)) / 8 - 1; i > 0; --i)
@@ -433,9 +551,8 @@ namespace libtorrent {
 	{
 		TORRENT_UNUSED(ios); // this may be unused depending on configuration
 		std::vector<ip_interface> ret;
+		ec.clear();
 #if defined TORRENT_BUILD_SIMULATOR
-
-		TORRENT_UNUSED(ec);
 
 		std::vector<address> ips = ios.get_ips();
 
@@ -444,13 +561,47 @@ namespace libtorrent {
 			ip_interface wan;
 			wan.interface_address = ip;
 			wan.netmask = address_v4::from_string("255.255.255.255");
-			strcpy(wan.name, "eth0");
-			wan.mtu = ios.sim().config().path_mtu(ip, ip);
+			std::strcpy(wan.name, "eth0");
+			std::strcpy(wan.friendly_name, "Ethernet");
+			std::strcpy(wan.description, "Simulator Ethernet Adapter");
 			ret.push_back(wan);
 		}
+#elif TORRENT_USE_NETLINK
+		int sock = ::socket(PF_ROUTE, SOCK_DGRAM, NETLINK_ROUTE);
+		if (sock < 0)
+		{
+			ec = error_code(errno, system_category());
+			return ret;
+		}
 
+		char msg[NL_BUFSIZE] = {};
+		nlmsghdr* nl_msg = reinterpret_cast<nlmsghdr*>(msg);
+		int len = nl_dump_request(sock, RTM_GETADDR, 0, AF_PACKET, msg, sizeof(ifaddrmsg));
+		if (len < 0)
+		{
+			ec = error_code(errno, system_category());
+			::close(sock);
+			return ret;
+		}
+
+#ifdef __clang__
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcast-align"
+			// NLMSG_OK uses signed/unsigned compare in the same expression
+#pragma clang diagnostic ignored "-Wsign-compare"
+#endif
+		for (; NLMSG_OK(nl_msg, len); nl_msg = NLMSG_NEXT(nl_msg, len))
+		{
+			ip_interface iface;
+			if (parse_nl_address(nl_msg, &iface)) ret.push_back(iface);
+		}
+#ifdef __clang__
+#pragma clang diagnostic pop
+#endif
+
+		::close(sock);
 #elif TORRENT_USE_IFADDRS
-		int s = socket(AF_INET, SOCK_DGRAM, 0);
+		int s = ::socket(AF_INET, SOCK_DGRAM, 0);
 		if (s < 0)
 		{
 			ec = error_code(errno, system_category());
@@ -461,11 +612,11 @@ namespace libtorrent {
 		if (getifaddrs(&ifaddr) == -1)
 		{
 			ec = error_code(errno, system_category());
-			close(s);
+			::close(s);
 			return ret;
 		}
 
-		for (ifaddrs* ifa = ifaddr; ifa; ifa = ifa->ifa_next)
+		for (ifaddrs* ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next)
 		{
 			if (ifa->ifa_addr == nullptr) continue;
 			if ((ifa->ifa_flags & IFF_UP) == 0) continue;
@@ -474,23 +625,14 @@ namespace libtorrent {
 			{
 				ip_interface iface;
 				if (iface_from_ifaddrs(ifa, iface))
-				{
-					ifreq req = {};
-					// -1 to leave a 0-terminator
-					std::strncpy(req.ifr_name, iface.name, IF_NAMESIZE - 1);
-
-					// ignore errors here. This is best-effort
-					ioctl(s, siocgifmtu, &req);
-					iface.mtu = req.ifr_mtu;
 					ret.push_back(iface);
-				}
 			}
 		}
-		close(s);
+		::close(s);
 		freeifaddrs(ifaddr);
 // MacOS X, BSD and solaris
 #elif TORRENT_USE_IFCONF
-		int s = socket(AF_INET, SOCK_DGRAM, 0);
+		int s = ::socket(AF_INET, SOCK_DGRAM, 0);
 		if (s < 0)
 		{
 			ec = error_code(errno, system_category());
@@ -504,7 +646,7 @@ namespace libtorrent {
 		if (ioctl(s, SIOCGIFCONF, &ifc) < 0)
 		{
 			ec = error_code(errno, system_category());
-			close(s);
+			::close(s);
 			return ret;
 		}
 
@@ -529,25 +671,13 @@ namespace libtorrent {
 			{
 				ip_interface iface;
 				iface.interface_address = sockaddr_to_address(&item.ifr_addr);
-				strcpy(iface.name, item.ifr_name);
+				std::strncpy(iface.name, item.ifr_name, sizeof(iface.name));
+				iface.name[sizeof(iface.name) - 1] = 0;
+				iface.friendly_name[0] = 0;
+				iface.description[0] = 0;
 
 				ifreq req = {};
-				// -1 to leave a 0-terminator
-				strncpy(req.ifr_name, item.ifr_name, IF_NAMESIZE - 1);
-				if (ioctl(s, siocgifmtu, &req) < 0)
-				{
-					ec = error_code(errno, system_category());
-					close(s);
-					return ret;
-				}
-#ifndef TORRENT_OS2
-				iface.mtu = req.ifr_mtu;
-#else
-				iface.mtu = req.ifr_metric; // according to tcp/ip reference
-#endif
-
-				std::memset(&req, 0, sizeof(req));
-				strncpy(req.ifr_name, item.ifr_name, IF_NAMESIZE - 1);
+				std::strncpy(req.ifr_name, item.ifr_name, IF_NAMESIZE - 1);
 				if (ioctl(s, SIOCGIFNETMASK, &req) < 0)
 				{
 #if TORRENT_USE_IPV6
@@ -560,7 +690,7 @@ namespace libtorrent {
 #endif
 					{
 						ec = error_code(errno, system_category());
-						close(s);
+						::close(s);
 						return ret;
 					}
 				}
@@ -574,12 +704,12 @@ namespace libtorrent {
 			ifr += current_size;
 			remaining -= current_size;
 		}
-		close(s);
+		::close(s);
 
 #elif TORRENT_USE_GETADAPTERSADDRESSES
 
 #if _WIN32_WINNT >= 0x0501
-		typedef ULONG (WINAPI *GetAdaptersAddresses_t)(ULONG,ULONG,PVOID,PIP_ADAPTER_ADDRESSES,PULONG);
+		using GetAdaptersAddresses_t = ULONG (WINAPI *)(ULONG,ULONG,PVOID,PIP_ADAPTER_ADDRESSES,PULONG);
 		// Get GetAdaptersAddresses() pointer
 		auto GetAdaptersAddresses =
 			aux::get_library_procedure<aux::iphlpapi, GetAdaptersAddresses_t>("GetAdaptersAddresses");
@@ -610,14 +740,18 @@ namespace libtorrent {
 				adapter != 0; adapter = adapter->Next)
 			{
 				ip_interface r;
-				strncpy(r.name, adapter->AdapterName, sizeof(r.name));
-				r.name[sizeof(r.name)-1] = 0;
-				r.mtu = adapter->Mtu;
+				std::strncpy(r.name, adapter->AdapterName, sizeof(r.name));
+				r.name[sizeof(r.name) - 1] = 0;
+				wcstombs(r.friendly_name, adapter->FriendlyName, sizeof(r.friendly_name));
+				r.friendly_name[sizeof(r.friendly_name) - 1] = 0;
+				wcstombs(r.description, adapter->Description, sizeof(r.description));
+				r.description[sizeof(r.description) - 1] = 0;
 				for (IP_ADAPTER_UNICAST_ADDRESS* unicast = adapter->FirstUnicastAddress;
 					unicast; unicast = unicast->Next)
 				{
 					if (!valid_addr_family(unicast->Address.lpSockaddr->sa_family))
 						continue;
+					r.preferred = unicast->DadState == IpDadStatePreferred;
 					r.interface_address = sockaddr_to_address(unicast->Address.lpSockaddr);
 					ret.push_back(r);
 				}
@@ -627,7 +761,7 @@ namespace libtorrent {
 		}
 #endif
 
-		SOCKET s = socket(AF_INET, SOCK_DGRAM, 0);
+		SOCKET s = ::socket(AF_INET, SOCK_DGRAM, 0);
 		if (int(s) == SOCKET_ERROR)
 		{
 			ec = error_code(WSAGetLastError(), system_category());
@@ -656,7 +790,8 @@ namespace libtorrent {
 			iface.netmask = sockaddr_to_address(&buffer[i].iiNetmask.Address
 				, iface.interface_address.is_v4() ? AF_INET : AF_INET6);
 			iface.name[0] = 0;
-			iface.mtu = 1500; // how to get the MTU?
+			iface.friendly_name[0] = 0;
+			iface.description[0] = 0;
 			ret.push_back(iface);
 		}
 
@@ -673,11 +808,12 @@ namespace libtorrent {
 		udp::resolver::iterator i = r.resolve(udp::resolver::query(boost::asio::ip::host_name(ec), "0"), ec);
 		if (ec) return ret;
 		ip_interface iface;
-		for (;i != udp::resolver_iterator(); ++i)
+		for (;i != udp::resolver::iterator(); ++i)
 		{
 			iface.interface_address = i->endpoint().address();
-			iface.name[0] = '\0';
-			iface.mtu = 1500;
+			iface.name[0] = 0;
+			iface.friendly_name[0] = 0;
+			iface.description[0] = 0;
 			if (iface.interface_address.is_v4())
 				iface.netmask = address_v4::netmask(iface.interface_address.to_v4());
 			ret.push_back(iface);
@@ -699,6 +835,7 @@ namespace libtorrent {
 	{
 		std::vector<ip_route> ret;
 		TORRENT_UNUSED(ios);
+		TORRENT_UNUSED(ec);
 
 #ifdef TORRENT_BUILD_SIMULATOR
 
@@ -725,7 +862,7 @@ namespace libtorrent {
 				b[14] = 1;
 				r.gateway = address_v6(b);
 			}
-			strcpy(r.name, "eth0");
+			std::strcpy(r.name, "eth0");
 			r.mtu = ios.sim().config().path_mtu(ip, ip);
 			ret.push_back(r);
 		}
@@ -748,7 +885,7 @@ namespace libtorrent {
 		m.m_rtm.rtm_seq = 0;
 		m.m_rtm.rtm_msglen = len;
 
-		int s = socket(PF_ROUTE, SOCK_RAW, AF_UNSPEC);
+		int s = ::socket(PF_ROUTE, SOCK_RAW, AF_UNSPEC);
 		if (s == -1)
 		{
 			ec = error_code(errno, system_category());
@@ -759,13 +896,13 @@ namespace libtorrent {
 		if (n == -1)
 		{
 			ec = error_code(errno, system_category());
-			close(s);
+			::close(s);
 			return std::vector<ip_route>();
 		}
 		else if (n != len)
 		{
 			ec = boost::asio::error::operation_not_supported;
-			close(s);
+			::close(s);
 			return std::vector<ip_route>();
 		}
 		bzero(&m, len);
@@ -774,7 +911,7 @@ namespace libtorrent {
 		if (n == -1)
 		{
 			ec = error_code(errno, system_category());
-			close(s);
+			::close(s);
 			return std::vector<ip_route>();
 		}
 
@@ -829,7 +966,7 @@ namespace libtorrent {
 			r.netmask = sockaddr_to_address((sockaddr*)p);
 			ret.push_back(r);
 		}
-		close(s);
+		::close(s);
 */
 	int mib[6] = {CTL_NET, PF_ROUTE, 0, AF_UNSPEC, NET_RT_DUMP, 0};
 
@@ -850,7 +987,7 @@ namespace libtorrent {
 	}
 
 	std::unique_ptr<char[]> buf(new (std::nothrow) char[needed]);
-	if (buf.get() == nullptr)
+	if (buf == nullptr)
 	{
 		ec = boost::asio::error::no_memory;
 		return std::vector<ip_route>();
@@ -868,7 +1005,7 @@ namespace libtorrent {
 
 	char* end = buf.get() + needed;
 
-	int s = socket(AF_INET, SOCK_DGRAM, 0);
+	int s = ::socket(AF_INET, SOCK_DGRAM, 0);
 	if (s < 0)
 	{
 		ec = error_code(errno, system_category());
@@ -879,7 +1016,8 @@ namespace libtorrent {
 	{
 		rtm = reinterpret_cast<rt_msghdr*>(next);
 		if (rtm->rtm_version != RTM_VERSION
-			|| rtm->rtm_type != RTM_ADD)
+			|| (rtm->rtm_type != RTM_ADD
+			&& rtm->rtm_type != RTM_GET))
 		{
 			continue;
 		}
@@ -887,13 +1025,13 @@ namespace libtorrent {
 		ip_route r;
 		if (parse_route(s, rtm, &r)) ret.push_back(r);
 	}
-	close(s);
+	::close(s);
 
 #elif TORRENT_USE_GETIPFORWARDTABLE
 /*
 	move this to enum_net_interfaces
 		// Get GetAdaptersInfo() pointer
-		typedef DWORD (WINAPI *GetAdaptersInfo_t)(PIP_ADAPTER_INFO, PULONG);
+		using GetAdaptersInfo_t = DWORD (WINAPI*)(PIP_ADAPTER_INFO, PULONG);
 		GetAdaptersInfo_t GetAdaptersInfo = get_library_procedure<iphlpapi, GetAdaptersInfo_t>("GetAdaptersInfo");
 		if (GetAdaptersInfo == nullptr)
 		{
@@ -941,8 +1079,9 @@ namespace libtorrent {
 		free(adapter_info);
 */
 
-		typedef DWORD (WINAPI *GetIfEntry_t)(PMIB_IFROW pIfRow);
-		auto GetIfEntry = aux::get_library_procedure<aux::iphlpapi, GetIfEntry_t>("GetIfEntry");
+		using GetIfEntry_t = DWORD (WINAPI *)(PMIB_IFROW pIfRow);
+		auto GetIfEntry = aux::get_library_procedure<aux::iphlpapi, GetIfEntry_t>(
+			"GetIfEntry");
 
 		if (GetIfEntry == nullptr)
 		{
@@ -951,9 +1090,9 @@ namespace libtorrent {
 		}
 
 #if _WIN32_WINNT >= 0x0600
-		typedef DWORD (WINAPI *GetIpForwardTable2_t)(
+		using GetIpForwardTable2_t = DWORD (WINAPI *)(
 			ADDRESS_FAMILY, PMIB_IPFORWARD_TABLE2*);
-		typedef void (WINAPI *FreeMibTable_t)(PVOID Memory);
+		using FreeMibTable_t = void (WINAPI *)(PVOID Memory);
 
 		auto GetIpForwardTable2 = aux::get_library_procedure<aux::iphlpapi, GetIpForwardTable2_t>("GetIpForwardTable2");
 		auto FreeMibTable = aux::get_library_procedure<aux::iphlpapi, FreeMibTable_t>("FreeMibTable");
@@ -976,6 +1115,7 @@ namespace libtorrent {
 					if (GetIfEntry(&ifentry) == NO_ERROR)
 					{
 						wcstombs(r.name, ifentry.wszName, sizeof(r.name));
+						r.name[sizeof(r.name) - 1] = 0;
 						r.mtu = ifentry.dwMtu;
 						ret.push_back(r);
 					}
@@ -987,7 +1127,7 @@ namespace libtorrent {
 #endif
 
 		// Get GetIpForwardTable() pointer
-		typedef DWORD (WINAPI *GetIpForwardTable_t)(PMIB_IPFORWARDTABLE pIpForwardTable,PULONG pdwSize,BOOL bOrder);
+		using GetIpForwardTable_t = DWORD (WINAPI*)(PMIB_IPFORWARDTABLE pIpForwardTable,PULONG pdwSize,BOOL bOrder);
 
 		auto GetIpForwardTable = aux::get_library_procedure<aux::iphlpapi, GetIpForwardTable_t>("GetIpForwardTable");
 		if (GetIpForwardTable == nullptr)
@@ -1024,7 +1164,7 @@ namespace libtorrent {
 				if (GetIfEntry(&ifentry) == NO_ERROR)
 				{
 					wcstombs(r.name, ifentry.wszName, sizeof(r.name));
-					r.name[sizeof(r.name)-1] = 0;
+					r.name[sizeof(r.name) - 1] = 0;
 					r.mtu = ifentry.dwMtu;
 					ret.push_back(r);
 				}
@@ -1034,9 +1174,7 @@ namespace libtorrent {
 		// Free memory
 		free(routes);
 #elif TORRENT_USE_NETLINK
-		enum { BUFSIZE = 8192 };
-
-		int sock = socket(PF_ROUTE, SOCK_DGRAM, NETLINK_ROUTE);
+		int sock = ::socket(PF_ROUTE, SOCK_DGRAM, NETLINK_ROUTE);
 		if (sock < 0)
 		{
 			ec = error_code(errno, system_category());
@@ -1045,31 +1183,17 @@ namespace libtorrent {
 
 		std::uint32_t seq = 0;
 
-		char msg[BUFSIZE] = {};
+		char msg[NL_BUFSIZE] = {};
 		nlmsghdr* nl_msg = reinterpret_cast<nlmsghdr*>(msg);
-
-		nl_msg->nlmsg_len = NLMSG_LENGTH(sizeof(rtmsg));
-		nl_msg->nlmsg_type = RTM_GETROUTE;
-		nl_msg->nlmsg_flags = NLM_F_DUMP | NLM_F_REQUEST;
-		nl_msg->nlmsg_seq = seq++;
-		nl_msg->nlmsg_pid = std::uint32_t(getpid());
-
-		if (send(sock, nl_msg, nl_msg->nlmsg_len, 0) < 0)
-		{
-			ec = error_code(errno, system_category());
-			close(sock);
-			return std::vector<ip_route>();
-		}
-
-		int len = read_nl_sock(sock, msg, BUFSIZE, seq, getpid());
+		int len = nl_dump_request(sock, RTM_GETROUTE, seq++, AF_UNSPEC, msg, sizeof(rtmsg));
 		if (len < 0)
 		{
 			ec = error_code(errno, system_category());
-			close(sock);
+			::close(sock);
 			return std::vector<ip_route>();
 		}
 
-		int s = socket(AF_INET, SOCK_DGRAM, 0);
+		int s = ::socket(AF_INET, SOCK_DGRAM, 0);
 		if (s < 0)
 		{
 			ec = error_code(errno, system_category());
@@ -1089,8 +1213,8 @@ namespace libtorrent {
 #ifdef __clang__
 #pragma clang diagnostic pop
 #endif
-		close(s);
-		close(sock);
+		::close(s);
+		::close(sock);
 
 #endif
 		return ret;

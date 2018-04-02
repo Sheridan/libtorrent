@@ -50,9 +50,8 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <boost/crc.hpp>
 #include "libtorrent/aux_/disable_warnings_pop.hpp"
 
-using namespace libtorrent;
+using namespace lt;
 using namespace sim;
-namespace lt = libtorrent;
 namespace io = lt::detail;
 
 using chrono::duration_cast;
@@ -87,6 +86,13 @@ struct sim_config : sim::default_config
 			return duration_cast<chrono::high_resolution_clock::duration>(chrono::milliseconds(100));
 		}
 
+		if (hostname == "dual-stack.test-hostname.com")
+		{
+			result.push_back(address_v4::from_string("10.0.0.2"));
+			result.push_back(address_v6::from_string("ff::dead:beef"));
+			return duration_cast<chrono::high_resolution_clock::duration>(chrono::milliseconds(100));
+		}
+
 		return default_config::hostname_lookup(requestor, hostname, result, ec);
 	}
 };
@@ -114,8 +120,8 @@ std::shared_ptr<http_connection> test_request(io_service& ios
 	, resolver& res
 	, std::string const& url
 	, char const* expected_data
-	, int expected_size
-	, int expected_status
+	, int const expected_size
+	, int const expected_status
 	, error_condition expected_error
 	, lt::aux::proxy_settings const& ps
 	, int* connect_handler_called
@@ -127,7 +133,7 @@ std::shared_ptr<http_connection> test_request(io_service& ios
 	auto h = std::make_shared<http_connection>(ios
 		, res
 		, [=](error_code const& ec, http_parser const& parser
-			, char const* data, const int size, http_connection&)
+			, span<char const> data, http_connection&)
 		{
 			std::printf("RESPONSE: %s\n", url.c_str());
 			++*handler_called;
@@ -150,7 +156,7 @@ std::shared_ptr<http_connection> test_request(io_service& ios
 			const int http_status = parser.status_code();
 			if (expected_size != -1)
 			{
-				TEST_EQUAL(size, expected_size);
+				TEST_EQUAL(int(data.size()), expected_size);
 			}
 			TEST_CHECK(error_ok);
 			if (expected_status != -1)
@@ -160,8 +166,8 @@ std::shared_ptr<http_connection> test_request(io_service& ios
 			if (http_status == 200)
 			{
 				TEST_CHECK(expected_data
-					&& size == expected_size
-					&& memcmp(expected_data, data, size) == 0);
+					&& int(data.size()) == expected_size
+					&& memcmp(expected_data, data.data(), data.size()) == 0);
 			}
 		}
 		, true, 1024*1024
@@ -172,8 +178,8 @@ std::shared_ptr<http_connection> test_request(io_service& ios
 			std::printf("CONNECTED: %s\n", url.c_str());
 		});
 
-	h->get(url, seconds(1), 0, &ps, 5, "test/user-agent", address_v4::any()
-		, 0, auth);
+	h->get(url, seconds(1), 0, &ps, 5, "test/user-agent", boost::none
+		, resolver_flags{}, auth);
 	return h;
 }
 
@@ -229,8 +235,12 @@ void run_suite(lt::aux::proxy_settings ps)
 	if (ps.type != settings_pack::socks5
 		&& ps.type != settings_pack::http)
 	{
+		const auto expected_code = ps.type == settings_pack::socks4 ?
+			boost::system::errc::address_family_not_supported :
+			boost::system::errc::address_not_available;
+
 		run_test(ps, "http://[ff::dead:beef]:8080/test_file", 0, -1
-			, error_condition(boost::system::errc::address_family_not_supported, generic_category())
+			, error_condition(expected_code, generic_category())
 			, {0,1});
 	}
 
@@ -442,6 +452,102 @@ TORRENT_TEST(http_connection_socks5_proxy_names)
 	run_suite(ps);
 }
 
+// tests the error scenario of a http server listening on two sockets (ipv4/ipv6) which
+// both accept the incoming connection but never send anything back. we test that
+// both ip addresses get tried in turn and that the connection attempts time out as expected.
+TORRENT_TEST(http_connection_timeout_server_stalls)
+{
+	sim_config network_cfg;
+	sim::simulation sim{network_cfg};
+	// server has two ip addresses (ipv4/ipv6)
+	sim::asio::io_service server_ios(sim, address_v4::from_string("10.0.0.2"));
+	sim::asio::io_service server_ios_ipv6(sim, address_v6::from_string("ff::dead:beef"));
+	// same for client
+	sim::asio::io_service client_ios(sim, {
+		address_v4::from_string("10.0.0.1"),
+		address_v6::from_string("ff::abad:cafe")
+	});
+	lt::resolver resolver(client_ios);
+
+	const unsigned short http_port = 8080;
+	sim::http_server http(server_ios, http_port);
+	sim::http_server http_ipv6(server_ios_ipv6, http_port);
+
+	http.register_stall_handler("/timeout");
+	http_ipv6.register_stall_handler("/timeout");
+
+	char data_buffer[4000];
+	std::generate(data_buffer, data_buffer + sizeof(data_buffer), &std::rand);
+
+	int connect_counter = 0;
+	int handler_counter = 0;
+
+	error_condition timed_out(boost::system::errc::timed_out, boost::system::generic_category());
+
+	auto c = test_request(client_ios, resolver
+		, "http://dual-stack.test-hostname.com:8080/timeout", data_buffer, -1, -1
+		, timed_out, lt::aux::proxy_settings()
+		, &connect_counter, &handler_counter);
+
+	error_code e;
+	sim.run(e);
+	TEST_CHECK(!e);
+	TEST_EQUAL(connect_counter, 2); // both endpoints are connected to
+	TEST_EQUAL(handler_counter, 1); // the handler only gets called once with error_code == timed_out
+}
+
+// tests the error scenario of a http server listening on two sockets (ipv4/ipv6) neither of which
+// accept incoming connections. we test that both ip addresses get tried in turn and that the
+// connection attempts time out as expected.
+TORRENT_TEST(http_connection_timeout_server_does_not_accept)
+{
+	sim_config network_cfg;
+	sim::simulation sim{network_cfg};
+	// server has two ip addresses (ipv4/ipv6)
+	sim::asio::io_service server_ios(sim, {
+		address_v4::from_string("10.0.0.2"),
+		address_v6::from_string("ff::dead:beef")
+	});
+	// same for client
+	sim::asio::io_service client_ios(sim, {
+		address_v4::from_string("10.0.0.1"),
+		address_v6::from_string("ff::abad:cafe")
+	});
+	lt::resolver resolver(client_ios);
+
+	const unsigned short http_port = 8080;
+
+	// listen on two sockets, but don't accept connections
+	asio::ip::tcp::acceptor server_socket_ipv4(server_ios);
+	server_socket_ipv4.open(tcp::v4());
+	server_socket_ipv4.bind(tcp::endpoint(address_v4::any(), http_port));
+	server_socket_ipv4.listen();
+
+	asio::ip::tcp::acceptor server_socket_ipv6(server_ios);
+	server_socket_ipv6.open(tcp::v6());
+	server_socket_ipv6.bind(tcp::endpoint(address_v6::any(), http_port));
+	server_socket_ipv6.listen();
+
+	int connect_counter = 0;
+	int handler_counter = 0;
+
+	error_condition timed_out(boost::system::errc::timed_out, boost::system::generic_category());
+
+	char data_buffer[4000];
+	std::generate(data_buffer, data_buffer + sizeof(data_buffer), &std::rand);
+
+	auto c = test_request(client_ios, resolver
+		, "http://dual-stack.test-hostname.com:8080/timeout_server_does_not_accept", data_buffer, -1, -1
+		, timed_out, lt::aux::proxy_settings()
+		, &connect_counter, &handler_counter);
+
+	error_code e;
+	sim.run(e);
+	TEST_CHECK(!e);
+	TEST_EQUAL(connect_counter, 0); // no connection takes place
+	TEST_EQUAL(handler_counter, 1); // the handler only gets called once with error_code == timed_out
+}
+
 void test_proxy_failure(lt::settings_pack::proxy_type_t proxy_type)
 {
 	using sim::asio::ip::address_v4;
@@ -494,6 +600,53 @@ TORRENT_TEST(http_connection_socks_error)
 TORRENT_TEST(http_connection_http_error)
 {
 	test_proxy_failure(settings_pack::http);
+}
+
+// Requests a proxied SSL connection. This test just ensures that the correct CONNECT request
+// is sent to the proxy server.
+TORRENT_TEST(http_connection_ssl_proxy)
+{
+	using sim::asio::ip::address_v4;
+	sim_config network_cfg;
+	sim::simulation sim{network_cfg};
+
+	sim::asio::io_service client_ios(sim, address_v4::from_string("10.0.0.1"));
+	sim::asio::io_service proxy_ios(sim, address_v4::from_string("50.50.50.50"));
+	lt::resolver res(client_ios);
+
+	sim::http_server http_proxy(proxy_ios, 4445);
+
+	lt::aux::proxy_settings ps = make_proxy_settings(settings_pack::http);
+
+	int client_counter = 0;
+	int proxy_counter = 0;
+
+	http_proxy.register_handler("10.0.0.2:8080"
+		, [&proxy_counter](std::string method, std::string req, std::map<std::string, std::string>& headers)
+		{
+			proxy_counter++;
+			TEST_EQUAL(method, "CONNECT");
+			return sim::send_response(403, "Not supported", 1337);
+		});
+
+	auto h = std::make_shared<http_connection>(client_ios
+		, res
+		, [&client_counter](error_code const& ec, http_parser const& parser
+		, span<char const>, http_connection& c)
+		{
+			client_counter++;
+			TEST_EQUAL(ec, boost::asio::error::operation_not_supported);
+		});
+
+	h->start("10.0.0.2", 8080, seconds(1), 0, &ps, true /*ssl*/);
+
+	error_code e;
+	sim.run(e);
+
+	TEST_EQUAL(client_counter, 1);
+	TEST_EQUAL(proxy_counter, 1);
+	if (e) std::cerr << " run failed: " << e.message() << std::endl;
+	TEST_EQUAL(e, error_code());
 }
 
 // TODO: test http proxy with password
